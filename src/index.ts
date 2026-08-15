@@ -285,6 +285,7 @@ export async function syncPresetFiles(ctx: Context): Promise<number> {
 
 interface Deps {
   ctx: Context
+  caches: DomainCaches
 }
 
 function resolveAgent(ctx: Context, sessionId: string | undefined) {
@@ -312,21 +313,14 @@ function baseView(
   return { sessionId: agent ? agent.id : null, preset, cwd: cwd ?? null }
 }
 
-async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<McpView> {
-  const { ctx } = deps
-  const errors: string[] = []
-  const agent = resolveAgent(ctx, sessionId)
-  const scopeKey = agent ? scopeOf(agent.ctx) : undefined
-  const cwd = agent?.session?.header?.cwd ?? undefined
+/** MCP 工具聚合结果：per-server 工具数 + token 估算。tools/change 间隙复用，跳过 schemas 深克隆。 */
+interface McpAggregate {
+  byServer: Map<string, { tools: number; tokens: number }>
+  mcpToolsTotal: number
+  mcpTokensTotal: number
+}
 
-  let schemas: Array<{ name?: string; parameters?: unknown }> = []
-  try {
-    schemas = scopeKey ? ctx.tools.schemas(scopeKey) : ctx.tools.schemas()
-  } catch (error) {
-    errors.push(`tools.schemas: ${messageOf(error)}`)
-  }
-
-  // MCP：loader 行 × schema 聚合
+function computeAggregate(schemas: Array<{ name?: string; parameters?: unknown }>): McpAggregate {
   const byServer = new Map<string, { tools: number; tokens: number }>()
   let mcpToolsTotal = 0
   let mcpTokensTotal = 0
@@ -340,6 +334,43 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
     mcpToolsTotal += 1
     mcpTokensTotal += tokenEstimate(schema.parameters)
   }
+  return { byServer, mcpToolsTotal, mcpTokensTotal }
+}
+
+/**
+ * 按 scope 复用的 MCP 聚合缓存（C 项优化）：tools.schemas 深克隆 300+ 工具是
+ * collectMcp 最重的一步；聚合结果在 tools/change 事件间隙直接复用，
+ * TTL 只是事件丢失时的兜底。key = scopeKey（null 表示全局视图）。
+ */
+function getMcpAggregate(
+  ctx: Context,
+  caches: DomainCaches,
+  scopeKey: object | undefined,
+  errors: string[],
+): McpAggregate {
+  const key = scopeKey ?? null
+  const hit = caches.mcpAggregates.get(key)
+  if (hit && Date.now() - hit.at < DOMAIN_TTL_MS) return hit.value
+  let schemas: Array<{ name?: string; parameters?: unknown }> = []
+  try {
+    schemas = scopeKey ? ctx.tools.schemas(scopeKey) : ctx.tools.schemas()
+  } catch (error) {
+    errors.push(`tools.schemas: ${messageOf(error)}`)
+  }
+  const value = computeAggregate(schemas)
+  caches.mcpAggregates.set(key, { at: Date.now(), value })
+  return value
+}
+
+async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<McpView> {
+  const { ctx } = deps
+  const errors: string[] = []
+  const agent = resolveAgent(ctx, sessionId)
+  const scopeKey = agent ? scopeOf(agent.ctx) : undefined
+  const cwd = agent?.session?.header?.cwd ?? undefined
+
+  // MCP：loader 行 × schema 聚合（聚合结果版本化复用）
+  const { byServer, mcpToolsTotal, mcpTokensTotal } = getMcpAggregate(ctx, deps.caches, scopeKey, errors)
 
   const mcp: McpEntryView[] = []
   try {
@@ -534,7 +565,7 @@ export function makeRoutes(
   path: string
   handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void
 }> {
-  const deps: Deps = { ctx }
+  const deps: Deps = { ctx, caches }
   const { mcpCache, skillsCache, invalidateMcp, invalidateSkills } = caches
 
   const cachedMcp = (sessionId: string | undefined) => {
@@ -640,6 +671,8 @@ export function makeRoutes(
 interface DomainCaches {
   mcpCache: Map<string, { at: number; promise: Promise<McpView> }>
   skillsCache: Map<string, { at: number; promise: Promise<SkillsView> }>
+  /** MCP 工具聚合缓存（per scope），tools/change 时随 mcpCache 一起清 */
+  mcpAggregates: Map<object | null, { at: number; value: McpAggregate }>
   invalidateMcp: () => void
   invalidateSkills: () => void
 }
@@ -647,10 +680,15 @@ interface DomainCaches {
 function createDomainCaches(): DomainCaches {
   const mcpCache = new Map<string, { at: number; promise: Promise<McpView> }>()
   const skillsCache = new Map<string, { at: number; promise: Promise<SkillsView> }>()
+  const mcpAggregates = new Map<object | null, { at: number; value: McpAggregate }>()
   return {
     mcpCache,
     skillsCache,
-    invalidateMcp: () => mcpCache.clear(),
+    mcpAggregates,
+    invalidateMcp: () => {
+      mcpCache.clear()
+      mcpAggregates.clear()
+    },
     invalidateSkills: () => skillsCache.clear(),
   }
 }

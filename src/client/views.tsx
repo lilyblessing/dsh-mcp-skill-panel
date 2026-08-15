@@ -221,27 +221,39 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<Record<string, boolean>>({})
 
-  // 分域加载：MCP tab 只拉 MCP 数据（不触发 skill 目录发现），切 tab 时按需刷新
+  // 分域加载：MCP tab 只拉 MCP 数据（不触发 skill 目录发现），切 tab 时按需刷新。
+  // 乱序防护：自增序号，过期响应直接丢弃（快速连点多个开关时慢响应不会覆盖新状态）。
+  const mcpSeq = React.useRef(0)
+  const skillsSeq = React.useRef(0)
+
   const loadMcp = useCallback(() => {
+    const seq = ++mcpSeq.current
     setError(null)
     fetch('/api/runtime-inventory/state?part=mcp')
       .then((res) => res.json() as Promise<{ ok: boolean; state?: McpView; error?: string }>)
       .then((body) => {
         if (!body.ok || !body.state) throw new Error(body.error ?? 'bad response')
+        if (seq !== mcpSeq.current) return
         setMcp(body.state)
       })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+      .catch((err: unknown) => {
+        if (seq === mcpSeq.current) setError(err instanceof Error ? err.message : String(err))
+      })
   }, [])
 
   const loadSkills = useCallback(() => {
+    const seq = ++skillsSeq.current
     setError(null)
     fetch('/api/runtime-inventory/state?part=skills')
       .then((res) => res.json() as Promise<{ ok: boolean; state?: SkillsView; error?: string }>)
       .then((body) => {
         if (!body.ok || !body.state) throw new Error(body.error ?? 'bad response')
+        if (seq !== skillsSeq.current) return
         setSkills(body.state)
       })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+      .catch((err: unknown) => {
+        if (seq === skillsSeq.current) setError(err instanceof Error ? err.message : String(err))
+      })
   }, [])
 
   useEffect(() => {
