@@ -68,4 +68,4 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 
 ## 许可
 
-BSD-3-Clause
+MIT（与上游 deepseek-harness 一致）
