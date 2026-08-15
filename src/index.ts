@@ -43,7 +43,9 @@ export const Config: Schema<Config> = Schema.object({
   cacheTtlMs: Schema.number().min(0),
 })
 
-const API_PREFIX = '/api/runtime-inventory'
+const API_PREFIX = '/api/mcp-skill-panel'
+/** 旧前缀（0.3.1 及以前为 /api/runtime-inventory），保留兼容 */
+const LEGACY_API_PREFIX = '/api/runtime-inventory'
 const DISABLE_KEY = 'disable-model-invocation'
 /** 分域缓存 TTL：事件驱动失效为主，TTL 只是兜底（事件丢失场景） */
 const DOMAIN_TTL_MS = 60_000
@@ -592,7 +594,11 @@ export function makeRoutes(
     return promise
   }
 
-  return [
+  const routes: Array<{
+    kind: 'exact'
+    path: string
+    handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void
+  }> = [
     {
       kind: 'exact',
       path: `${API_PREFIX}/state`,
@@ -662,6 +668,14 @@ export function makeRoutes(
           .catch((error) => json(res, 400, { ok: false, error: messageOf(error) }))
       },
     },
+  ]
+  // 旧前缀兼容（0.3.1 及以前）：同一组路由在新旧前缀下都注册
+  return [
+    ...routes,
+    ...routes.map((route) => ({
+      ...route,
+      path: route.path.replace(API_PREFIX, LEGACY_API_PREFIX),
+    })),
   ]
 }
 

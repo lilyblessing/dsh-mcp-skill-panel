@@ -1,6 +1,6 @@
 {
   "name": "dsh-mcp-skill-panel",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "MCP 与技能管理面板：设置页展示 MCP 服务器与 Skill 目录，随时启停以释放上下文占用。",
   "type": "module",
   "main": "./lib/index.js",

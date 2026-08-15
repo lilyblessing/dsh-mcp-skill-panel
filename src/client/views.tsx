@@ -229,7 +229,7 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
   const loadMcp = useCallback(() => {
     const seq = ++mcpSeq.current
     setError(null)
-    fetch('/api/runtime-inventory/state?part=mcp')
+    fetch('/api/mcp-skill-panel/state?part=mcp')
       .then((res) => res.json() as Promise<{ ok: boolean; state?: McpView; error?: string }>)
       .then((body) => {
         if (!body.ok || !body.state) throw new Error(body.error ?? 'bad response')
@@ -244,7 +244,7 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
   const loadSkills = useCallback(() => {
     const seq = ++skillsSeq.current
     setError(null)
-    fetch('/api/runtime-inventory/state?part=skills')
+    fetch('/api/mcp-skill-panel/state?part=skills')
       .then((res) => res.json() as Promise<{ ok: boolean; state?: SkillsView; error?: string }>)
       .then((body) => {
         if (!body.ok || !body.state) throw new Error(body.error ?? 'bad response')
