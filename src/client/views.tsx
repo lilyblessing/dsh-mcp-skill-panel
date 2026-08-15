@@ -1,5 +1,5 @@
 /**
- * 运行时清单设置页：MCP 服务器 / 技能 双标签页，统计头 + 卡片 + 启停开关。
+ * MCP 与技能管理面板：MCP 服务器 / 技能 双标签页，统计头 + 卡片 + 启停开关。
  * 样式全部 JS 内联（宿主全局 CSS 可能覆盖注入的 class），颜色走 --dsw-alias-* 主题变量。
  */
 import React, { useCallback, useEffect, useState } from 'react'
@@ -230,7 +230,7 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
   }, [load, rev])
 
   const post = useCallback(
-    (path: string, payload: Record<string, unknown>, key: string) => {
+    (path: string, payload: Record<string, unknown>, key: string, optimistic?: (s: RuntimeState) => RuntimeState) => {
       setBusy((prev) => ({ ...prev, [key]: true }))
       setError(null)
       fetch(path, {
@@ -241,6 +241,8 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
         .then((res) => res.json() as Promise<{ ok: boolean; error?: string }>)
         .then((body) => {
           if (!body.ok) throw new Error(body.error ?? 'toggle failed')
+          // 乐观更新：立即翻转目标卡片，后台静默刷新兜底（skill 的 watcher 生效有延迟）
+          if (optimistic) setState((prev) => (prev ? optimistic(prev) : prev))
           setRev((r) => r + 1)
         })
         .catch((err: unknown) => {
@@ -257,7 +259,20 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
   }
 
   const toggleSkill = (row: SkillRow) => {
-    post('/api/runtime-inventory/skill/toggle', { name: row.name, disabled: row.modelInvocable }, `skill:${row.name}`)
+    post(
+      '/api/runtime-inventory/skill/toggle',
+      { name: row.name, disabled: row.modelInvocable },
+      `skill:${row.name}`,
+      (prev) => ({
+        ...prev,
+        skills: prev.skills.map((s) =>
+          s.name === row.name
+            ? { ...s, modelInvocable: !row.modelInvocable, userInvocable: s.userInvocable }
+            : s,
+        ),
+        skillsModelVisible: prev.skillsModelVisible + (row.modelInvocable ? -1 : 1),
+      }),
+    )
   }
 
   const mcpStatus = (row: McpRow): { label: string; color: string; bg: string } => {

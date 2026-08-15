@@ -35,7 +35,7 @@ export default defineConfig([
     outputOptions: {
       entryFileNames: 'client.js',
       banner: `window.__ModuleLoader__.load({
-\tid: "dsh-runtime-inventory",
+\tid: "dsh-mcp-skill-panel",
 \tfactory: (require) => {
 \t\tvar module = { exports: {} };
 \t\tvar exports = module.exports;

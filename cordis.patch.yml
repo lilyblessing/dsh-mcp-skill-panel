@@ -1,4 +1,4 @@
-# dsh-runtime-inventory bundle patch：把插件挂进 profile
+# dsh-mcp-skill-panel bundle patch：把插件挂进 profile
 - insert:
     - id: runtime-inventory
-      name: 'dsh-runtime-inventory'
+      name: 'dsh-mcp-skill-panel'

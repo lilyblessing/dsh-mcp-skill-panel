@@ -1,5 +1,5 @@
 /**
- * Client 半区入口：注册 settings.section「运行时清单」页（MCP / 技能 双标签）。
+ * Client 半区入口：注册 settings.section「MCP 与技能管理面板」页（MCP / 技能 双标签）。
  * 参考 ui-settings-plugins 的 settings.section 注册形态（id/order/label/locale 必带）。
  */
 import { RuntimeInventorySection } from './views'

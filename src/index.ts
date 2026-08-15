@@ -1,7 +1,7 @@
 /**
- * dsh-runtime-inventory — Host 半区
+ * dsh-mcp-skill-panel — Host 半区
  *
- * 设置页「运行时清单」的数据与控制面：
+ * 设置页「MCP 与技能管理面板」的数据与控制面：
  * - MCP 页：枚举 loader 预设子树中的 mcp-* 行 + tools.schemas(scope) 聚合工具数/token，
  *   启停 = loader entry.update({disabled})（实时生效）。
  * - Skill 页：skills.snapshot/get 枚举目录，启停 = SKILL.md frontmatter
@@ -46,6 +46,14 @@ export const Config: Schema<Config> = Schema.object({
 const API_PREFIX = '/api/runtime-inventory'
 const DISABLE_KEY = 'disable-model-invocation'
 const DEFAULT_TTL_MS = 30_000
+/** skill toggle 后等待 watcher 失效 catalog 的最长时间 */
+const SKILL_TOGGLE_CONFIRM_MS = 5_000
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
 
 interface McpEntryView {
   entryId: string
@@ -170,7 +178,8 @@ export function rowDisabledState(text: string, rowId: string): boolean | null {
 
 /* ── MCP 持久化（状态文件 + 启动早期物化，v0.1.1） ─────────────────────── */
 
-const STATE_DIR = join(homedir(), '.dsh', 'dsh-runtime-inventory')
+const LEGACY_STATE_DIR = join(homedir(), '.dsh', 'dsh-runtime-inventory')
+const STATE_DIR = join(homedir(), '.dsh', 'dsh-mcp-skill-panel')
 const STATE_FILE = join(STATE_DIR, 'state.json')
 
 /** 每个预设文件（key=文件绝对路径）→ 每个 mcp 行 → 意图与上次物化状态。 */
@@ -187,7 +196,16 @@ async function readState(): Promise<StateFile> {
   try {
     return JSON.parse(await readFile(STATE_FILE, 'utf8')) as StateFile
   } catch {
-    return {}
+    // 0.2.0 改名迁移：旧状态目录（dsh-runtime-inventory）有数据则搬过来
+    try {
+      const legacy = join(LEGACY_STATE_DIR, 'state.json')
+      const text = await readFile(legacy, 'utf8')
+      await mkdir(STATE_DIR, { recursive: true })
+      await rename(legacy, STATE_FILE)
+      return JSON.parse(text) as StateFile
+    } catch {
+      return {}
+    }
   }
 }
 
@@ -422,7 +440,19 @@ async function toggleSkill(deps: Deps, skillName: string, disabled: boolean, ses
   const text = await readFile(def.path, 'utf8')
   const next = setSkillFlag(text, disabled)
   if (next !== text) await writeFile(def.path, next, 'utf8')
-  return { name: skillName, disabled, modelInvocable: !disabled, path: def.path }
+  // 写文件后轮询确认 catalog 已生效（skill-filesystem 的 watcher 异步失效）。
+  // 让响应即真相，前端无需等下一轮全量刷新才看到新状态。
+  const deadline = Date.now() + SKILL_TOGGLE_CONFIRM_MS
+  let confirmed = false
+  while (Date.now() < deadline) {
+    const after = await ctx.skills.get(skillName, { scope: agent, cwd })
+    if (after && after.invocation?.modelInvocable === !disabled) {
+      confirmed = true
+      break
+    }
+    await delay(80)
+  }
+  return { name: skillName, disabled, modelInvocable: !disabled, path: def.path, confirmed }
 }
 
 /* ── HTTP 路由 ────────────────────────────────────────────────────────── */

@@ -2,7 +2,7 @@
 export const NS = 'runtime-inventory'
 
 export const en: Record<string, string> = {
-  'ri.nav': 'Runtime Inventory',
+  'ri.nav': 'MCP & Skill Manager',
   'ri.mcpTab': 'MCP Servers',
   'ri.skillTab': 'Skills',
   'ri.refresh': 'Refresh',
@@ -44,7 +44,7 @@ export const en: Record<string, string> = {
 }
 
 export const zh: Record<string, string> = {
-  'ri.nav': '运行时清单',
+  'ri.nav': 'MCP 与技能管理面板',
   'ri.mcpTab': 'MCP 服务器',
   'ri.skillTab': '技能',
   'ri.refresh': '刷新',
