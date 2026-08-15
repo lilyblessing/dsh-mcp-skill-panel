@@ -35,7 +35,7 @@ export const name = 'runtime-inventory'
 export const inject = ['fs', 'skills', 'tools', 'agents', 'agentPresets', 'loader']
 
 export interface Config {
-  /** 状态缓存 TTL（毫秒），默认 30_000 */
+  /** @deprecated 0.3.0 起分域缓存由事件驱动失效，TTL 为常量；保留字段仅为向后兼容 */
   cacheTtlMs?: number
 }
 
@@ -45,7 +45,8 @@ export const Config: Schema<Config> = Schema.object({
 
 const API_PREFIX = '/api/runtime-inventory'
 const DISABLE_KEY = 'disable-model-invocation'
-const DEFAULT_TTL_MS = 30_000
+/** 分域缓存 TTL：事件驱动失效为主，TTL 只是兜底（事件丢失场景） */
+const DOMAIN_TTL_MS = 60_000
 /** skill toggle 后等待 watcher 失效 catalog 的最长时间 */
 const SKILL_TOGGLE_CONFIRM_MS = 5_000
 /** 已确认的 skill 状态在 collectState 中覆盖 snapshot 旧值的有效期 */
@@ -85,7 +86,7 @@ interface SkillView {
   path?: string
 }
 
-export interface RuntimeState {
+export interface McpView {
   sessionId: string | null
   preset: string | null
   cwd: string | null
@@ -94,11 +95,21 @@ export interface RuntimeState {
   mcpDisabled: number
   mcpToolsTotal: number
   mcpTokensTotal: number
+  errors: string[]
+}
+
+export interface SkillsView {
+  sessionId: string | null
+  preset: string | null
+  cwd: string | null
   skills: SkillView[]
   skillsTotal: number
   skillsModelVisible: number
   errors: string[]
 }
+
+/** part=all（缺省）时的完整响应 */
+export type RuntimeState = McpView & SkillsView
 
 /* ── 工具函数 ──────────────────────────────────────────────────────────── */
 
@@ -274,7 +285,6 @@ export async function syncPresetFiles(ctx: Context): Promise<number> {
 
 interface Deps {
   ctx: Context
-  cacheTtlMs: number
 }
 
 function resolveAgent(ctx: Context, sessionId: string | undefined) {
@@ -288,7 +298,21 @@ function resolveAgent(ctx: Context, sessionId: string | undefined) {
   return ctx.agents.list()[0]
 }
 
-async function collectState(deps: Deps, sessionId: string | undefined): Promise<RuntimeState> {
+function baseView(
+  ctx: Context,
+  agent: ReturnType<typeof resolveAgent>,
+  cwd: string | undefined,
+): Pick<McpView, 'sessionId' | 'preset' | 'cwd'> {
+  let preset: string | null = null
+  try {
+    if (agent) preset = ctx.agentPresets.composedPreset(agent.ctx) ?? null
+  } catch {
+    preset = null
+  }
+  return { sessionId: agent ? agent.id : null, preset, cwd: cwd ?? null }
+}
+
+async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<McpView> {
   const { ctx } = deps
   const errors: string[] = []
   const agent = resolveAgent(ctx, sessionId)
@@ -357,6 +381,23 @@ async function collectState(deps: Deps, sessionId: string | undefined): Promise<
   }
   mcp.sort((a, b) => a.serverName.localeCompare(b.serverName))
 
+  return {
+    ...baseView(ctx, agent, cwd),
+    mcp,
+    mcpTotal: mcp.length,
+    mcpDisabled: mcp.filter((row) => row.disabled).length,
+    mcpToolsTotal,
+    mcpTokensTotal,
+    errors,
+  }
+}
+
+async function collectSkills(deps: Deps, sessionId: string | undefined): Promise<SkillsView> {
+  const { ctx } = deps
+  const errors: string[] = []
+  const agent = resolveAgent(ctx, sessionId)
+  const cwd = agent?.session?.header?.cwd ?? undefined
+
   // Skills
   const skills: SkillView[] = []
   let skillsModelVisible = 0
@@ -365,7 +406,7 @@ async function collectState(deps: Deps, sessionId: string | undefined): Promise<
     for (const summary of snapshot.skills) {
       // toggle 确认值覆盖：snapshot 的 candidate 缓存可能落后于 watcher 失效
       // （skills.get 实时读文件已确认新值，snapshot 的发现缓存要等 watcher 200ms 生效）。
-      // 60s 内确认过的 skill 以确认值为准，避免 UI 翻回 + state 缓存钉住旧值 30s。
+      // 60s 内确认过的 skill 以确认值为准，避免 UI 翻回 + state 缓存钉住旧值。
       const confirmed = confirmedSkills.get(summary.name)
       const modelInvocable =
         confirmed && Date.now() - confirmed.at < CONFIRMED_SKILL_TTL_MS ? confirmed.modelInvocable : summary.invocation?.modelInvocable !== false
@@ -382,22 +423,8 @@ async function collectState(deps: Deps, sessionId: string | undefined): Promise<
     errors.push(`skills.snapshot: ${messageOf(error)}`)
   }
 
-  let preset: string | null = null
-  try {
-    if (agent) preset = ctx.agentPresets.composedPreset(agent.ctx) ?? null
-  } catch {
-    preset = null
-  }
-
   return {
-    sessionId: agent ? agent.id : null,
-    preset,
-    cwd: cwd ?? null,
-    mcp,
-    mcpTotal: mcp.length,
-    mcpDisabled: mcp.filter((row) => row.disabled).length,
-    mcpToolsTotal,
-    mcpTokensTotal,
+    ...baseView(ctx, agent, cwd),
     skills,
     skillsTotal: skills.length,
     skillsModelVisible,
@@ -500,34 +527,39 @@ function queryParam(url: string, key: string): string | undefined {
 
 export function makeRoutes(
   ctx: Context,
+  caches: DomainCaches,
   config: Config = {},
 ): Array<{
   kind: 'exact'
   path: string
   handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void
 }> {
-  const deps: Deps = { ctx, cacheTtlMs: config.cacheTtlMs ?? DEFAULT_TTL_MS }
-  const cache = new Map<string, { at: number; promise: Promise<RuntimeState> }>()
-  let stateVersion = 0
+  const deps: Deps = { ctx }
+  const { mcpCache, skillsCache, invalidateMcp, invalidateSkills } = caches
 
-  const state = (sessionId: string | undefined) => {
+  const cachedMcp = (sessionId: string | undefined) => {
     const key = sessionId ?? '*'
-    const cached = cache.get(key)
-    if (cached && Date.now() - cached.at < deps.cacheTtlMs) return cached.promise
-    const promise = collectState(deps, sessionId)
-      .then((value) => {
-        stateVersion += 1
-        return value
-      })
-      .catch((error) => {
-        cache.delete(key)
-        throw error
-      })
-    cache.set(key, { at: Date.now(), promise })
+    const hit = mcpCache.get(key)
+    if (hit && Date.now() - hit.at < DOMAIN_TTL_MS) return hit.promise
+    const promise = collectMcp(deps, sessionId).catch((error) => {
+      mcpCache.delete(key)
+      throw error
+    })
+    mcpCache.set(key, { at: Date.now(), promise })
     return promise
   }
 
-  const invalidate = () => cache.clear()
+  const cachedSkills = (sessionId: string | undefined) => {
+    const key = sessionId ?? '*'
+    const hit = skillsCache.get(key)
+    if (hit && Date.now() - hit.at < DOMAIN_TTL_MS) return hit.promise
+    const promise = collectSkills(deps, sessionId).catch((error) => {
+      skillsCache.delete(key)
+      throw error
+    })
+    skillsCache.set(key, { at: Date.now(), promise })
+    return promise
+  }
 
   return [
     {
@@ -538,11 +570,23 @@ export function makeRoutes(
           json(res, 405, { ok: false, error: 'method-not-allowed' })
           return
         }
-        const sessionId = queryParam(req.url ?? '', 'session')
-        state(sessionId).then(
-          (value) => json(res, 200, { ok: true, state: value }),
-          (error) => json(res, 500, { ok: false, error: messageOf(error) }),
-        )
+        const url = req.url ?? ''
+        const sessionId = queryParam(url, 'session')
+        const part = queryParam(url, 'part') ?? 'all'
+        const respond = (state: unknown) => json(res, 200, { ok: true, state })
+        const fail = (error: unknown) => json(res, 500, { ok: false, error: messageOf(error) })
+        if (part === 'mcp') {
+          cachedMcp(sessionId).then(respond, fail)
+          return
+        }
+        if (part === 'skills') {
+          cachedSkills(sessionId).then(respond, fail)
+          return
+        }
+        // all（缺省）：完整视图
+        Promise.all([cachedMcp(sessionId), cachedSkills(sessionId)])
+          .then(([mcp, skills]) => respond({ ...mcp, ...skills, errors: [...mcp.errors, ...skills.errors] }))
+          .catch(fail)
       },
     },
     {
@@ -560,7 +604,7 @@ export function makeRoutes(
             return toggleMcp(deps, parsed.entryId, Boolean(parsed.disabled))
           })
           .then((result) => {
-            invalidate()
+            invalidateMcp()
             json(res, 200, { ok: true, ...result })
           })
           .catch((error) => json(res, 400, { ok: false, error: messageOf(error) }))
@@ -581,7 +625,7 @@ export function makeRoutes(
             return toggleSkill(deps, parsed.name, Boolean(parsed.disabled), parsed.session)
           })
           .then((result) => {
-            invalidate()
+            invalidateSkills()
             json(res, 200, { ok: true, ...result })
           })
           .catch((error) => json(res, 400, { ok: false, error: messageOf(error) }))
@@ -591,6 +635,25 @@ export function makeRoutes(
 }
 
 /* ── 插件主体 ──────────────────────────────────────────────────────────── */
+
+/** 分域缓存句柄：apply 创建，makeRoutes 消费，事件失效由 apply 订阅。 */
+interface DomainCaches {
+  mcpCache: Map<string, { at: number; promise: Promise<McpView> }>
+  skillsCache: Map<string, { at: number; promise: Promise<SkillsView> }>
+  invalidateMcp: () => void
+  invalidateSkills: () => void
+}
+
+function createDomainCaches(): DomainCaches {
+  const mcpCache = new Map<string, { at: number; promise: Promise<McpView> }>()
+  const skillsCache = new Map<string, { at: number; promise: Promise<SkillsView> }>()
+  return {
+    mcpCache,
+    skillsCache,
+    invalidateMcp: () => mcpCache.clear(),
+    invalidateSkills: () => skillsCache.clear(),
+  }
+}
 
 export function apply(ctx: Context, config: Config = {}): void {
   // 启动早期物化 MCP 启停意图（仅当无会话在跑时；有会话则下次重启再物化）。
@@ -603,9 +666,28 @@ export function apply(ctx: Context, config: Config = {}): void {
       ctx.logger.warn(`runtime-inventory: preset sync skipped: ${messageOf(error)}`)
     },
   )
+
+  // 分域缓存 + 事件驱动失效。事件在 root ctx emit（tools/change 来自工具注册表、
+  // skills/change 来自 skill registry），必须挂 root 监听才能收到；用 ctx.effect
+  // 确保插件卸载时解除监听（root 上的监听不随 fiber 自动清理）。
+  const caches = createDomainCaches()
+  ctx.effect(
+    () => {
+      const offTools = ctx.root.on('tools/change', caches.invalidateMcp)
+      const offLoader = ctx.root.on('loader/partial-dispose', caches.invalidateMcp)
+      const offSkills = ctx.root.on('skills/change', caches.invalidateSkills)
+      return () => {
+        offTools()
+        offLoader()
+        offSkills()
+      }
+    },
+    'runtime-inventory: cache invalidation',
+  )
+
   ctx.inject(['webServer'], (httpCtx) => {
     httpCtx.effect(() => {
-      const routes = makeRoutes(httpCtx, config)
+      const routes = makeRoutes(httpCtx, caches, config)
       const disposers = routes.map((route) => httpCtx.webServer.register(route))
       return () => {
         for (const dispose of disposers) dispose()

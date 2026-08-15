@@ -44,9 +44,11 @@ dsh plugin --profile web add "github:lilyblessing/dsh-mcp-skill-panel#main"
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/runtime-inventory/state?session=<id>` | 清单快照（MCP + Skill），session 省略时取首个根 agent |
+| GET | `/api/runtime-inventory/state?session=<id>&part=<mcp\|skills\|all>` | 清单快照；`part` 分域拉取（前端按 tab 懒加载），缺省 all；session 省略时取首个根 agent |
 | POST | `/api/runtime-inventory/mcp/toggle` | `{ entryId, disabled }` |
 | POST | `/api/runtime-inventory/skill/toggle` | `{ name, disabled }` |
+
+分域缓存（60s TTL 兜底）由事件驱动精确失效：`tools/change` / `loader/partial-dispose` → MCP 域；`skills/change` → Skill 域。
 
 ## 已知限制
 

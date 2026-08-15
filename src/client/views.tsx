@@ -24,7 +24,7 @@ export interface SkillRow {
   userInvocable: boolean
 }
 
-export interface RuntimeState {
+export interface McpView {
   sessionId: string | null
   preset: string | null
   cwd: string | null
@@ -33,6 +33,13 @@ export interface RuntimeState {
   mcpDisabled: number
   mcpToolsTotal: number
   mcpTokensTotal: number
+  errors: string[]
+}
+
+export interface SkillsView {
+  sessionId: string | null
+  preset: string | null
+  cwd: string | null
   skills: SkillRow[]
   skillsTotal: number
   skillsModelVisible: number
@@ -209,28 +216,42 @@ function formatK(n: number): string {
 export function RuntimeInventorySection(props: Props): React.ReactElement {
   const { t } = props
   const [tab, setTab] = useState<'mcp' | 'skill'>('mcp')
-  const [state, setState] = useState<RuntimeState | null>(null)
+  const [mcp, setMcp] = useState<McpView | null>(null)
+  const [skills, setSkills] = useState<SkillsView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<Record<string, boolean>>({})
-  const [rev, setRev] = useState(0)
 
-  const load = useCallback(() => {
+  // 分域加载：MCP tab 只拉 MCP 数据（不触发 skill 目录发现），切 tab 时按需刷新
+  const loadMcp = useCallback(() => {
     setError(null)
-    fetch('/api/runtime-inventory/state')
-      .then((res) => res.json() as Promise<{ ok: boolean; state?: RuntimeState; error?: string }>)
+    fetch('/api/runtime-inventory/state?part=mcp')
+      .then((res) => res.json() as Promise<{ ok: boolean; state?: McpView; error?: string }>)
       .then((body) => {
         if (!body.ok || !body.state) throw new Error(body.error ?? 'bad response')
-        setState(body.state)
+        setMcp(body.state)
+      })
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+  }, [])
+
+  const loadSkills = useCallback(() => {
+    setError(null)
+    fetch('/api/runtime-inventory/state?part=skills')
+      .then((res) => res.json() as Promise<{ ok: boolean; state?: SkillsView; error?: string }>)
+      .then((body) => {
+        if (!body.ok || !body.state) throw new Error(body.error ?? 'bad response')
+        setSkills(body.state)
       })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
   }, [])
 
   useEffect(() => {
-    load()
-  }, [load, rev])
+    // 初次挂载与每次切 tab：服务端有 60s 分域缓存兜底，成本低，换来切换即新鲜
+    if (tab === 'mcp') loadMcp()
+    else loadSkills()
+  }, [tab, loadMcp, loadSkills])
 
   const post = useCallback(
-    (path: string, payload: Record<string, unknown>, key: string, optimistic?: (s: RuntimeState) => RuntimeState) => {
+    (path: string, payload: Record<string, unknown>, key: string, onOk: () => void) => {
       setBusy((prev) => ({ ...prev, [key]: true }))
       setError(null)
       fetch(path, {
@@ -241,21 +262,25 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
         .then((res) => res.json() as Promise<{ ok: boolean; error?: string }>)
         .then((body) => {
           if (!body.ok) throw new Error(body.error ?? 'toggle failed')
-          // 乐观更新：立即翻转目标卡片，后台静默刷新兜底（skill 的 watcher 生效有延迟）
-          if (optimistic) setState((prev) => (prev ? optimistic(prev) : prev))
-          setRev((r) => r + 1)
+          onOk()
         })
         .catch((err: unknown) => {
           setError(t('ri.toggleError', { error: err instanceof Error ? err.message : String(err) }))
-          setRev((r) => r + 1)
+          loadMcp()
+          loadSkills()
         })
         .finally(() => setBusy((prev) => ({ ...prev, [key]: false })))
     },
-    [t],
+    [t, loadMcp, loadSkills],
   )
 
   const toggleMcp = (row: McpRow) => {
-    post('/api/runtime-inventory/mcp/toggle', { entryId: row.entryId, disabled: !row.disabled }, `mcp:${row.rowId}`)
+    post(
+      '/api/runtime-inventory/mcp/toggle',
+      { entryId: row.entryId, disabled: !row.disabled },
+      `mcp:${row.rowId}`,
+      () => loadMcp(),
+    )
   }
 
   const toggleSkill = (row: SkillRow) => {
@@ -263,15 +288,21 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
       '/api/runtime-inventory/skill/toggle',
       { name: row.name, disabled: row.modelInvocable },
       `skill:${row.name}`,
-      (prev) => ({
-        ...prev,
-        skills: prev.skills.map((s) =>
-          s.name === row.name
-            ? { ...s, modelInvocable: !row.modelInvocable, userInvocable: s.userInvocable }
-            : s,
-        ),
-        skillsModelVisible: prev.skillsModelVisible + (row.modelInvocable ? -1 : 1),
-      }),
+      () => {
+        // 乐观更新：立即翻转目标卡片（服务端会先确认 catalog 再返回，双重保障）
+        setSkills((prev) =>
+          prev
+            ? {
+                ...prev,
+                skills: prev.skills.map((s) =>
+                  s.name === row.name ? { ...s, modelInvocable: !row.modelInvocable, userInvocable: s.userInvocable } : s,
+                ),
+                skillsModelVisible: prev.skillsModelVisible + (row.modelInvocable ? -1 : 1),
+              }
+            : prev,
+        )
+        loadSkills()
+      },
     )
   }
 
@@ -288,16 +319,18 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
     }
   }
 
+  const view = tab === 'mcp' ? mcp : skills
+
   return (
     <div style={C.page}>
       <div style={C.header}>
         <div>
           <h2 style={C.title}>{t('ri.nav')}</h2>
           <p style={C.meta}>
-            {state ? `${t('ri.preset')}: ${state.preset ?? '—'} · ${t('ri.session')}: ${state.sessionId ?? '—'}` : ''}
+            {view ? `${t('ri.preset')}: ${view.preset ?? '—'} · ${t('ri.session')}: ${view.sessionId ?? '—'}` : ''}
           </p>
         </div>
-        <button type="button" style={C.refresh} onClick={() => setRev((r) => r + 1)}>
+        <button type="button" style={C.refresh} onClick={() => (tab === 'mcp' ? loadMcp() : loadSkills())}>
           {t('ri.refresh')}
         </button>
       </div>
@@ -313,21 +346,17 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
 
       {error && <div style={C.error}>{error}</div>}
 
-      {!state && !error && <div style={C.empty}>{t('ri.loading')}</div>}
+      {!view && !error && <div style={C.empty}>{t('ri.loading')}</div>}
 
-      {state && tab === 'mcp' && (
-        <McpPanel state={state} t={t} busy={busy} onToggle={toggleMcp} statusOf={mcpStatus} />
-      )}
+      {view && tab === 'mcp' && <McpPanel state={view as McpView} t={t} busy={busy} onToggle={toggleMcp} statusOf={mcpStatus} />}
 
-      {state && tab === 'skill' && (
-        <SkillPanel state={state} t={t} busy={busy} onToggle={toggleSkill} />
-      )}
+      {view && tab === 'skill' && <SkillPanel state={view as SkillsView} t={t} busy={busy} onToggle={toggleSkill} />}
     </div>
   )
 }
 
 function McpPanel(props: {
-  state: RuntimeState
+  state: McpView
   t: Props['t']
   busy: Record<string, boolean>
   onToggle: (row: McpRow) => void
@@ -387,11 +416,11 @@ function McpPanel(props: {
 }
 
 function SkillPanel(props: {
-  state: RuntimeState
+  state: SkillsView
   t: Props['t']
   busy: Record<string, boolean>
   onToggle: (row: SkillRow) => void
-}): React.JSX.Element {
+}): React.ReactElement {
   const { state, t, busy, onToggle } = props
   return (
     <>
