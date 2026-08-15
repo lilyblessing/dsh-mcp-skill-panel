@@ -173,8 +173,9 @@ const C = {
     borderRadius: 6,
     padding: '4px 12px',
     fontSize: 12,
-    color: disabled ? 'var(--dsw-alias-label-inverse, #fff)' : 'var(--dsw-alias-label-primary)',
-    background: disabled ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-button-primary-fill)',
+    // 反色文字 + 语义底色：运行中=红（点它停用），已停用=绿（点它启用），明暗主题均可读
+    color: 'var(--dsw-alias-label-inverse, #fff)',
+    background: disabled ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)',
     whiteSpace: 'nowrap' as const,
   }),
   toggleDisabled: {

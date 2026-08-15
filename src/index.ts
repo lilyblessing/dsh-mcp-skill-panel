@@ -3,22 +3,31 @@
  *
  * 设置页「运行时清单」的数据与控制面：
  * - MCP 页：枚举 loader 预设子树中的 mcp-* 行 + tools.schemas(scope) 聚合工具数/token，
- *   启停 = loader entry.update({disabled})（实时生效）+ 预设文件行标记（重启持久化）。
+ *   启停 = loader entry.update({disabled})（实时生效）。
  * - Skill 页：skills.snapshot/get 枚举目录，启停 = SKILL.md frontmatter
  *   `disable-model-invocation: true` 注入/移除（watcher 实时失效 catalog）。
  *
  * Phase A 实测结论（2026-08-15，动态探针验证）：
  * - ctx.loader.entries() 枚举全部行（含嵌套预设行，id 如 include:agent-presets:mcp-cheatengine）
  * - loader.resolve() 需要完整嵌套 id；entry.update({disabled}) 实时 dispose/restart
- * - 预设树（PresetTree）write() 是 no-op → loader.update 不写盘，持久化需插件直写
- *   entry.parent.tree.filename（预设 agent.cordis.yml）
+ * - 预设树（PresetTree）write() 是 no-op → loader.update 不写盘
  * - tools.schemas(scope) 必须传 scopeOf(agent.ctx)（agent 对象/standingKey 会落回全局视图）
  * - skill 文件经 skills.get(name, {scope, cwd}).path 定位；改 frontmatter 由
  *   dsh-skill-filesystem 的 chokidar watcher 实时失效
+ *
+ * MCP 持久化（v0.1.1 修复，2026-08-15）：
+ * 运行期禁止写 agent.cordis.yml —— dsh-agent-presets 的 ensureStanding 用
+ * {mtimeMs, size} stamp 检测预设文件变化，变化时删除 standing 记录并重挂，
+ * 但旧 standing 的 fiber/scope 不 dispose → 旧 mcp-client 实例的 serverName
+ * 仍占用 → 新挂载全部 "already in use" → 会话创建/resume 失败（实测事故）。
+ * 持久化改为：toggle 只写插件自己的状态文件（~/.dsh/dsh-runtime-inventory/state.json），
+ * 插件 apply 时（启动早期、standing 未挂载）再物化到预设文件 —— 此时写文件安全。
  */
 import Schema from '@deepseek-ai/schemastery'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, writeFile, rename, mkdir } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 
 export const name = 'runtime-inventory'
@@ -121,7 +130,8 @@ export function setRowFlag(text: string, rowId: string, key: string, value: bool
     return lines.join(nl)
   }
   if (!value && flagAt >= 0) {
-    lines.splice(idx + 1 + flagAt, 1)
+    // flagAt 是行块（block = lines.slice(idx, end)）内的偏移 → 全局偏移为 idx + flagAt
+    lines.splice(idx + flagAt, 1)
     return lines.join(nl)
   }
   return text
@@ -140,6 +150,97 @@ export function setSkillFlag(text: string, value: boolean): string {
     return text.replace(new RegExp(`^${DISABLE_KEY}:\\s*true\\s*${nl}`, 'm'), '')
   }
   return text
+}
+
+/** 组合文件中某行当前 disabled 状态：行块内有 disabled 键 → true/false；无键 → null。 */
+export function rowDisabledState(text: string, rowId: string): boolean | null {
+  const lines = text.split(/\r?\n/)
+  const rowRe = new RegExp(`^-\\s*id:\\s*${escapeRegExp(rowId)}\\s*$`)
+  const idx = lines.findIndex((line) => rowRe.test(line))
+  if (idx < 0) return null
+  let end = idx + 1
+  while (end < lines.length && !/^-\s*id:/.test(lines[end])) end += 1
+  const flagRe = /^\s*disabled:\s*(true|false)\s*$/
+  for (let i = idx + 1; i < end; i += 1) {
+    const m = flagRe.exec(lines[i])
+    if (m) return m[1] === 'true'
+  }
+  return null
+}
+
+/* ── MCP 持久化（状态文件 + 启动早期物化，v0.1.1） ─────────────────────── */
+
+const STATE_DIR = join(homedir(), '.dsh', 'dsh-runtime-inventory')
+const STATE_FILE = join(STATE_DIR, 'state.json')
+
+/** 每个预设文件（key=文件绝对路径）→ 每个 mcp 行 → 意图与上次物化状态。 */
+interface McpRowState {
+  /** toggle 时用户意图：是否停用 */
+  desired: boolean
+  /** toggle 时该行在文件中的实际状态（true/false/null=无 disabled 键） */
+  lastApplied: boolean | null
+}
+
+type StateFile = { mcp?: Record<string, Record<string, McpRowState>> }
+
+async function readState(): Promise<StateFile> {
+  try {
+    return JSON.parse(await readFile(STATE_FILE, 'utf8')) as StateFile
+  } catch {
+    return {}
+  }
+}
+
+async function writeState(state: StateFile): Promise<void> {
+  await mkdir(STATE_DIR, { recursive: true })
+  await writeFile(`${STATE_FILE}.tmp`, JSON.stringify(state, null, 2), 'utf8')
+  await rename(`${STATE_FILE}.tmp`, STATE_FILE)
+}
+
+/**
+ * 启动早期物化：把状态文件里的 MCP 启停意图写入预设组合文件。
+ * 只在「没有任何 agent 在跑」时执行 —— 有会话时写文件会触发
+ * dsh-agent-presets 的 stamp 重挂（旧实例不 dispose → serverName 冲突事故）。
+ */
+export async function syncPresetFiles(ctx: Context): Promise<number> {
+  if (ctx.agents.list().length > 0) return 0
+  const state = await readState()
+  const mcp = state.mcp
+  if (!mcp || Object.keys(mcp).length === 0) return 0
+  let materialized = 0
+  for (const [file, rows] of Object.entries(mcp)) {
+    let text: string
+    try {
+      text = await readFile(file, 'utf8')
+    } catch {
+      continue
+    }
+    let changed = false
+    const next: Record<string, McpRowState> = {}
+    for (const [rowId, entry] of Object.entries(rows)) {
+      const cur = rowDisabledState(text, rowId)
+      if (cur !== entry.lastApplied) {
+        // 文件被外部（用户）修改过：尊重现状，放弃对该行的管理
+        continue
+      }
+      const curBool = cur === true
+      if (curBool !== entry.desired) {
+        try {
+          text = setRowFlag(text, rowId, 'disabled', entry.desired)
+          changed = true
+          materialized += 1
+        } catch {
+          // 行已不存在（用户删除）：放弃管理
+          continue
+        }
+      }
+      next[rowId] = { desired: entry.desired, lastApplied: curBool }
+    }
+    if (changed) await writeFile(file, text, 'utf8')
+    mcp[file] = next
+  }
+  await writeState(state)
+  return materialized
 }
 
 /* ── 数据收集 ──────────────────────────────────────────────────────────── */
@@ -279,23 +380,26 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean) {
   const entry = ctx.loader.resolve(entryId)
   const rowId = entry.options.id
   await entry.update({ disabled })
-  // 持久化：loader.update 不写预设文件（PresetTree.write 为 no-op），直写 tree 源文件
+  // 持久化：v0.1.1 起运行期绝不写预设文件（触发 dsh-agent-presets stamp 重挂事故）。
+  // 只把意图写入插件状态文件，由下次启动的 syncPresetFiles() 物化到预设文件。
   const tree = entry.parent?.tree as { filename?: string } | undefined
   const file = tree?.filename
-  let persisted = false
+  let fileState: boolean | null = null
   if (typeof file === 'string' && file.length > 0) {
     try {
-      const text = await readFile(file, 'utf8')
-      const next = setRowFlag(text, rowId, 'disabled', disabled)
-      if (next !== text) {
-        await writeFile(file, next, 'utf8')
-        persisted = true
-      } else {
-        persisted = true
-      }
-    } catch (error) {
-      throw new Error(`persist ${file}: ${messageOf(error)}`)
+      fileState = rowDisabledState(await readFile(file, 'utf8'), rowId)
+    } catch {
+      fileState = null
     }
+  }
+  let persisted = false
+  if (typeof file === 'string' && file.length > 0) {
+    const state = await readState()
+    state.mcp ??= {}
+    state.mcp[file] ??= {}
+    state.mcp[file][rowId] = { desired: disabled, lastApplied: fileState }
+    await writeState(state)
+    persisted = true
   }
   return {
     entryId,
@@ -443,6 +547,16 @@ export function makeRoutes(
 /* ── 插件主体 ──────────────────────────────────────────────────────────── */
 
 export function apply(ctx: Context, config: Config = {}): void {
+  // 启动早期物化 MCP 启停意图（仅当无会话在跑时；有会话则下次重启再物化）。
+  // 不阻塞 apply；失败只记日志，不拖累插件挂载。
+  void syncPresetFiles(ctx).then(
+    (count) => {
+      if (count > 0) ctx.logger.info(`runtime-inventory: materialized ${count} MCP row state(s) into preset composition`)
+    },
+    (error: unknown) => {
+      ctx.logger.warn(`runtime-inventory: preset sync skipped: ${messageOf(error)}`)
+    },
+  )
   ctx.inject(['webServer'], (httpCtx) => {
     httpCtx.effect(() => {
       const routes = makeRoutes(httpCtx, config)

@@ -1,6 +1,6 @@
 {
   "name": "dsh-runtime-inventory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH 运行时清单插件：设置页展示 MCP 服务器与 Skill 目录，随时启停以释放上下文占用。",
   "type": "module",
   "main": "./lib/index.js",

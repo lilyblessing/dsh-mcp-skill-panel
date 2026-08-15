@@ -8,7 +8,7 @@ DSH Web 设置页新增「运行时清单」入口，展示当前 agent 可见�
 - **停用 MCP 服务器** → loader entry 卸载（断开连接 + 注销该服务器全部 `mcp__<server>__*` 工具）→ 工具从模型目录**立即消失**，schema token 占用即时释放（实测 cheatengine 173 工具 ≈ 9.6k token）。
 - **启用 MCP 服务器** → 重新连接 + 恢复工具，**无需重启**。
 - **停用 Skill** → 往 SKILL.md frontmatter 注入 `disable-model-invocation: true` → 模型 catalog 实时失效（技能从模型可见列表消失，`modelInvocable=false`）。
-- **持久化**：MCP 启停状态写入 agent preset 组合文件（`~/.dsh/.agent-presets/*/agent.cordis.yml`），Skill 状态即 frontmatter 本身 —— 重启 dsh 后状态保持。
+- **持久化**：MCP 启停状态记入插件状态文件（`~/.dsh/dsh-runtime-inventory/state.json`），下次启动早期物化到 agent preset 组合文件（`~/.dsh/.agent-presets/*/agent.cordis.yml`）；Skill 状态即 frontmatter 本身 —— 重启 dsh 后状态保持。**运行期不写预设组合文件**（原因见「工作原理」）。
 
 ## 能力面
 
@@ -35,7 +35,8 @@ dsh plugin --profile web add "github:lilyblessing/dsh-runtime-inventory#main"
 ## 工作原理（Phase A 实测结论）
 
 - MCP 行是 agent preset 组合（`agent.cordis.yml`）中的 loader entry（`@deepseek-ai/dsh-mcp-client`），完整 id 形如 `include:agent-presets:mcp-cheatengine`。
-- `loader.resolve(id).update({ disabled })` 实时 dispose/restart 该 entry；预设树（`PresetTree`）的 `write()` 是 no-op，因此持久化由插件直写组合文件行标记完成。
+- `loader.resolve(id).update({ disabled })` 实时 dispose/restart 该 entry，工具立即从模型目录消失/恢复。
+- **MCP 持久化为何分两步**：预设树（`PresetTree`）的 `write()` 是 no-op（预设是输入不是持久化目标），且 `dsh-agent-presets` 用 `{mtimeMs, size}` stamp 检测预设文件变化 —— 运行期写文件会触发 standing 重挂，而旧实例不 dispose → 所有 `serverName` 冲突 → 会话创建/resume 失败。因此 toggle 只写插件状态文件，插件 `apply`（启动早期、standing 未挂载）时再把意图物化到预设文件，此时写文件安全。
 - 工具清单来自 `tools.schemas(scopeOf(agent.ctx))`（agent 对象/standingKey 会落回全局视图，必须用 scope key），按 `mcp__<server>__` 前缀聚合工具数与 token 估算。
 - Skill 清单来自 `skills.snapshot({ scope, cwd })`；文件路径经 `skills.get(name).path` 定位。
 
@@ -54,6 +55,9 @@ dsh plugin --profile web add "github:lilyblessing/dsh-runtime-inventory#main"
 - MCP 服务器状态「无工具」= 进程在跑但工具列表为空（server 启动失败/空实现）。
 - 工具数/token 为估算值（`JSON.stringify(parameters).length / 4`），与模型注入面真实值近似。
 - 停用后工具立即消失，但**当前回合的请求缓存**（如有）可能仍引用旧 schema；下一请求自然刷新。
+- **MCP 持久化时滞**：停用/启用实时生效；跨重启的保持依赖下次启动的物化 —— 若插件在「已有会话运行」期间被热更新，本次进程内不物化，下一次重启生效。
+- **手动编辑预设组合文件的 mcp 行**（如手动移除 `disabled: true`）会令该行退出插件的持久化管理（下次启动尊重你的改动，不再覆盖）。
+- 运行期写 SKILL.md 安全（skill-filesystem 的 watcher 本就预期文件被改）；运行期写预设组合文件会触发 dsh-agent-presets 的 stamp 重挂事故，插件刻意不做。
 
 ## 开发
 
