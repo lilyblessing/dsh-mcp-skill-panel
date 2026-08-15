@@ -48,6 +48,15 @@ const DISABLE_KEY = 'disable-model-invocation'
 const DEFAULT_TTL_MS = 30_000
 /** skill toggle 后等待 watcher 失效 catalog 的最长时间 */
 const SKILL_TOGGLE_CONFIRM_MS = 5_000
+/** 已确认的 skill 状态在 collectState 中覆盖 snapshot 旧值的有效期 */
+const CONFIRMED_SKILL_TTL_MS = 60_000
+
+/**
+ * 最近一次 toggle 确认过的 skill 状态（name → modelInvocable）。
+ * 服务端轮询用 skills.get 实时读文件确认，早于 snapshot 的发现缓存失效，
+ * 用它覆盖 collectState 里的陈旧 candidate 值。
+ */
+const confirmedSkills = new Map<string, { modelInvocable: boolean; at: number }>()
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -354,7 +363,12 @@ async function collectState(deps: Deps, sessionId: string | undefined): Promise<
   try {
     const snapshot = await ctx.skills.snapshot({ scope: agent, cwd })
     for (const summary of snapshot.skills) {
-      const modelInvocable = summary.invocation?.modelInvocable !== false
+      // toggle 确认值覆盖：snapshot 的 candidate 缓存可能落后于 watcher 失效
+      // （skills.get 实时读文件已确认新值，snapshot 的发现缓存要等 watcher 200ms 生效）。
+      // 60s 内确认过的 skill 以确认值为准，避免 UI 翻回 + state 缓存钉住旧值 30s。
+      const confirmed = confirmedSkills.get(summary.name)
+      const modelInvocable =
+        confirmed && Date.now() - confirmed.at < CONFIRMED_SKILL_TTL_MS ? confirmed.modelInvocable : summary.invocation?.modelInvocable !== false
       if (modelInvocable) skillsModelVisible += 1
       skills.push({
         name: summary.name,
@@ -452,6 +466,8 @@ async function toggleSkill(deps: Deps, skillName: string, disabled: boolean, ses
     }
     await delay(80)
   }
+  // 记录确认值，供 collectState 覆盖 snapshot 的陈旧 candidate（watcher 未及失效）
+  if (confirmed) confirmedSkills.set(skillName, { modelInvocable: !disabled, at: Date.now() })
   return { name: skillName, disabled, modelInvocable: !disabled, path: def.path, confirmed }
 }
 
