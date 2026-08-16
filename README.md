@@ -191,6 +191,7 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 
 | 版本 | 内容 |
 | --- | --- |
+| 0.4.3 | 性能优化：修复 restore 竞态（用户中途手动打开后 mcp_call 失败不再误关）；装配过滤回合内可见性 Map 缓存（560 次比较→O(1) 查表）；schemas 500ms 窗口复用；catalog 写盘 300ms 防抖合并；state.json 内存态 + 写队列合并；摘要表截断 80 字符；停用态 token 估算缓存；缓存 Map 主动 TTL 清理；snapshotServer 死代码清理 |
 | 0.4.2 | 装配过滤按 server 状态：用户打开的 MCP 工具进模型上下文（memory 高灵敏召回），停用的对模型隐藏、经 mcp_search/mcp_call 按需调用；AI 临时启用不污染上下文；用户手动打开清除 AI 标记（防回收器误关）；面板新增 autoManage 开关 + 模型可见徽标 |
 | 0.4.1 | 修复 catalog 采集链路：apply ctx 下 `agents` 为空导致自动采集恒空（fallback `standingKeyFor` 解析 scope）、last-good 守卫失效、启动早期空快照写盘、写盘竞态；新增 debug 诊断端点；案例复测通过（chrome→mimo 跨 server、calcmcp 连击零重复 spawn + 30s 回收） |
 | 0.4.0 | AI 中间层（`autoManage`）：`mcp_search`/`mcp_call` 按需使用 MCP（保活启用 + 空闲回收 + 装配过滤）；私有 catalog 持久化 + 面板停用态回填目录工具数 |

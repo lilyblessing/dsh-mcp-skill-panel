@@ -61,8 +61,6 @@ export interface McpControlCtx {
   setAiOwner(entryId: string, at: number): Promise<void>
   clearAiOwner(entryId: string): Promise<void>
 
-  /** 对某 server 做一次实时快照（惰性采集兜底）。 */
-  snapshotServer(serverName: string): Promise<void>
   /** 对所有当前 enabled 的 server 重新快照（tools/change / 启动）。 */
   snapshotEnabled(): Promise<void>
 }
@@ -191,6 +189,14 @@ async function restore(
   serverName: string,
   entryId: string,
 ): Promise<void> {
+  // 用户中途手动打开（markUserEnabled）会清除 AI 标记 → 该 server 已转交用户管理，
+  // 本次调用不再拥有它，绝不能恢复 disabled（否则关闭用户手动打开的 server，违反
+  // 「用户启停不被模型干预」承诺）。引用计数等残留一并清掉。
+  if (!state.aiEnabled.has(serverName)) {
+    state.refCounts.delete(serverName)
+    state.lastUsed.delete(serverName)
+    return
+  }
   try {
     const entry = control.resolveEntry(serverName)
     if (entry && entry.id === entryId && !entry.disabled) {
@@ -343,6 +349,9 @@ function clampLimit(value: number | undefined, defaultValue: number, max: number
   return Math.min(Math.floor(value), max)
 }
 
+/** 摘要截断长度：mcp_search 空查询的输出 token 控制（P2-5）。 */
+const SUMMARY_MAX_LEN = 80
+
 function buildSummary(control: McpControlCtx): Array<{ server: string; summary: string }> {
   const catalog = control.getCatalog()
   const merged: Record<string, string> = { ...DEFAULT_SUMMARY, ...control.serverSummary }
@@ -353,12 +362,14 @@ function buildSummary(control: McpControlCtx): Array<{ server: string; summary: 
     seen.add(server)
     lines.push({ server, summary })
   }
-  // 补上 catalog 里有但 summary 没写的 server
+  // 补上 catalog 里有但 summary 没写的 server（截断长描述，避免输出膨胀）
   for (const server of Object.keys(catalog)) {
     if (seen.has(server)) continue
     seen.add(server)
     const first = catalog[server]?.tools?.[0]
-    lines.push({ server, summary: first ? `${first.description}` : 'MCP server' })
+    const raw = first ? String(first.description) : 'MCP server'
+    const summary = raw.length > SUMMARY_MAX_LEN ? `${raw.slice(0, SUMMARY_MAX_LEN)}…` : raw
+    lines.push({ server, summary })
   }
   lines.sort((a, b) => a.server.localeCompare(b.server))
   return lines

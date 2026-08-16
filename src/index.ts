@@ -30,7 +30,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
-import type { Catalog, CatalogEntry } from './catalog'
+import type { Catalog, CatalogEntry, CatalogServer } from './catalog'
 import { snapshotFromSchemas, loadCatalog, saveCatalog } from './catalog'
 import { installMcpVisibilityFilter } from './filter'
 import type { McpControlCtx } from './mcpcall'
@@ -77,6 +77,8 @@ const DOMAIN_TTL_MS = 60_000
 const SKILL_TOGGLE_CONFIRM_MS = 5_000
 /** 已确认的 skill 状态在 collectState 中覆盖 snapshot 旧值的有效期 */
 const CONFIRMED_SKILL_TTL_MS = 60_000
+/** skill toggle 确认轮询间隔（P2-9：ctx.timeout，随 ctx 生命周期）。 */
+const SKILL_TOGGLE_POLL_MS = 80
 
 /**
  * 最近一次 toggle 确认过的 skill 状态（name → modelInvocable）。
@@ -84,12 +86,6 @@ const CONFIRMED_SKILL_TTL_MS = 60_000
  * 用它覆盖 collectState 里的陈旧 candidate 值。
  */
 const confirmedSkills = new Map<string, { modelInvocable: boolean; at: number }>()
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms)
-  })
-}
 
 interface McpEntryView {
   entryId: string
@@ -239,6 +235,10 @@ const CATALOG_FILE = join(CATALOG_DIR, 'catalog.json')
 const DEFAULT_TOOL_TIMEOUT_MS = 60_000
 /** tools/change 后增量快照的去抖窗口。 */
 const CATALOG_SNAPSHOT_DEBOUNCE_MS = 150
+/** tools.schemas 短窗口复用（P1-2）：覆盖「聚合失效 + 采集」两次调用间隔。 */
+const SCHEMAS_CACHE_WINDOW_MS = 500
+/** catalog 持久化写盘防抖（P1-3）：tools/change 风暴期合并写盘。 */
+const CATALOG_PERSIST_DEBOUNCE_MS = 300
 
 /** 每个预设文件（key=文件绝对路径）→ 每个 mcp 行 → 意图与上次物化状态。 */
 interface McpRowState {
@@ -256,9 +256,17 @@ type StateFile = {
   config?: { autoManage?: boolean }
 }
 
+/** state.json 内存态（P1-4）：启动加载一次，写盘串行合并（mcp_call 连击等高频
+ * 写场景从每次 2 次文件 IO 降为一次异步合并写）。 */
+let stateCache: StateFile | null = null
+let stateDirty = false
+let stateWriteChain: Promise<void> = Promise.resolve()
+
 async function readState(): Promise<StateFile> {
+  if (stateCache) return stateCache
+  let parsed: StateFile
   try {
-    return JSON.parse(await readFile(STATE_FILE, 'utf8')) as StateFile
+    parsed = JSON.parse(await readFile(STATE_FILE, 'utf8')) as StateFile
   } catch {
     // 0.2.0 改名迁移：旧状态目录（dsh-runtime-inventory）有数据则搬过来
     try {
@@ -266,17 +274,29 @@ async function readState(): Promise<StateFile> {
       const text = await readFile(legacy, 'utf8')
       await mkdir(STATE_DIR, { recursive: true })
       await rename(legacy, STATE_FILE)
-      return JSON.parse(text) as StateFile
+      parsed = JSON.parse(text) as StateFile
     } catch {
-      return {}
+      parsed = {}
     }
   }
+  stateCache = parsed
+  return parsed
 }
 
 async function writeState(state: StateFile): Promise<void> {
-  await mkdir(STATE_DIR, { recursive: true })
-  await writeFile(`${STATE_FILE}.tmp`, JSON.stringify(state, null, 2), 'utf8')
-  await rename(`${STATE_FILE}.tmp`, STATE_FILE)
+  stateCache = state
+  stateDirty = true
+  stateWriteChain = stateWriteChain
+    .catch(() => {})
+    .then(async () => {
+      if (!stateDirty) return
+      stateDirty = false
+      const current = stateCache ?? state
+      await mkdir(STATE_DIR, { recursive: true })
+      await writeFile(`${STATE_FILE}.tmp`, JSON.stringify(current, null, 2), 'utf8')
+      await rename(`${STATE_FILE}.tmp`, STATE_FILE)
+    })
+  await stateWriteChain
 }
 
 /**
@@ -376,6 +396,12 @@ interface CatalogRuntime {
   autoManage: boolean
   /** 动态切换 AI 中间层（过滤 + mcp_search/mcp_call + 回收器）。 */
   applyAutoManage: (on: boolean) => void
+  /** 最近一次成功写盘时间（防抖合并用）。 */
+  lastPersistAt: number | null
+  /** 防抖挂起的写盘 timer（ctx.timeout 创建，ctx 销毁自动清理）。 */
+  persistTimer: (() => void) | undefined
+  /** 停用态 token 估算缓存（P2-6）：fetchedAt 不变则复用。 */
+  tokenCache: Map<string, { fetchedAt: number; tokens: number }>
   /** 诊断计数（debug 端点输出，定位采集链路问题用）。 */
   diag: {
     toolsChangeEvents: number
@@ -400,7 +426,16 @@ function sameToolList(a: CatalogEntry[], b: CatalogEntry[]): boolean {
   return true
 }
 
-/** 原子写回 catalog.json；失败保留 dirty 标记以在下次重试。 */
+/** 写时清理过期条目（P2-8）：分域缓存 / 聚合 / 已确认 skill 的 Map 长期运行不膨胀。 */
+function pruneExpired<T>(map: Map<T, { at: number }>, now: number): void {
+  for (const [key, entry] of map) {
+    if (now - entry.at >= DOMAIN_TTL_MS) map.delete(key)
+  }
+}
+
+/** 原子写回 catalog.json；失败保留 dirty 标记以在下次重试。
+ * P1-3：写盘后 CATALOG_PERSIST_DEBOUNCE_MS 内的新变更延迟合并（ctx.timeout 绑 ctx，
+ * 卸载自动清理）；正在写盘时置 dirty 排队（finally 补一次）。 */
 async function persistCatalog(next: () => Context, runtime: CatalogRuntime): Promise<void> {
   if (runtime.persisting) {
     // 正在写盘中：置 dirty 排队（finally 会补一次），而不是丢弃本次变更。
@@ -408,12 +443,21 @@ async function persistCatalog(next: () => Context, runtime: CatalogRuntime): Pro
     return
   }
   if (!runtime.dirty) return
+  const ctx = next()
+  if (runtime.lastPersistAt !== null && Date.now() - runtime.lastPersistAt < CATALOG_PERSIST_DEBOUNCE_MS) {
+    runtime.persistTimer?.()
+    runtime.persistTimer = ctx.timeout(() => {
+      runtime.persistTimer = undefined
+      void persistCatalog(next, runtime)
+    }, CATALOG_PERSIST_DEBOUNCE_MS)
+    return
+  }
   runtime.persisting = true
   try {
     await saveCatalog(CATALOG_DIR, runtime.catalog)
     runtime.dirty = false
+    runtime.lastPersistAt = Date.now()
   } catch (error) {
-    const ctx = next()
     ctx.logger.warn?.(`mcp-skill-panel: catalog persist failed: ${messageOf(error)}`)
   } finally {
     runtime.persisting = false
@@ -429,6 +473,14 @@ async function persistCatalog(next: () => Context, runtime: CatalogRuntime): Pro
  * agent，catalog 采集恒为空并可能空写盘覆盖 last-good。因此 agent 不可得时
  * fallback 到 `agentPresets.standingKeyFor()`（注册表查询，不依赖 agent 实例）。
  */
+/** tools.schemas 短窗口复用缓存（P1-2）：tools/change 风暴期内「聚合失效 + 采集」
+ * 两次调用共享一次 schemas（95 schema 深克隆），窗口 + scopeKey 引用匹配。 */
+let schemasCache: {
+  at: number
+  scopeKey: unknown
+  schemas: Array<{ name?: unknown; description?: unknown; parameters?: unknown }>
+} | null = null
+
 async function resolveScopeSchemas(
   ctx: Context,
 ): Promise<Array<{ name?: unknown; description?: unknown; parameters?: unknown }>> {
@@ -447,11 +499,17 @@ async function resolveScopeSchemas(
     }
   }
   if (scopeKey === undefined) return []
-  return ctx.tools.schemas(scopeKey as Parameters<typeof ctx.tools.schemas>[0]) as Array<{
+  const now = Date.now()
+  if (schemasCache && schemasCache.scopeKey === scopeKey && now - schemasCache.at < SCHEMAS_CACHE_WINDOW_MS) {
+    return schemasCache.schemas
+  }
+  const schemas = ctx.tools.schemas(scopeKey as Parameters<typeof ctx.tools.schemas>[0]) as Array<{
     name?: unknown
     description?: unknown
     parameters?: unknown
   }>
+  schemasCache = { at: now, scopeKey, schemas }
+  return schemas
 }
 
 /** 对所有当前 enabled 的 mcp server 重新快照。 */
@@ -522,28 +580,6 @@ async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime): Promise<v
   }
 }
 
-/** 对单个 server 做一次实时快照（惰性采集兜底）。 */
-async function snapshotServer(ctx: Context, runtime: CatalogRuntime, serverName: string): Promise<void> {
-  const next = { ...runtime.catalog }
-  let tools: CatalogEntry[]
-  try {
-    const schemas = await resolveScopeSchemas(ctx)
-    tools = snapshotFromSchemas(schemas, serverName)
-  } catch {
-    return // last-good：保留旧快照
-  }
-  if (tools.length === 0) {
-    const prev = runtime.catalog[serverName]
-    if (prev && prev.tools.length > 0) return // 保留缓存
-  }
-  const prev = runtime.catalog[serverName]
-  if (prev && prev.source === 'live' && sameToolList(prev.tools, tools)) return
-  next[serverName] = { tools, fetchedAt: Date.now(), source: 'live' }
-  runtime.catalog = next
-  runtime.dirty = true
-  void persistCatalog(() => ctx, runtime)
-}
-
 /** 构建控制层依赖（McpControlCtx）：封闭 catalog/loader/state 的 IO。 */
 function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config): McpControlCtx {
   return {
@@ -560,7 +596,6 @@ function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config):
     serverTimeoutMs: (serverName) => serverTimeoutMs(ctx, serverName),
     setAiOwner: (entryId, at) => setStateAiOwner(entryId, at),
     clearAiOwner: (entryId) => clearStateAiOwner(entryId),
-    snapshotServer: (serverName) => snapshotServer(ctx, runtime, serverName),
     snapshotEnabled: () => snapshotEnabled(ctx, runtime),
   }
 }
@@ -636,6 +671,7 @@ function getMcpAggregate(
   errors: string[],
 ): McpAggregate {
   const key = scopeKey ?? null
+  pruneExpired(caches.mcpAggregates, Date.now())
   const hit = caches.mcpAggregates.get(key)
   if (hit && Date.now() - hit.at < DOMAIN_TTL_MS) return hit.value
   let schemas: Array<{ name?: string; parameters?: unknown }> = []
@@ -647,6 +683,17 @@ function getMcpAggregate(
   const value = computeAggregate(schemas)
   caches.mcpAggregates.set(key, { at: Date.now(), value })
   return value
+}
+
+/** 停用态 token 估算缓存（P2-6）：fetchedAt 不变则复用，避免每次面板请求
+ * 对停用 server（如 cheatengine 173 工具）全量 JSON.stringify。 */
+function catalogTokens(runtime: CatalogRuntime, serverName: string, info: CatalogServer | undefined): number {
+  if (!info) return 0
+  const hit = runtime.tokenCache.get(serverName)
+  if (hit && hit.fetchedAt === info.fetchedAt) return hit.tokens
+  const tokens = info.tools.reduce((sum, t) => sum + tokenEstimate(t.parameters), 0)
+  runtime.tokenCache.set(serverName, { fetchedAt: info.fetchedAt, tokens })
+  return tokens
 }
 
 async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<McpView> {
@@ -678,9 +725,7 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
       const catalogInfo = deps.catalogRuntime.catalog[serverName]
       const displayTools = liveTools > 0 ? liveTools : catalogInfo?.tools.length ?? 0
       const displayTokens =
-        liveTools > 0
-          ? (agg?.tokens ?? 0)
-          : (catalogInfo?.tools.reduce((sum, t) => sum + tokenEstimate(t.parameters), 0) ?? 0)
+        liveTools > 0 ? (agg?.tokens ?? 0) : catalogTokens(deps.catalogRuntime, serverName, catalogInfo)
       const status: McpEntryView['status'] = disabled
         ? 'disabled'
         : running
@@ -829,9 +874,10 @@ async function toggleSkill(deps: Deps, skillName: string, disabled: boolean, ses
       confirmed = true
       break
     }
-    await delay(80)
+    await ctx.timeout(SKILL_TOGGLE_POLL_MS)
   }
   // 记录确认值，供 collectState 覆盖 snapshot 的陈旧 candidate（watcher 未及失效）
+  pruneExpired(confirmedSkills, Date.now())
   if (confirmed) confirmedSkills.set(skillName, { modelInvocable: !disabled, at: Date.now() })
   return { name: skillName, disabled, modelInvocable: !disabled, path: def.path, confirmed }
 }
@@ -879,6 +925,7 @@ export function makeRoutes(
 
   const cachedMcp = (sessionId: string | undefined) => {
     const key = sessionId ?? '*'
+    pruneExpired(mcpCache, Date.now())
     const hit = mcpCache.get(key)
     if (hit && Date.now() - hit.at < DOMAIN_TTL_MS) return hit.promise
     const promise = collectMcp(deps, sessionId).catch((error) => {
@@ -891,6 +938,7 @@ export function makeRoutes(
 
   const cachedSkills = (sessionId: string | undefined) => {
     const key = sessionId ?? '*'
+    pruneExpired(skillsCache, Date.now())
     const hit = skillsCache.get(key)
     if (hit && Date.now() - hit.at < DOMAIN_TTL_MS) return hit.promise
     const promise = collectSkills(deps, sessionId).catch((error) => {
@@ -1090,6 +1138,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     // 初始值由下方 applyAutoManage 赋值（control/controller 构建后）
     autoManage: false,
     applyAutoManage: () => {},
+    lastPersistAt: null,
+    persistTimer: undefined,
+    tokenCache: new Map(),
     diag: {
       toolsChangeEvents: 0,
       snapshots: 0,
@@ -1165,13 +1216,22 @@ export function apply(ctx: Context, config: Config = {}): void {
   // 持久化，config 仅作初始默认）。
   const control: McpControlCtx = buildMcpControl(ctx, catalogRuntime, config)
   const controller = createMcpCallController(ctx, control)
-  // 装配可见性判定（v0.4.2）：用户打开的 server 可见（disabled=false 且非 AI 临时启用）；
+  // 装配可见性（v0.4.2+）：每回合构建一次 server → 可见性 Map（单次 loader 遍历），
+  // 过滤时 O(1) 查表。用户打开的 server 可见（disabled=false 且非 AI 临时启用）；
   // 停用或 AI 临时启用的 server 对模型过滤，经 mcp_search/mcp_call 按需调用。
-  const isMcpVisible = (serverName: string): boolean => {
-    if (controller.isAiEnabled(serverName)) return false
-    const entry = findMcpEntry(ctx, serverName)
-    if (!entry) return false
-    return !entry.disabled
+  const buildVisibility = (): ReadonlyMap<string, boolean> => {
+    const map = new Map<string, boolean>()
+    for (const entry of ctx.loader.entries()) {
+      if (entry.options.group) continue
+      const cfg = entry.options.config
+      const isMcp =
+        entry.options.name === '@deepseek-ai/dsh-mcp-client' ||
+        (cfg !== null && typeof cfg === 'object' && 'serverName' in (cfg as object))
+      if (!isMcp) continue
+      const serverName = String((cfg as { serverName?: unknown } | undefined)?.serverName ?? entry.options.id)
+      map.set(serverName, !entry.disabled && !controller.isAiEnabled(serverName))
+    }
+    return map
   }
   let autoDisposers: Array<() => void> = []
   catalogRuntime.applyAutoManage = (on: boolean) => {
@@ -1181,7 +1241,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (!on) return
     const disposers: Array<() => void> = []
     try {
-      disposers.push(installMcpVisibilityFilter(ctx, isMcpVisible))
+      disposers.push(installMcpVisibilityFilter(ctx, buildVisibility))
       disposers.push(installMcpControlTools(ctx, control, controller))
       const offReaper = controller.startIdleReaper()
       disposers.push(() => offReaper())

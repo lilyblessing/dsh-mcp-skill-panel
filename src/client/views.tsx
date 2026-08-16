@@ -341,18 +341,22 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
     )
   }
 
-  const mcpStatus = (row: McpRow): { label: string; color: string; bg: string } => {
-    switch (row.status) {
-      case 'active':
-        return { label: t('ri.statusActive'), color: 'var(--dsw-alias-state-success-primary)', bg: 'var(--dsw-alias-state-success-tertiary)' }
-      case 'disabled':
-        return { label: t('ri.statusDisabled'), color: 'var(--dsw-alias-label-tertiary)', bg: 'var(--dsw-alias-fill-l2)' }
-      case 'idle':
-        return { label: t('ri.statusIdle'), color: 'var(--dsw-alias-state-warn-primary)', bg: 'var(--dsw-alias-state-warn-tertiary)' }
-      default:
-        return { label: t('ri.statusFailed'), color: 'var(--dsw-alias-state-error-primary)', bg: 'var(--dsw-alias-state-error-secondary)' }
-    }
-  }
+  // P2-9：useCallback 稳定引用，避免 McpPanel 每次渲染重建（状态徽标查表）
+  const mcpStatus = useCallback(
+    (row: McpRow): { label: string; color: string; bg: string } => {
+      switch (row.status) {
+        case 'active':
+          return { label: t('ri.statusActive'), color: 'var(--dsw-alias-state-success-primary)', bg: 'var(--dsw-alias-state-success-tertiary)' }
+        case 'disabled':
+          return { label: t('ri.statusDisabled'), color: 'var(--dsw-alias-label-tertiary)', bg: 'var(--dsw-alias-fill-l2)' }
+        case 'idle':
+          return { label: t('ri.statusIdle'), color: 'var(--dsw-alias-state-warn-primary)', bg: 'var(--dsw-alias-state-warn-tertiary)' }
+        default:
+          return { label: t('ri.statusFailed'), color: 'var(--dsw-alias-state-error-primary)', bg: 'var(--dsw-alias-state-error-secondary)' }
+      }
+    },
+    [t],
+  )
 
   const view = tab === 'mcp' ? mcp : skills
 
