@@ -1,6 +1,10 @@
 <p align="center">
-  <strong>🧩 MCP 与技能管理面板</strong><br>
-  DeepSeek Harness（DSH）Web 插件 · MCP 服务器与 Skill 目录的实时启停 · 可选 AI 中间层（按需调用）
+  <strong style="font-size: 2.2em">🧩 MCP 与技能管理面板</strong><br>
+  <span style="font-size: 1.1em">DeepSeek Harness（DSH）Web 插件 · MCP 服务器与 Skill 目录的实时启停 · 可选 AI 中间层（按需调用）</span>
+</p>
+
+<p align="center">
+  <a href="./README.en.md">🌐 English</a> · <strong>中文</strong>
 </p>
 
 <p align="center">

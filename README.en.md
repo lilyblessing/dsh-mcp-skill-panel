@@ -1,6 +1,10 @@
 <p align="center">
-  <strong>🧩 MCP & Skill Manager</strong><br>
-  DeepSeek Harness (DSH) Web plugin · Real-time enable/disable for MCP servers & Skill catalog · Optional AI middle layer (on-demand calls)
+  <strong style="font-size: 2.2em">🧩 MCP & Skill Manager</strong><br>
+  <span style="font-size: 1.1em">DeepSeek Harness (DSH) Web plugin · Real-time enable/disable for MCP servers & Skill catalog · Optional AI middle layer (on-demand calls)</span>
+</p>
+
+<p align="center">
+  <strong>English</strong> · <a href="./README.md">🌐 中文</a>
 </p>
 
 <p align="center">
