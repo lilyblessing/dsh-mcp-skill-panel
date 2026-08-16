@@ -360,7 +360,9 @@ function AutoManageCard(props: {
   onToggle: () => void
 }): React.ReactElement {
   const { on, busy, t, onToggle } = props
-  // 按钮与 MCP 卡片统一为「动作语义」配色（用户截图确认）：启用中=红「停用」、停用中=绿「启用」
+  // 按钮与 MCP 卡片统一为「动作语义」配色（用户截图确认）：
+  // 启用中=红「停用」、停用中=绿「启用」。注意 C.toggle 的参数语义是 disabled
+  // （停用=绿），直接传 on 会得到相反效果 —— 必须反转传参 C.toggle(!on)。
   return (
     <div style={C.card}>
       <div style={C.cardTop}>
@@ -375,7 +377,7 @@ function AutoManageCard(props: {
         </h3>
         <button
           type="button"
-          style={{ ...C.toggle(on), ...(busy ? C.toggleDisabled : {}) }}
+          style={{ ...C.toggle(!on), ...(busy ? C.toggleDisabled : {}) }}
           disabled={busy}
           onClick={onToggle}
         >
