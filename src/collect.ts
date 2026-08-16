@@ -1,0 +1,288 @@
+/**
+ * 数据收集：MCP 清单（loader 行 × schema 聚合）与 Skill 清单（目录快照）。
+ *
+ * 从 index.ts 拆出（可维护性批次 P1-1）：collectMcp / collectSkills / 聚合缓存 /
+ * 分域缓存句柄。依赖方向：本模块只被 routes.ts / index.ts 消费。
+ */
+import type { Context } from '@deepseek-ai/cordis'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
+import type { McpRow, McpView, SkillsView } from './shared-types'
+import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
+import type { CatalogServer } from './catalog'
+import type { McpCallController } from './mcpcall'
+import type { CatalogRuntime } from './index'
+import { messageOf } from './util'
+
+/** 分域缓存 TTL：事件驱动失效为主，TTL 只是兜底（事件丢失场景） */
+export const DOMAIN_TTL_MS = 60_000
+/** 已确认的 skill 状态在 collectState 中覆盖 snapshot 旧值的有效期 */
+export const CONFIRMED_SKILL_TTL_MS = 60_000
+/** skill toggle 确认轮询间隔（ctx.timeout，随 ctx 生命周期）。 */
+export const SKILL_TOGGLE_POLL_MS = 80
+
+/**
+ * 最近一次 toggle 确认过的 skill 状态（name → modelInvocable）。
+ * 服务端轮询用 skills.get 实时读文件确认，早于 snapshot 的发现缓存失效，
+ * 用它覆盖 collectState 里的陈旧 candidate 值。
+ */
+export const confirmedSkills = new Map<string, { modelInvocable: boolean; at: number }>()
+
+/** Skill 行视图（host 内部使用；对外形状见 shared-types 的 SkillRow）。 */
+export interface SkillView {
+  name: string
+  description: string
+  source: string
+  modelInvocable: boolean
+  userInvocable: boolean
+  path?: string
+}
+
+export interface Deps {
+  ctx: Context
+  caches: DomainCaches
+  catalogRuntime: CatalogRuntime
+  /** 中间层控制层（mcp_call 的 AI 启用标记查询/清除）。 */
+  controller?: McpCallController
+}
+
+/** 分域缓存句柄：apply 创建，makeRoutes 消费，事件失效由 apply 订阅。 */
+export interface DomainCaches {
+  mcpCache: Map<string, { at: number; promise: Promise<McpView> }>
+  skillsCache: Map<string, { at: number; promise: Promise<SkillsView> }>
+  /** MCP 工具聚合缓存（per scope），tools/change 时随 mcpCache 一起清 */
+  mcpAggregates: Map<object | null, { at: number; value: McpAggregate }>
+  invalidateMcp: () => void
+  invalidateSkills: () => void
+}
+
+export function createDomainCaches(): DomainCaches {
+  const mcpCache = new Map<string, { at: number; promise: Promise<McpView> }>()
+  const skillsCache = new Map<string, { at: number; promise: Promise<SkillsView> }>()
+  const mcpAggregates = new Map<object | null, { at: number; value: McpAggregate }>()
+  return {
+    mcpCache,
+    skillsCache,
+    mcpAggregates,
+    invalidateMcp: () => {
+      mcpCache.clear()
+      mcpAggregates.clear()
+    },
+    invalidateSkills: () => skillsCache.clear(),
+  }
+}
+
+function tokenEstimate(parameters: unknown): number {
+  try {
+    return Math.max(1, Math.round(JSON.stringify(parameters ?? {}).length / 4))
+  } catch {
+    return 1
+  }
+}
+
+function serverOf(name: string): string | null {
+  if (!name.startsWith('mcp__')) return null
+  const rest = name.slice('mcp__'.length)
+  const at = rest.indexOf('__')
+  if (at < 0) return null
+  return rest.slice(0, at)
+}
+
+/** 写时清理过期条目（P2-8）：分域缓存 / 聚合 / 已确认 skill 的 Map 长期运行不膨胀。 */
+export function pruneExpired<T>(map: Map<T, { at: number }>, now: number): void {
+  for (const [key, entry] of map) {
+    if (now - entry.at >= DOMAIN_TTL_MS) map.delete(key)
+  }
+}
+
+export function resolveAgent(ctx: Context, sessionId: string | undefined) {
+  if (sessionId) {
+    // SessionId 是品牌类型；HTTP query 字符串需显式转换
+    const byId = ctx.agents.get(sessionId as Parameters<typeof ctx.agents.get>[0])
+    if (byId) return byId
+  }
+  const roots = ctx.agents.roots()
+  if (roots.length > 0) return roots[0]
+  return ctx.agents.list()[0]
+}
+
+function baseView(
+  ctx: Context,
+  agent: ReturnType<typeof resolveAgent>,
+  cwd: string | undefined,
+): Pick<McpView, 'sessionId' | 'preset' | 'cwd'> {
+  let preset: string | null = null
+  try {
+    if (agent) preset = ctx.agentPresets.composedPreset(agent.ctx) ?? null
+  } catch {
+    preset = null
+  }
+  return { sessionId: agent ? agent.id : null, preset, cwd: cwd ?? null }
+}
+
+/** MCP 工具聚合结果：per-server 工具数 + token 估算。tools/change 间隙复用，跳过 schemas 深克隆。 */
+export interface McpAggregate {
+  byServer: Map<string, { tools: number; tokens: number }>
+  mcpToolsTotal: number
+  mcpTokensTotal: number
+}
+
+function computeAggregate(schemas: Array<{ name?: string; parameters?: unknown }>): McpAggregate {
+  const byServer = new Map<string, { tools: number; tokens: number }>()
+  let mcpToolsTotal = 0
+  let mcpTokensTotal = 0
+  for (const schema of schemas) {
+    const server = serverOf(String(schema.name ?? ''))
+    if (!server) continue
+    const entry = byServer.get(server) ?? { tools: 0, tokens: 0 }
+    entry.tools += 1
+    entry.tokens += tokenEstimate(schema.parameters)
+    byServer.set(server, entry)
+    mcpToolsTotal += 1
+    mcpTokensTotal += tokenEstimate(schema.parameters)
+  }
+  return { byServer, mcpToolsTotal, mcpTokensTotal }
+}
+
+/**
+ * 按 scope 复用的 MCP 聚合缓存（C 项优化）：tools.schemas 深克隆 300+ 工具是
+ * collectMcp 最重的一步；聚合结果在 tools/change 事件间隙直接复用，
+ * TTL 只是事件丢失时的兜底。key = scopeKey（null 表示全局视图）。
+ */
+function getMcpAggregate(
+  ctx: Context,
+  caches: DomainCaches,
+  scopeKey: object | undefined,
+  errors: string[],
+): McpAggregate {
+  const key = scopeKey ?? null
+  pruneExpired(caches.mcpAggregates, Date.now())
+  const hit = caches.mcpAggregates.get(key)
+  if (hit && Date.now() - hit.at < DOMAIN_TTL_MS) return hit.value
+  let schemas: Array<{ name?: string; parameters?: unknown }> = []
+  try {
+    schemas = scopeKey ? ctx.tools.schemas(scopeKey) : ctx.tools.schemas()
+  } catch (error) {
+    errors.push(`tools.schemas: ${messageOf(error)}`)
+  }
+  const value = computeAggregate(schemas)
+  caches.mcpAggregates.set(key, { at: Date.now(), value })
+  return value
+}
+
+/** 停用态 token 估算缓存（P2-6）：fetchedAt 不变则复用，避免每次面板请求
+ * 对停用 server（如 cheatengine 173 工具）全量 JSON.stringify。 */
+function catalogTokens(runtime: CatalogRuntime, serverName: string, info: CatalogServer | undefined): number {
+  if (!info) return 0
+  const hit = runtime.tokenCache.get(serverName)
+  if (hit && hit.fetchedAt === info.fetchedAt) return hit.tokens
+  const tokens = info.tools.reduce((sum, t) => sum + tokenEstimate(t.parameters), 0)
+  runtime.tokenCache.set(serverName, { fetchedAt: info.fetchedAt, tokens })
+  return tokens
+}
+
+async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<McpView> {
+  const { ctx } = deps
+  const errors: string[] = []
+  const agent = resolveAgent(ctx, sessionId)
+  const scopeKey = agent ? scopeOf(agent.ctx) : undefined
+  const cwd = agent?.session?.header?.cwd ?? undefined
+
+  // MCP：loader 行 × schema 聚合（聚合结果版本化复用）
+  const { byServer, mcpToolsTotal, mcpTokensTotal } = getMcpAggregate(ctx, deps.caches, scopeKey, errors)
+
+  const mcp: McpRow[] = []
+  try {
+    for (const entry of ctx.loader.entries()) {
+      if (!isMcpEntry(entry)) continue
+      const serverName = serverNameOf(entry)
+      const agg = byServer.get(serverName)
+      const liveTools = agg?.tools ?? 0
+      const running = entry.fiber !== undefined
+      const disabled = entry.disabled
+      // 面板联动（P3）：停用/未挂载时优先显示 catalog 目录值（工具数与 token 估算），
+      // 让用户看到「该 MCP 有哪些工具可用」而不只是 0
+      const catalogInfo = deps.catalogRuntime.catalog[serverName]
+      const displayTools = liveTools > 0 ? liveTools : catalogInfo?.tools.length ?? 0
+      const displayTokens =
+        liveTools > 0 ? (agg?.tokens ?? 0) : catalogTokens(deps.catalogRuntime, serverName, catalogInfo)
+      const status: McpRow['status'] = disabled
+        ? 'disabled'
+        : running
+          ? liveTools > 0
+            ? 'active'
+            : 'idle'
+          : 'failed'
+      const transportRaw = mcpEntryConfig(entry)?.transport
+      mcp.push({
+        entryId: entry.id,
+        rowId: entry.options.id,
+        serverName,
+        transport: transportRaw ? String(transportRaw) : null,
+        disabled,
+        running,
+        tools: displayTools,
+        tokens: displayTokens,
+        status,
+        modelVisible:
+          !disabled &&
+          !(deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(serverName) ?? false)),
+      })
+    }
+  } catch (error) {
+    errors.push(`loader.entries: ${messageOf(error)}`)
+  }
+  mcp.sort((a, b) => a.serverName.localeCompare(b.serverName))
+
+  return {
+    ...baseView(ctx, agent, cwd),
+    mcp,
+    mcpTotal: mcp.length,
+    mcpDisabled: mcp.filter((row) => row.disabled).length,
+    mcpToolsTotal,
+    mcpTokensTotal,
+    autoManage: deps.catalogRuntime.autoManage,
+    errors,
+  }
+}
+
+async function collectSkills(deps: Deps, sessionId: string | undefined): Promise<SkillsView> {
+  const { ctx } = deps
+  const errors: string[] = []
+  const agent = resolveAgent(ctx, sessionId)
+  const cwd = agent?.session?.header?.cwd ?? undefined
+
+  // Skills
+  const skills: SkillView[] = []
+  let skillsModelVisible = 0
+  try {
+    const snapshot = await ctx.skills.snapshot({ scope: agent, cwd })
+    for (const summary of snapshot.skills) {
+      // toggle 确认值覆盖：snapshot 的 candidate 缓存可能落后于 watcher 失效
+      // （skills.get 实时读文件已确认新值，snapshot 的发现缓存要等 watcher 200ms 生效）。
+      // 60s 内确认过的 skill 以确认值为准，避免 UI 翻回 + state 缓存钉住旧值。
+      const confirmed = confirmedSkills.get(summary.name)
+      const modelInvocable =
+        confirmed && Date.now() - confirmed.at < CONFIRMED_SKILL_TTL_MS ? confirmed.modelInvocable : summary.invocation?.modelInvocable !== false
+      if (modelInvocable) skillsModelVisible += 1
+      skills.push({
+        name: summary.name,
+        description: summary.description ?? '',
+        source: summary.source ?? 'unknown',
+        modelInvocable,
+        userInvocable: summary.invocation?.userInvocable !== false,
+      })
+    }
+  } catch (error) {
+    errors.push(`skills.snapshot: ${messageOf(error)}`)
+  }
+
+  return {
+    ...baseView(ctx, agent, cwd),
+    skills,
+    skillsTotal: skills.length,
+    skillsModelVisible,
+    errors,
+  }
+}
+
+export { collectMcp, collectSkills }

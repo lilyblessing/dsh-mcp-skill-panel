@@ -153,6 +153,21 @@ check('setRowFlag 行为不变', () => {
   assert.throws(() => index.setRowFlag(text, 'zzz', 'disabled', true))
 })
 
+// setSkillFlag / rowDisabledState（可维护性批次 P1-1 拆出 preset.ts 后的回归护栏）
+check('setSkillFlag 注入/移除 + rowDisabledState 读取', () => {
+  const text = '---\ntags:\n  - a\n---\n# title\n'
+  const withFlag = index.setSkillFlag(text, true)
+  assert.ok(withFlag.includes('disable-model-invocation: true'))
+  const back = index.setSkillFlag(withFlag, false)
+  assert.ok(!back.includes('disable-model-invocation'))
+  assert.equal(back, text)
+
+  const comp = '- id: mcp-a\n  name: "@deepseek-ai/dsh-mcp-client"\n  disabled: true\n  config:\n    serverName: aaa\n- id: b\n'
+  assert.equal(index.rowDisabledState(comp, 'mcp-a'), true)
+  assert.equal(index.rowDisabledState(comp, 'b'), null)
+  assert.equal(index.rowDisabledState('- id: c\n  name: x\n', 'c'), null)
+})
+
 // Config schema 含 autoManage 相关字段（构建产物可被实例化）
 check('index.Config schema 存在（schemastery Schema）且 inject 含 systemPrompt/timer', () => {
   assert.ok(index.Config) // schemastery Schema 是函数形式

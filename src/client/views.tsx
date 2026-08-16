@@ -1,52 +1,10 @@
 /**
  * MCP 与技能管理面板：MCP 服务器 / 技能 双标签页，统计头 + 卡片 + 启停开关。
  * 样式全部 JS 内联（宿主全局 CSS 可能覆盖注入的 class），颜色走 --dsw-alias-* 主题变量。
+ * 视图形状类型来自 shared-types（与 host 单一来源，type-only import 不打包）。
  */
 import React, { useCallback, useEffect, useState } from 'react'
-
-export interface McpRow {
-  entryId: string
-  rowId: string
-  serverName: string
-  transport: string | null
-  disabled: boolean
-  running: boolean
-  tools: number
-  tokens: number
-  status: 'active' | 'disabled' | 'idle' | 'failed'
-  modelVisible: boolean
-}
-
-export interface SkillRow {
-  name: string
-  description: string
-  source: string
-  modelInvocable: boolean
-  userInvocable: boolean
-}
-
-export interface McpView {
-  sessionId: string | null
-  preset: string | null
-  cwd: string | null
-  mcp: McpRow[]
-  mcpTotal: number
-  mcpDisabled: number
-  mcpToolsTotal: number
-  mcpTokensTotal: number
-  autoManage: boolean
-  errors: string[]
-}
-
-export interface SkillsView {
-  sessionId: string | null
-  preset: string | null
-  cwd: string | null
-  skills: SkillRow[]
-  skillsTotal: number
-  skillsModelVisible: number
-  errors: string[]
-}
+import type { McpRow, McpView, SkillRow, SkillsView } from '../shared-types'
 
 interface Props {
   /** 由 locale 插槽注入：NS 字典的翻译函数 */
@@ -228,35 +186,26 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
   const mcpSeq = React.useRef(0)
   const skillsSeq = React.useRef(0)
 
-  const loadMcp = useCallback(() => {
-    const seq = ++mcpSeq.current
+  // P2-7：loadMcp/loadSkills 合并为通用加载器（seq guard + 错误处理单一实现）
+  const load = useCallback((part: 'mcp' | 'skills') => {
+    const ref = part === 'mcp' ? mcpSeq : skillsSeq
+    const seq = ++ref.current
     setError(null)
-    fetch('/api/mcp-skill-panel/state?part=mcp')
-      .then((res) => res.json() as Promise<{ ok: boolean; state?: McpView; error?: string }>)
+    fetch(`/api/mcp-skill-panel/state?part=${part}`)
+      .then((res) => res.json() as Promise<{ ok: boolean; state?: McpView | SkillsView; error?: string }>)
       .then((body) => {
         if (!body.ok || !body.state) throw new Error(body.error ?? 'bad response')
-        if (seq !== mcpSeq.current) return
-        setMcp(body.state)
+        if (seq !== ref.current) return
+        if (part === 'mcp') setMcp(body.state as McpView)
+        else setSkills(body.state as SkillsView)
       })
       .catch((err: unknown) => {
-        if (seq === mcpSeq.current) setError(err instanceof Error ? err.message : String(err))
+        if (seq === ref.current) setError(err instanceof Error ? err.message : String(err))
       })
   }, [])
 
-  const loadSkills = useCallback(() => {
-    const seq = ++skillsSeq.current
-    setError(null)
-    fetch('/api/mcp-skill-panel/state?part=skills')
-      .then((res) => res.json() as Promise<{ ok: boolean; state?: SkillsView; error?: string }>)
-      .then((body) => {
-        if (!body.ok || !body.state) throw new Error(body.error ?? 'bad response')
-        if (seq !== skillsSeq.current) return
-        setSkills(body.state)
-      })
-      .catch((err: unknown) => {
-        if (seq === skillsSeq.current) setError(err instanceof Error ? err.message : String(err))
-      })
-  }, [])
+  const loadMcp = useCallback(() => load('mcp'), [load])
+  const loadSkills = useCallback(() => load('skills'), [load])
 
   useEffect(() => {
     // 初次挂载与每次切 tab：服务端有 60s 分域缓存兜底，成本低，换来切换即新鲜
@@ -399,6 +348,11 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
   )
 }
 
+/** P2-7：状态徽标小组件（替代散落的 C.badge span 样板）。 */
+function Badge(props: { color: string; bg: string; children: React.ReactNode }): React.ReactElement {
+  return <span style={C.badge(props.color, props.bg)}>{props.children}</span>
+}
+
 function AutoManageCard(props: {
   on: boolean
   busy: boolean
@@ -411,14 +365,12 @@ function AutoManageCard(props: {
       <div style={C.cardTop}>
         <h3 style={C.cardTitle}>
           {t('ri.autoManageTitle')}
-          <span
-            style={C.badge(
-              on ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-tertiary)',
-              on ? 'var(--dsw-alias-state-success-tertiary)' : 'var(--dsw-alias-fill-l2)',
-            )}
+          <Badge
+            color={on ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-tertiary)'}
+            bg={on ? 'var(--dsw-alias-state-success-tertiary)' : 'var(--dsw-alias-fill-l2)'}
           >
             {on ? t('ri.autoManageOn') : t('ri.autoManageOff')}
-          </span>
+          </Badge>
         </h3>
         <button
           type="button"
@@ -471,21 +423,18 @@ function McpPanel(props: {
             <div style={C.cardTop}>
               <h3 style={C.cardTitle}>
                 {row.serverName}
-                <span style={C.badge(st.color, st.bg)}>{st.label}</span>
+                <Badge color={st.color} bg={st.bg}>
+                  {st.label}
+                </Badge>
                 {row.modelVisible ? (
-                  <span
-                    style={C.badge(
-                      'var(--dsw-alias-state-info-primary, #4a90d9)',
-                      'var(--dsw-alias-state-info-tertiary, rgba(74,144,217,0.15))',
-                    )}
-                  >
+                  <Badge color="var(--dsw-alias-state-info-primary, #4a90d9)" bg="var(--dsw-alias-state-info-tertiary, rgba(74,144,217,0.15))">
                     {t('ri.modelVisible')}
-                  </span>
+                  </Badge>
                 ) : (
                   !row.disabled && (
-                    <span style={C.badge('var(--dsw-alias-label-tertiary)', 'var(--dsw-alias-fill-l2)')}>
+                    <Badge color="var(--dsw-alias-label-tertiary)" bg="var(--dsw-alias-fill-l2)">
                       {t('ri.modelHidden')}
-                    </span>
+                    </Badge>
                   )
                 )}
               </h3>
@@ -538,14 +487,12 @@ function SkillPanel(props: {
             <div style={C.cardTop}>
               <h3 style={C.cardTitle}>
                 {row.name}
-                <span
-                  style={C.badge(
-                    visible ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-tertiary)',
-                    visible ? 'var(--dsw-alias-state-success-tertiary)' : 'var(--dsw-alias-fill-l2)',
-                  )}
+                <Badge
+                  color={visible ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-tertiary)'}
+                  bg={visible ? 'var(--dsw-alias-state-success-tertiary)' : 'var(--dsw-alias-fill-l2)'}
                 >
                   {visible ? t('ri.modelVisible') : t('ri.modelHidden')}
-                </span>
+                </Badge>
               </h3>
               <button
                 type="button"
