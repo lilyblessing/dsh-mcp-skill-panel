@@ -29,18 +29,42 @@ import { readFile, writeFile, rename, mkdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
+import type { Catalog, CatalogEntry } from './catalog'
+import { snapshotFromSchemas, loadCatalog, saveCatalog } from './catalog'
+import { installMcpVisibilityFilter } from './filter'
+import type { McpControlCtx } from './mcpcall'
+import { createMcpCallController, installMcpControlTools } from './mcpcall'
 
 export const name = 'runtime-inventory'
 
-export const inject = ['fs', 'skills', 'tools', 'agents', 'agentPresets', 'loader']
+export const inject = ['fs', 'skills', 'tools', 'agents', 'agentPresets', 'loader', 'systemPrompt', 'timer']
 
 export interface Config {
   /** @deprecated 0.3.0 起分域缓存由事件驱动失效，TTL 为常量；保留字段仅为向后兼容 */
   cacheTtlMs?: number
+  /**
+   * 形态 2（中间层代理）：模型面只暴露 mcp_search + mcp_call，所有 `mcp__*`
+   * 工具对模型不可见（system-prompt/assemble 过滤）。默认 false（现状，纯面板）。
+   */
+  autoManage?: boolean
+  /** 保活回收窗口（ms）。默认 30_000。 */
+  keepAliveMs?: number
+  /** mcp_search 缺省 top-K。默认 5。 */
+  searchLimitDefault?: number
+  /** mcp_search top-K 上限。默认 10。 */
+  searchLimitMax?: number
+  /** 能力摘要表（mcp_search 空查询时返回）。 */
+  serverSummary?: Record<string, string>
 }
 
 export const Config: Schema<Config> = Schema.object({
   cacheTtlMs: Schema.number().min(0),
+  autoManage: Schema.boolean().description('MCP 中间层控制（模型经 mcp_search/mcp_call 统一使用 MCP）').default(false),
+  keepAliveMs: Schema.number().min(1000).description('MCP 保活空闲回收窗口（ms）').default(30_000),
+  searchLimitDefault: Schema.number().min(1).description('mcp_search 缺省 top-K').default(5),
+  searchLimitMax: Schema.number().min(1).description('mcp_search top-K 上限').default(10),
+  serverSummary: Schema.dict(Schema.string()).description('MCP 能力摘要表（serverName → 一句话）'),
 })
 
 const API_PREFIX = '/api/mcp-skill-panel'
@@ -204,6 +228,14 @@ const LEGACY_STATE_DIR = join(homedir(), '.dsh', 'dsh-runtime-inventory')
 const STATE_DIR = join(homedir(), '.dsh', 'dsh-mcp-skill-panel')
 const STATE_FILE = join(STATE_DIR, 'state.json')
 
+/** 私有 catalog 持久化目录与文件（P1）。 */
+const CATALOG_DIR = STATE_DIR
+const CATALOG_FILE = join(CATALOG_DIR, 'catalog.json')
+/** mcp_call 注册/调用的默认超时（读 entry config toolCallTimeoutMs，缺省回退）。 */
+const DEFAULT_TOOL_TIMEOUT_MS = 60_000
+/** tools/change 后增量快照的去抖窗口。 */
+const CATALOG_SNAPSHOT_DEBOUNCE_MS = 150
+
 /** 每个预设文件（key=文件绝对路径）→ 每个 mcp 行 → 意图与上次物化状态。 */
 interface McpRowState {
   /** toggle 时用户意图：是否停用 */
@@ -212,7 +244,11 @@ interface McpRowState {
   lastApplied: boolean | null
 }
 
-type StateFile = { mcp?: Record<string, Record<string, McpRowState>> }
+type StateFile = {
+  mcp?: Record<string, Record<string, McpRowState>>
+  /** AI 自动启用标记（mcp_call 保活启用）：entryId → 上次启用时间。 */
+  ai?: Record<string, { at: number }>
+}
 
 async function readState(): Promise<StateFile> {
   try {
@@ -281,6 +317,165 @@ export async function syncPresetFiles(ctx: Context): Promise<number> {
   }
   await writeState(state)
   return materialized
+}
+
+/* ── MCP 中间层控制（P1 catalog + P2 控制层） ───────────────────────── */
+
+/** AI-owner 标记读写：state.json 的 ai 段（entryId → {at}）。 */
+async function setStateAiOwner(entryId: string, at: number): Promise<void> {
+  const state = await readState()
+  state.ai ??= {}
+  state.ai[entryId] = { at }
+  await writeState(state)
+}
+
+async function clearStateAiOwner(entryId: string): Promise<void> {
+  const state = await readState()
+  if (!state.ai || !(entryId in state.ai)) return
+  delete state.ai[entryId]
+  await writeState(state)
+}
+
+/** 从 loader entries 反查某 serverName 对应的 mcp 行（serverName 取自 config）。 */
+function findMcpEntry(ctx: Context, serverName: string): Entry | undefined {
+  for (const entry of ctx.loader.entries()) {
+    if (entry.options.group) continue
+    const cfg = entry.options.config
+    const isMcp =
+      entry.options.name === '@deepseek-ai/dsh-mcp-client' ||
+      (cfg !== null && typeof cfg === 'object' && 'serverName' in (cfg as object))
+    if (!isMcp) continue
+    const name = String((cfg as { serverName?: unknown } | undefined)?.serverName ?? entry.options.id)
+    if (name === serverName) return entry
+  }
+  return undefined
+}
+
+/** server 自己的注册/调用超时阈值。 */
+function serverTimeoutMs(ctx: Context, serverName: string): number {
+  const entry = findMcpEntry(ctx, serverName)
+  const raw = entry?.options?.config as { toolCallTimeoutMs?: unknown } | undefined
+  const t = raw?.toolCallTimeoutMs
+  return typeof t === 'number' && Number.isFinite(t) && t > 0 ? t : DEFAULT_TOOL_TIMEOUT_MS
+}
+
+/** 私有 catalog 内存态 + 持久化。 */
+interface CatalogRuntime {
+  catalog: Catalog
+  dirty: boolean
+  persisting: boolean
+}
+
+function sameToolList(a: CatalogEntry[], b: CatalogEntry[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i].name !== b[i].name || a[i].description !== b[i].description) return false
+  }
+  return true
+}
+
+/** 原子写回 catalog.json；失败保留 dirty 标记以在下次重试。 */
+async function persistCatalog(next: () => Context, runtime: CatalogRuntime): Promise<void> {
+  if (runtime.persisting) return
+  if (!runtime.dirty) return
+  runtime.persisting = true
+  try {
+    await saveCatalog(CATALOG_DIR, runtime.catalog)
+    runtime.dirty = false
+  } catch (error) {
+    const ctx = next()
+    ctx.logger.warn?.(`mcp-skill-panel: catalog persist failed: ${messageOf(error)}`)
+  } finally {
+    runtime.persisting = false
+    if (runtime.dirty) void persistCatalog(next, runtime)
+  }
+}
+
+/** 取任一 live agent 的 scope 的 schema 视图（preset 层共享，任一 agent 即可）。 */
+function liveSchemas(ctx: Context): Array<{ name?: unknown; description?: unknown; parameters?: unknown }> {
+  const agent = resolveAgent(ctx, undefined)
+  const scopeKey = agent ? scopeOf(agent.ctx) : undefined
+  return (scopeKey ? ctx.tools.schemas(scopeKey) : ctx.tools.schemas()) as Array<{
+    name?: unknown
+    description?: unknown
+    parameters?: unknown
+  }>
+}
+
+/** 对所有当前 enabled 的 mcp server 重新快照。 */
+async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime): Promise<void> {
+  const next = { ...runtime.catalog }
+  let changed = false
+  const schemas = liveSchemas(ctx)
+  for (const entry of ctx.loader.entries()) {
+    if (entry.options.group) continue
+    const cfg = entry.options.config
+    const isMcp =
+      entry.options.name === '@deepseek-ai/dsh-mcp-client' ||
+      (cfg !== null && typeof cfg === 'object' && 'serverName' in (cfg as object))
+    if (!isMcp) continue
+    if (entry.disabled) continue
+    const serverName = String((cfg as { serverName?: unknown } | undefined)?.serverName ?? entry.options.id)
+    let tools: CatalogEntry[]
+    try {
+      tools = snapshotFromSchemas(schemas, serverName)
+    } catch {
+      continue // 采集失败：last-good，保留旧快照
+    }
+    const prev = next[serverName]
+    if (prev && prev.source === 'live' && sameToolList(prev.tools, tools)) continue
+    // last-good：live 快照为空时保留已有缓存（避免误清）
+    if (tools.length === 0 && prev && prev.tools.length > 0 && prev.source === 'cached') continue
+    next[serverName] = { tools, fetchedAt: Date.now(), source: 'live' }
+    changed = true
+  }
+  runtime.catalog = next
+  if (changed) {
+    runtime.dirty = true
+    void persistCatalog(() => ctx, runtime)
+  }
+}
+
+/** 对单个 server 做一次实时快照（惰性采集兜底）。 */
+async function snapshotServer(ctx: Context, runtime: CatalogRuntime, serverName: string): Promise<void> {
+  const next = { ...runtime.catalog }
+  let tools: CatalogEntry[]
+  try {
+    tools = snapshotFromSchemas(liveSchemas(ctx), serverName)
+  } catch {
+    return // last-good：保留旧快照
+  }
+  if (tools.length === 0) {
+    const prev = runtime.catalog[serverName]
+    if (prev && prev.tools.length > 0) return // 保留缓存
+  }
+  const prev = runtime.catalog[serverName]
+  if (prev && prev.source === 'live' && sameToolList(prev.tools, tools)) return
+  next[serverName] = { tools, fetchedAt: Date.now(), source: 'live' }
+  runtime.catalog = next
+  runtime.dirty = true
+  void persistCatalog(() => ctx, runtime)
+}
+
+/** 构建控制层依赖（McpControlCtx）：封闭 catalog/loader/state 的 IO。 */
+function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config): McpControlCtx {
+  return {
+    keepAliveMs: config.keepAliveMs ?? 30_000,
+    searchLimitDefault: config.searchLimitDefault ?? 5,
+    searchLimitMax: config.searchLimitMax ?? 10,
+    serverSummary: config.serverSummary ?? {},
+    getCatalog: () => runtime.catalog,
+    setCatalog: (catalog) => {
+      runtime.catalog = catalog
+    },
+    persistCatalog: () => persistCatalog(() => ctx, runtime),
+    resolveEntry: (serverName) => findMcpEntry(ctx, serverName),
+    serverTimeoutMs: (serverName) => serverTimeoutMs(ctx, serverName),
+    setAiOwner: (entryId, at) => setStateAiOwner(entryId, at),
+    clearAiOwner: (entryId) => clearStateAiOwner(entryId),
+    snapshotServer: (serverName) => snapshotServer(ctx, runtime, serverName),
+    snapshotEnabled: () => snapshotEnabled(ctx, runtime),
+  }
 }
 
 /* ── 数据收集 ──────────────────────────────────────────────────────────── */
@@ -746,4 +941,53 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     }, 'runtime-inventory: routes')
   })
+
+  // 形态 2（中间层代理）接线：autoManage=false 时为纯面板，零额外行为。
+  if (config.autoManage) {
+    const runtime: CatalogRuntime = { catalog: {}, dirty: false, persisting: false }
+    // 启动早期加载持久化 catalog（last-good 兜底）；失败置空不阻塞。
+    void loadCatalog(CATALOG_DIR).then(
+      (catalog) => {
+        runtime.catalog = catalog
+      },
+      () => {
+        runtime.catalog = {}
+      },
+    )
+
+    const control: McpControlCtx = buildMcpControl(ctx, runtime, config)
+    const controller = createMcpCallController(ctx, control)
+
+    // 过滤 + 工具注册 + 空闲回收器，全部挂 ctx.effect（卸载即清理）。
+    ctx.effect(() => {
+      const disposers: Array<() => void> = []
+      disposers.push(installMcpVisibilityFilter(ctx))
+      disposers.push(installMcpControlTools(ctx, control, controller))
+      const offReaper = controller.startIdleReaper()
+      disposers.push(() => offReaper())
+      return () => {
+        for (let i = disposers.length - 1; i >= 0; i -= 1) disposers[i]()
+      }
+    }, 'mcp-skill-panel: autoManage control')
+
+    // tools/change 增量采集：对 enabled server 重新快照（含 mcp_call 临时启用后）。
+    ctx.effect(() => {
+      let scheduled = false
+      const off = ctx.root.on(
+        'tools/change',
+        () => {
+          if (scheduled) return
+          scheduled = true
+          ctx.timeout(() => {
+            scheduled = false
+            void control.snapshotEnabled()
+          }, CATALOG_SNAPSHOT_DEBOUNCE_MS)
+        },
+      )
+      return off
+    }, 'mcp-skill-panel: catalog snapshot')
+
+    // 初始快照（可能还没有 agent，mcp__* 会在后续增量补全）。
+    void control.snapshotEnabled().catch(() => {})
+  }
 }

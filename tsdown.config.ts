@@ -23,6 +23,21 @@ export default defineConfig([
     },
   },
   {
+    // 私有 catalog（纯逻辑）单独产物，供 scripts/selftest-mcp.mjs 用临时目录自测；
+    // external 与外置铁律一致，不内联任何 @deepseek-ai 运行时。
+    entry: ['src/catalog.ts'],
+    format: ['esm'],
+    outDir: 'lib',
+    target: 'node22',
+    platform: 'node',
+    external: [/^@deepseek-ai\//, /^node:/],
+    clean: false,
+    sourcemap: false,
+    outputOptions: {
+      entryFileNames: 'catalog.js',
+    },
+  },
+  {
     entry: ['src/client/index.ts'],
     // cjs：ModuleLoader factory 提供 require/module/exports，import 必须转成 require 调用
     format: ['cjs'],
