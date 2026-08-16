@@ -193,6 +193,7 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 
 | 版本 | 内容 |
 | --- | --- |
+| 0.4.6 | 修复 0.4.5 引入的 catalog 清空事故：prune 增加「loader 视图为空跳过」保护（组合未挂载时序不再删 last-good）；空采集一律不写盘（prev 丢失后空快照不再续写污染） |
 | 0.4.5 | catalog 失效清理：移除 MCP 行 / serverName 重命名后，残留快照从 catalog 与 mcp_search 能力表中自动清除（停用的 server 保留供面板回填） |
 | 0.4.4 | 可维护性重构：index.ts 拆分（state.ts/preset.ts/collect.ts/routes.ts/util.ts/mcp-entry.ts/shared-types.ts）；MCP entry 判定 4 处重复收敛；前后端视图类型单一来源；HTTP 端点样板收敛（defineHandler/ok）；client 平台类型声明替换 any；setSkillFlag 移除残留空行修复；peerDependencies 补全 |
 | 0.4.3 | 性能优化：修复 restore 竞态（用户中途手动打开后 mcp_call 失败不再误关）；装配过滤回合内可见性 Map 缓存（560 次比较→O(1) 查表）；schemas 500ms 窗口复用；catalog 写盘 300ms 防抖合并；state.json 内存态 + 写队列合并；摘要表截断 80 字符；停用态 token 估算缓存；缓存 Map 主动 TTL 清理；snapshotServer 死代码清理 |

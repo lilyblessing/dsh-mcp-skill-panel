@@ -285,24 +285,27 @@ async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime): Promise<v
       }
       const prev = next[serverName]
       if (prev && prev.source === 'live' && sameToolList(prev.tools, tools)) continue
-      // last-good：live 快照为空时保留已有缓存（避免误清）。
-      // 注意：磁盘加载的 prev.source 是 'live'（保存时写入的），不能要求 'cached'。
-      if (tools.length === 0 && prev && prev.tools.length > 0) continue
+      // last-good（v0.4.6 加强）：空采集（tools 为空）一律不写盘 —— 无论 prev 是否存在。
+      // 原守卫只在 prev 有数据时保留，但 prev 因外部清空/时序丢失后，空快照会续写污染
+      // last-good（0.4.5 实测：某次快照 loader 视图为空 → prune 清空 → 空快照续写）。
+      if (tools.length === 0) continue
       next[serverName] = { tools, fetchedAt: Date.now(), source: 'live' }
       changed = true
     }
-    // 失效清理（v0.4.5）：删除 loader 中已不存在的 server 的残留快照
-    // （移除 MCP 行 / serverName 重命名后，旧键会一直留在 catalog 和 mcp_search 摘要里）。
-    // 停用的 server（行还在 loader，disabled=true）算「现存」，保留快照供面板回填。
+    // 失效清理（v0.4.5 → v0.4.6 修复）：
+    // 保护：loader 视图为空（组合未挂载 / 启动时序 / realm 隔离异常）时跳过 prune，
+    // 绝不删除 last-good —— 0.4.5 曾因 alive 集合为空把 catalog 全部清空并写盘。
     const alive = new Set<string>()
     for (const entry of ctx.loader.entries()) {
       if (!isMcpEntry(entry)) continue
       alive.add(serverNameOf(entry))
     }
-    for (const key of Object.keys(next)) {
-      if (!alive.has(key)) {
-        delete next[key]
-        changed = true
+    if (alive.size > 0) {
+      for (const key of Object.keys(next)) {
+        if (!alive.has(key)) {
+          delete next[key]
+          changed = true
+        }
       }
     }
     runtime.catalog = next
