@@ -291,6 +291,20 @@ async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime): Promise<v
       next[serverName] = { tools, fetchedAt: Date.now(), source: 'live' }
       changed = true
     }
+    // 失效清理（v0.4.5）：删除 loader 中已不存在的 server 的残留快照
+    // （移除 MCP 行 / serverName 重命名后，旧键会一直留在 catalog 和 mcp_search 摘要里）。
+    // 停用的 server（行还在 loader，disabled=true）算「现存」，保留快照供面板回填。
+    const alive = new Set<string>()
+    for (const entry of ctx.loader.entries()) {
+      if (!isMcpEntry(entry)) continue
+      alive.add(serverNameOf(entry))
+    }
+    for (const key of Object.keys(next)) {
+      if (!alive.has(key)) {
+        delete next[key]
+        changed = true
+      }
+    }
     runtime.catalog = next
     if (changed) {
       runtime.dirty = true
