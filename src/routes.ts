@@ -67,6 +67,21 @@ function handle(method: 'GET' | 'POST', run: (req: Req) => Promise<object>): (re
   }
 }
 
+/**
+ * 同 path 多 method 路由：webServer 的 exact 路由按 path 唯一（同 path 重复注册
+ * 会中断后续注册），因此 GET+POST 共存的端点必须合并为单个 handler 内部分发。
+ */
+function handleAny(entries: Array<{ method: 'GET' | 'POST'; run: (req: Req) => Promise<object> }>): (req: Req, res: Res) => void {
+  return (req, res) => {
+    const entry = entries.find((e) => e.method === req.method)
+    if (!entry) {
+      json(res, 405, { ok: false, error: 'method-not-allowed' })
+      return
+    }
+    handle(entry.method, entry.run)(req, res)
+  }
+}
+
 /* ── 控制动作 ──────────────────────────────────────────────────────────── */
 
 async function toggleMcp(deps: Deps, entryId: string, disabled: boolean) {
@@ -219,24 +234,28 @@ export function makeRoutes(
     {
       kind: 'exact',
       path: `${API_PREFIX}/config`,
-      handler: handle('POST', async (req) => {
-        const parsed = JSON.parse((await readBody(req)) || '{}') as { autoManage?: boolean }
-        const on = Boolean(parsed.autoManage)
-        const state = await readState()
-        state.config ??= {}
-        state.config.autoManage = on
-        await writeState(state)
-        catalogRuntime.applyAutoManage(on)
-        return { autoManage: catalogRuntime.autoManage }
-      }),
-    },
-    {
-      kind: 'exact',
-      path: `${API_PREFIX}/config`,
-      handler: handle('GET', async () => ({
-        autoManage: catalogRuntime.autoManage,
-        configAutoManage: config.autoManage ?? null,
-      })),
+      handler: handleAny([
+        {
+          method: 'GET',
+          run: async () => ({
+            autoManage: catalogRuntime.autoManage,
+            configAutoManage: config.autoManage ?? null,
+          }),
+        },
+        {
+          method: 'POST',
+          run: async (req) => {
+            const parsed = JSON.parse((await readBody(req)) || '{}') as { autoManage?: boolean }
+            const on = Boolean(parsed.autoManage)
+            const state = await readState()
+            state.config ??= {}
+            state.config.autoManage = on
+            await writeState(state)
+            catalogRuntime.applyAutoManage(on)
+            return { autoManage: catalogRuntime.autoManage }
+          },
+        },
+      ]),
     },
     {
       kind: 'exact',
