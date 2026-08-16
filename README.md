@@ -86,6 +86,8 @@ dsh plugin --profile web add "github:lilyblessing/dsh-mcp-skill-panel#main"
 | GET | `/api/mcp-skill-panel/state?session=<id>&part=<mcp\|skills\|all>` | 清单快照；`part` 分域拉取（前端按 tab 懒加载），缺省 all；session 省略时取首个根 agent |
 | POST | `/api/mcp-skill-panel/mcp/toggle` | `{ entryId, disabled }` |
 | POST | `/api/mcp-skill-panel/skill/toggle` | `{ name, disabled }` |
+| GET | `/api/mcp-skill-panel/debug` | catalog 采集诊断（事件计数/快照现场/内存目录摘要），运维排障用 |
+| POST | `/api/mcp-skill-panel/debug/collect` | 手动触发一次 catalog 采集 |
 
 > 旧前缀 `/api/runtime-inventory/*`（≤0.3.1）仍兼容注册。分域缓存（60s TTL 兜底）由事件驱动精确失效：`tools/change` / `loader/partial-dispose` → MCP 域；`skills/change` → Skill 域。
 
@@ -125,6 +127,7 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 
 | 版本 | 内容 |
 | --- | --- |
+| 0.4.1 | 修复 catalog 采集链路：apply ctx 下 `agents` 为空导致自动采集恒空（fallback `standingKeyFor` 解析 scope）、last-good 守卫失效、启动早期空快照写盘、写盘竞态；新增 debug 诊断端点；案例复测通过（chrome→mimo 跨 server、calcmcp 连击零重复 spawn + 30s 回收） |
 | 0.4.0 | AI 中间层（`autoManage`）：`mcp_search`/`mcp_call` 按需使用 MCP（保活启用 + 空闲回收 + 装配过滤，模型永不见 `mcp__*` schema）；私有 catalog 持久化 + 面板停用态回填目录工具数 |
 | 0.3.2 | API 前缀对齐包名（旧前缀兼容）；本地目录改名 |
 | 0.3.1 | MCP 聚合版本化复用；前端 fetch 乱序防护 |

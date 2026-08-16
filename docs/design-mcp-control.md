@@ -145,9 +145,9 @@ autoManage=false 时：不注册 mcp_search/mcp_call、不过滤装配、回收�
 |---|---|---|
 | P0 | 验证 `system-prompt/assemble` 过滤传导（动态探针：装配过滤 + 确认模型请求工具列表无 mcp__） | ✅ 通过（2026-08-17 探针：96→40 工具，`mcp__*` 56→0） |
 | P1 | catalog：采集/检索/持久化/惰性采集 + 单测 | ✅ 已提交（c42f5ab）+ selftest-mcp.mjs 单测 |
-| P2 | mcp_call + 保活回收 + mcp_search + 能力表 + autoManage 接线 | ✅ 已提交（c42f5ab）；案例复测待 autoManage 实测 |
-| P3 | owner 标记、并发计数、面板联动、README | 面板联动已实现（catalog 值回填停用态 tools/tokens）；owner/并发计数随 P2 提交；README 待随 P4 定稿 |
-| P4 | 发布（版本 bump + 产物 + 文档） | dump-config + 安装验证 |
+| P2 | mcp_call + 保活回收 + mcp_search + 能力表 + autoManage 接线 | ✅ 已提交（c42f5ab）+ **案例复测通过（2026-08-16）**：案例 1 chrome→bilibili→mimo 识图全链路；案例 2 calcmcp 8 次连击零重复 spawn（进程恒 1）+ 30s 空闲自动回收（进程退出 + ai owner 清除） |
+| P3 | owner 标记、并发计数、面板联动、README | ✅ 面板联动已提交（0894214）；owner/并发计数随 P2；README 已定稿 |
+| P4 | 发布（版本 bump + 产物 + 文档） | ✅ v0.4.0 已发布 + 安装验证；**采集链路修复**（见 §11）随 v0.4.1 |
 
 ## 9. 测试方案
 
@@ -163,3 +163,23 @@ autoManage=false 时：不注册 mcp_search/mcp_call、不过滤装配、回收�
 - **过滤走 assemble Waterfall 而非 systemPrompt.tools provider**：provider 是并集（只能加不能减），Waterfall 可改写既有输出
 - **catalog 自建而非引入 Lens**：数据源（tools registry 快照）现成，~300-400 行；Lens 需自建 MCP 客户端且与 loader 体系割裂
 - **过滤监听挂 ctx（后代 ctx 可收 root 事件）**：P0 探针证实 `ctx.on('system-prompt/assemble')` 在动态插件沙箱可用（事件自 emit ctx 向下传播），正式插件用 `ctx.root.on + ctx.effect` 双保险（root 监听不随 fiber 清理，需 effect 归还 disposer）
+
+## 11. 采集链路事故与修复（v0.4.1 实测记录）
+
+**现象**：重启后停用态回填为 0；`catalog.json` 被空快照覆盖。
+
+**根因（2026-08-16 动态探针 + 诊断端点逐步定位）**：
+
+1. **apply ctx 的 `ctx.agents` 为空**：bundle 插件行挂载 ctx 下 `agents.roots()/list()` 恒为 0（realm 隔离），而 webServer 注入的 httpCtx 正常 —— 同一 `liveSchemas()` 在两种上下文结果不同（0 vs 53 工具）。catalog 采集从 v0.4.0 起就依赖 apply ctx 的 agents → 自动采集恒空 → 空快照写盘覆盖 last-good。
+2. **last-good 守卫失效**：`if (tools.length === 0 && prev && prev.tools.length > 0 && prev.source === 'cached')` —— 磁盘加载的 `prev.source` 是 `'live'`（保存时写入的），守卫永不成立。
+3. **启动早期空采集写盘**：loadCatalog（异步）完成前，初始快照 + tools/change 风暴快照均为空 → 若守卫失效则空写盘。
+4. **persistCatalog 写盘竞态**：`persisting` 期间的新变更直接 return 丢弃（dirty 悬挂）。
+
+**修复**：
+- `resolveScopeSchemas()`：agent 不可得时 fallback `agentPresets.standingKeyFor()`（注册表查询，不依赖 agents 实例）
+- last-good 守卫去掉 `source === 'cached'` 条件
+- `loaded` 门：磁盘加载完成前跳过采集
+- persistCatalog 写盘期间置 dirty 排队补写
+- 新增 `/api/mcp-skill-panel/debug`（只读诊断）+ `/debug/collect`（手动触发采集），保留作运维工具
+
+**复测结论（2026-08-16）**：修复后自动采集 `lastMcpTools: 53` ✓、磁盘写盘正常（catalog.json 93KB）、面板停用态回填正常（calcmcp 停用仍显示 3 工具）。

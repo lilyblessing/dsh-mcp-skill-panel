@@ -364,6 +364,22 @@ interface CatalogRuntime {
   catalog: Catalog
   dirty: boolean
   persisting: boolean
+  /** 磁盘加载是否已完成（完成前跳过采集，防止空快照覆盖磁盘 last-good）。 */
+  loaded: boolean
+  /** 诊断计数（debug 端点输出，定位采集链路问题用）。 */
+  diag: {
+    toolsChangeEvents: number
+    snapshots: number
+    lastError: string | null
+    lastAt: number | null
+    lastMcpTools: number | null
+    lastSchemasTotal: number | null
+    lastScope: boolean | null
+    lastAgentRoots: number | null
+    lastAgentList: number | null
+    loadedAt: number | null
+    loadedServers: number | null
+  }
 }
 
 function sameToolList(a: CatalogEntry[], b: CatalogEntry[]): boolean {
@@ -376,7 +392,11 @@ function sameToolList(a: CatalogEntry[], b: CatalogEntry[]): boolean {
 
 /** 原子写回 catalog.json；失败保留 dirty 标记以在下次重试。 */
 async function persistCatalog(next: () => Context, runtime: CatalogRuntime): Promise<void> {
-  if (runtime.persisting) return
+  if (runtime.persisting) {
+    // 正在写盘中：置 dirty 排队（finally 会补一次），而不是丢弃本次变更。
+    runtime.dirty = true
+    return
+  }
   if (!runtime.dirty) return
   runtime.persisting = true
   try {
@@ -391,11 +411,33 @@ async function persistCatalog(next: () => Context, runtime: CatalogRuntime): Pro
   }
 }
 
-/** 取任一 live agent 的 scope 的 schema 视图（preset 层共享，任一 agent 即可）。 */
-function liveSchemas(ctx: Context): Array<{ name?: unknown; description?: unknown; parameters?: unknown }> {
-  const agent = resolveAgent(ctx, undefined)
-  const scopeKey = agent ? scopeOf(agent.ctx) : undefined
-  return (scopeKey ? ctx.tools.schemas(scopeKey) : ctx.tools.schemas()) as Array<{
+/**
+ * 解析 scope 并取 schema 视图（preset 层共享，任一 standing 即可）。
+ *
+ * 关键坑（v0.4.0 实测）：apply ctx（bundle 插件行挂载 ctx）下 `ctx.agents` 解析到
+ * 空实例（realm 隔离，roots/list 均为 0）——从 apply ctx 直接 resolveAgent 永远拿不到
+ * agent，catalog 采集恒为空并可能空写盘覆盖 last-good。因此 agent 不可得时
+ * fallback 到 `agentPresets.standingKeyFor()`（注册表查询，不依赖 agent 实例）。
+ */
+async function resolveScopeSchemas(
+  ctx: Context,
+): Promise<Array<{ name?: unknown; description?: unknown; parameters?: unknown }>> {
+  let scopeKey: unknown
+  try {
+    const agent = resolveAgent(ctx, undefined)
+    scopeKey = agent ? scopeOf(agent.ctx) : undefined
+  } catch {
+    scopeKey = undefined
+  }
+  if (scopeKey === undefined) {
+    try {
+      scopeKey = await ctx.agentPresets.standingKeyFor()
+    } catch {
+      scopeKey = undefined
+    }
+  }
+  if (scopeKey === undefined) return []
+  return ctx.tools.schemas(scopeKey as Parameters<typeof ctx.tools.schemas>[0]) as Array<{
     name?: unknown
     description?: unknown
     parameters?: unknown
@@ -404,35 +446,69 @@ function liveSchemas(ctx: Context): Array<{ name?: unknown; description?: unknow
 
 /** 对所有当前 enabled 的 mcp server 重新快照。 */
 async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime): Promise<void> {
-  const next = { ...runtime.catalog }
-  let changed = false
-  const schemas = liveSchemas(ctx)
-  for (const entry of ctx.loader.entries()) {
-    if (entry.options.group) continue
-    const cfg = entry.options.config
-    const isMcp =
-      entry.options.name === '@deepseek-ai/dsh-mcp-client' ||
-      (cfg !== null && typeof cfg === 'object' && 'serverName' in (cfg as object))
-    if (!isMcp) continue
-    if (entry.disabled) continue
-    const serverName = String((cfg as { serverName?: unknown } | undefined)?.serverName ?? entry.options.id)
-    let tools: CatalogEntry[]
-    try {
-      tools = snapshotFromSchemas(schemas, serverName)
-    } catch {
-      continue // 采集失败：last-good，保留旧快照
-    }
-    const prev = next[serverName]
-    if (prev && prev.source === 'live' && sameToolList(prev.tools, tools)) continue
-    // last-good：live 快照为空时保留已有缓存（避免误清）
-    if (tools.length === 0 && prev && prev.tools.length > 0 && prev.source === 'cached') continue
-    next[serverName] = { tools, fetchedAt: Date.now(), source: 'live' }
-    changed = true
+  runtime.diag.snapshots += 1
+  // 磁盘 last-good 尚未加载完成：跳过采集，避免空快照覆盖磁盘好数据。
+  if (!runtime.loaded) {
+    runtime.diag.lastAt = Date.now()
+    runtime.diag.lastError = 'skipped: catalog not loaded yet'
+    return
   }
-  runtime.catalog = next
-  if (changed) {
-    runtime.dirty = true
-    void persistCatalog(() => ctx, runtime)
+  try {
+    const next = { ...runtime.catalog }
+    let changed = false
+    // 诊断：记录 apply ctx 下 agents/standing 的解析现场
+    let rootsCount = 0
+    let listCount = 0
+    try {
+      rootsCount = ctx.agents.roots().length
+      listCount = ctx.agents.list().length
+    } catch {
+      rootsCount = -1
+      listCount = -1
+    }
+    runtime.diag.lastAgentRoots = rootsCount
+    runtime.diag.lastAgentList = listCount
+    const schemas = await resolveScopeSchemas(ctx)
+    runtime.diag.lastSchemasTotal = schemas.length
+    let mcpTools = 0
+    for (const schema of schemas) {
+      if (String(schema.name ?? '').startsWith('mcp__')) mcpTools += 1
+    }
+    runtime.diag.lastMcpTools = mcpTools
+    runtime.diag.lastScope = mcpTools > 0
+    for (const entry of ctx.loader.entries()) {
+      if (entry.options.group) continue
+      const cfg = entry.options.config
+      const isMcp =
+        entry.options.name === '@deepseek-ai/dsh-mcp-client' ||
+        (cfg !== null && typeof cfg === 'object' && 'serverName' in (cfg as object))
+      if (!isMcp) continue
+      if (entry.disabled) continue
+      const serverName = String((cfg as { serverName?: unknown } | undefined)?.serverName ?? entry.options.id)
+      let tools: CatalogEntry[]
+      try {
+        tools = snapshotFromSchemas(schemas, serverName)
+      } catch {
+        continue // 采集失败：last-good，保留旧快照
+      }
+      const prev = next[serverName]
+      if (prev && prev.source === 'live' && sameToolList(prev.tools, tools)) continue
+      // last-good：live 快照为空时保留已有缓存（避免误清）。
+      // 注意：磁盘加载的 prev.source 是 'live'（保存时写入的），不能要求 'cached'。
+      if (tools.length === 0 && prev && prev.tools.length > 0) continue
+      next[serverName] = { tools, fetchedAt: Date.now(), source: 'live' }
+      changed = true
+    }
+    runtime.catalog = next
+    if (changed) {
+      runtime.dirty = true
+      void persistCatalog(() => ctx, runtime)
+    }
+    runtime.diag.lastAt = Date.now()
+    runtime.diag.lastError = null
+  } catch (error) {
+    runtime.diag.lastError = messageOf(error)
+    runtime.diag.lastAt = Date.now()
   }
 }
 
@@ -441,7 +517,8 @@ async function snapshotServer(ctx: Context, runtime: CatalogRuntime, serverName:
   const next = { ...runtime.catalog }
   let tools: CatalogEntry[]
   try {
-    tools = snapshotFromSchemas(liveSchemas(ctx), serverName)
+    const schemas = await resolveScopeSchemas(ctx)
+    tools = snapshotFromSchemas(schemas, serverName)
   } catch {
     return // last-good：保留旧快照
   }
@@ -873,6 +950,34 @@ export function makeRoutes(
           .catch((error) => json(res, 400, { ok: false, error: messageOf(error) }))
       },
     },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/debug`,
+      handler: (req, res) => {
+        if (req.method !== 'GET') {
+          json(res, 405, { ok: false, error: 'method-not-allowed' })
+          return
+        }
+        const catalog: Record<string, { tools: number; fetchedAt: number; source: string }> = {}
+        for (const [server, info] of Object.entries(catalogRuntime.catalog)) {
+          catalog[server] = { tools: info.tools.length, fetchedAt: info.fetchedAt, source: info.source }
+        }
+        json(res, 200, { ok: true, diag: catalogRuntime.diag, catalog })
+      },
+    },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/debug/collect`,
+      handler: (req, res) => {
+        if (req.method !== 'POST') {
+          json(res, 405, { ok: false, error: 'method-not-allowed' })
+          return
+        }
+        void snapshotEnabled(ctx, catalogRuntime)
+          .then(() => json(res, 200, { ok: true, diag: catalogRuntime.diag }))
+          .catch((error) => json(res, 500, { ok: false, error: messageOf(error) }))
+      },
+    },
   ]
   // 旧前缀兼容（0.3.1 及以前）：同一组路由在新旧前缀下都注册
   return [
@@ -926,14 +1031,38 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   // 私有 catalog 内存态（面板联动 + 中间层共用）：采集对两种模式都启用（只读、
   // 无模型影响），autoManage=false 时仅面板停用态显示目录工具数。
-  const catalogRuntime: CatalogRuntime = { catalog: {}, dirty: false, persisting: false }
+  const catalogRuntime: CatalogRuntime = {
+    catalog: {},
+    dirty: false,
+    persisting: false,
+    loaded: false,
+    diag: {
+      toolsChangeEvents: 0,
+      snapshots: 0,
+      lastError: null,
+      lastAt: null,
+      lastMcpTools: null,
+      lastSchemasTotal: null,
+      lastScope: null,
+      lastAgentRoots: null,
+      lastAgentList: null,
+      loadedAt: null,
+      loadedServers: null,
+    },
+  }
   // 启动早期加载持久化 catalog（last-good 兜底）；失败置空不阻塞。
   void loadCatalog(CATALOG_DIR).then(
     (catalog) => {
       catalogRuntime.catalog = catalog
+      catalogRuntime.loaded = true
+      catalogRuntime.diag.loadedAt = Date.now()
+      catalogRuntime.diag.loadedServers = Object.keys(catalog).length
     },
     () => {
       catalogRuntime.catalog = {}
+      catalogRuntime.loaded = true
+      catalogRuntime.diag.loadedAt = Date.now()
+      catalogRuntime.diag.loadedServers = 0
     },
   )
 
@@ -961,6 +1090,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const off = ctx.root.on(
       'tools/change',
       () => {
+        catalogRuntime.diag.toolsChangeEvents += 1
         if (scheduled) return
         scheduled = true
         ctx.timeout(() => {
