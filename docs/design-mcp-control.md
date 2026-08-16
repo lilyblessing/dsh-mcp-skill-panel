@@ -1,6 +1,6 @@
 # MCP 中间层控制设计（mcp_search + mcp_call + 私有 catalog）
 
-> 状态：设计稿（待审阅） · 基于 2026-08 全部实测结论 · 关联 README「工作原理」
+> 状态：实施中（P0 实测通过，P1+P2 已提交，P3 收尾，P4 待发布） · 基于 2026-08 全部实测结论 · 关联 README「工作原理」
 
 ## 1. 背景与目标
 
@@ -61,7 +61,7 @@
 - 注册 `ctx.root.on('system-prompt/assemble', ...)`：`assembly.tools = assembly.tools.filter(t => !t.name.startsWith('mcp__'))`，然后 `return next()`
 - 每回合装配时执行，实时生效；tools registry 不受影响（`tools.execute` 照常）
 - **影响范围**：autoManage 模式下所有 MCP 工具对模型不可见（含用户手动启用的）——这是设计意图（统一入口）
-- 待实测项：Waterfall 监听修改 `assembly` 对象后 `next()` 的传导（预期可修改共享 payload；实测确认）
+- ✅ **已实测（2026-08-17 动态探针）**：`ctx.on('system-prompt/assemble')` 可收到事件（emit ctx 向下传播到后代 ctx），监听器改写 `assembly.tools` 后经 `next()` 传导成立。standing scope 基线 96 工具（含 56 个 `mcp__*`）→ 过滤后 40 工具（0 个 `mcp__*`），非 MCP 工具原样保留
 
 ### B. 私有 catalog
 
@@ -132,7 +132,7 @@ autoManage=false 时：不注册 mcp_search/mcp_call、不过滤装配、回收�
 
 | 风险 | 缓解 |
 |---|---|
-| `system-prompt/assemble` 改写传导未实测 | P0 验证项；若不可行则退化为「瞬态模式」（每次调用启用-执行-关闭，接受 spawn 延迟） |
+| `system-prompt/assemble` 改写传导（已解除） | ✅ P0 探针实测通过：`assembly.tools` 改写经 Waterfall `next()` 传导，`mcp__*` 56→0；无需瞬态退路 |
 | 保活期间其他会话模型回合恰好装配（过滤前） | 过滤是全局装配点，启用与装配无关——无此风险（过滤机制成立时） |
 | 工具重名/多 server 同名工具 | 完整 id `mcp__<server>__<tool>` 唯一；server 名冲突时 loader 行反查报错 |
 | mcp_call 参数透传失败（实测案例 B 第 6 次失败） | 返回 server 原始错误文本，模型自行重试（与直接调用体验一致） |
@@ -143,10 +143,10 @@ autoManage=false 时：不注册 mcp_search/mcp_call、不过滤装配、回收�
 
 | 阶段 | 内容 | 验证 |
 |---|---|---|
-| P0 | 验证 `system-prompt/assemble` 过滤传导（动态探针：装配过滤 + 确认模型请求工具列表无 mcp__） | 通过则形态 2 成立；失败则评估瞬态方案 |
-| P1 | catalog：采集/检索/持久化/惰性采集 + 单测 | 停用态面板显示目录工具数；检索命中 |
-| P2 | mcp_call + 保活回收 + mcp_search + 能力表 + autoManage 接线 | 复测两个案例（bilibili+识图 / calcmcp 数学题）全链路 |
-| P3 | owner 标记、并发计数、面板联动、README | 回归：手动启停不受影响；重启保持 |
+| P0 | 验证 `system-prompt/assemble` 过滤传导（动态探针：装配过滤 + 确认模型请求工具列表无 mcp__） | ✅ 通过（2026-08-17 探针：96→40 工具，`mcp__*` 56→0） |
+| P1 | catalog：采集/检索/持久化/惰性采集 + 单测 | ✅ 已提交（c42f5ab）+ selftest-mcp.mjs 单测 |
+| P2 | mcp_call + 保活回收 + mcp_search + 能力表 + autoManage 接线 | ✅ 已提交（c42f5ab）；案例复测待 autoManage 实测 |
+| P3 | owner 标记、并发计数、面板联动、README | 面板联动已实现（catalog 值回填停用态 tools/tokens）；owner/并发计数随 P2 提交；README 待随 P4 定稿 |
 | P4 | 发布（版本 bump + 产物 + 文档） | dump-config + 安装验证 |
 
 ## 9. 测试方案
@@ -162,3 +162,4 @@ autoManage=false 时：不注册 mcp_search/mcp_call、不过滤装配、回收�
 - **保活 30s 而非瞬态**：11 次调用 35s 窗口、连击 ≤2s（实测）；瞬态每次 spawn 1.7~10s 不可接受
 - **过滤走 assemble Waterfall 而非 systemPrompt.tools provider**：provider 是并集（只能加不能减），Waterfall 可改写既有输出
 - **catalog 自建而非引入 Lens**：数据源（tools registry 快照）现成，~300-400 行；Lens 需自建 MCP 客户端且与 loader 体系割裂
+- **过滤监听挂 ctx（后代 ctx 可收 root 事件）**：P0 探针证实 `ctx.on('system-prompt/assemble')` 在动态插件沙箱可用（事件自 emit ctx 向下传播），正式插件用 `ctx.root.on + ctx.effect` 双保险（root 监听不随 fiber 清理，需 effect 归还 disposer）

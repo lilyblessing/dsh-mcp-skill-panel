@@ -39,6 +39,7 @@ DSH Web 设置页新增「MCP 与技能管理面板」入口，把当前 agent �
 | 🧠 **Skill 启停** | 往 SKILL.md frontmatter 注入/移除 `disable-model-invocation: true`，模型 catalog 实时失效（实测停用 cheatengine 173 工具 ≈ 9.6k token 一次释放） |
 | 💾 **重启保持** | MCP 状态经插件状态文件物化进预设组合文件；Skill 状态即 frontmatter 本身 —— 重启后状态不变 |
 | ⚡ **响应快** | skill 开关点击即翻转（乐观更新 + 服务端确认），分域缓存 + 事件驱动失效（`tools/change` / `skills/change`），MCP 页不触发 skill 目录扫描 |
+| 🤖 **AI 中间层（可选）** | `autoManage: true` 后模型经 `mcp_search` / `mcp_call` 两个固定工具按需使用 MCP——目录检索 top-K 精确 schema、保活启用 + 空闲回收，任何 MCP 工具 schema 不进入模型上下文（零长尾污染） |
 | 🌐 **双语界面** | 设置页入口与全部文案 zh/en 双语，跟随 DSH 界面语言；明暗主题适配 |
 | 🪶 **零上下文占用** | 插件自身不注册任何模型工具，不消耗模型注入面 |
 
@@ -124,6 +125,7 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 
 | 版本 | 内容 |
 | --- | --- |
+| 0.4.0 | AI 中间层（`autoManage`）：`mcp_search`/`mcp_call` 按需使用 MCP（保活启用 + 空闲回收 + 装配过滤，模型永不见 `mcp__*` schema）；私有 catalog 持久化 + 面板停用态回填目录工具数 |
 | 0.3.2 | API 前缀对齐包名（旧前缀兼容）；本地目录改名 |
 | 0.3.1 | MCP 聚合版本化复用；前端 fetch 乱序防护 |
 | 0.3.0 | 分域端点 + 分域缓存 + 事件驱动失效（tab 懒加载） |

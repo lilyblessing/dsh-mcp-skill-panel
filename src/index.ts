@@ -483,6 +483,7 @@ function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config):
 interface Deps {
   ctx: Context
   caches: DomainCaches
+  catalogRuntime: CatalogRuntime
 }
 
 function resolveAgent(ctx: Context, sessionId: string | undefined) {
@@ -580,13 +581,21 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
       if (!isMcp) continue
       const serverName = String((cfg as { serverName?: unknown } | undefined)?.serverName ?? entry.options.id)
       const agg = byServer.get(serverName)
-      const tools = agg?.tools ?? 0
+      const liveTools = agg?.tools ?? 0
       const running = entry.fiber !== undefined
       const disabled = entry.disabled
+      // 面板联动（P3）：停用/未挂载时优先显示 catalog 目录值（工具数与 token 估算），
+      // 让用户看到「该 MCP 有哪些工具可用」而不只是 0
+      const catalogInfo = deps.catalogRuntime.catalog[serverName]
+      const displayTools = liveTools > 0 ? liveTools : catalogInfo?.tools.length ?? 0
+      const displayTokens =
+        liveTools > 0
+          ? (agg?.tokens ?? 0)
+          : (catalogInfo?.tools.reduce((sum, t) => sum + tokenEstimate(t.parameters), 0) ?? 0)
       const status: McpEntryView['status'] = disabled
         ? 'disabled'
         : running
-          ? tools > 0
+          ? liveTools > 0
             ? 'active'
             : 'idle'
           : 'failed'
@@ -599,8 +608,8 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
           : null,
         disabled,
         running,
-        tools,
-        tokens: agg?.tokens ?? 0,
+        tools: displayTools,
+        tokens: displayTokens,
         status,
       })
     }
@@ -756,13 +765,14 @@ function queryParam(url: string, key: string): string | undefined {
 export function makeRoutes(
   ctx: Context,
   caches: DomainCaches,
+  catalogRuntime: CatalogRuntime,
   config: Config = {},
 ): Array<{
   kind: 'exact'
   path: string
   handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void
 }> {
-  const deps: Deps = { ctx, caches }
+  const deps: Deps = { ctx, caches, catalogRuntime }
   const { mcpCache, skillsCache, invalidateMcp, invalidateSkills } = caches
 
   const cachedMcp = (sessionId: string | undefined) => {
@@ -914,6 +924,19 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   )
 
+  // 私有 catalog 内存态（面板联动 + 中间层共用）：采集对两种模式都启用（只读、
+  // 无模型影响），autoManage=false 时仅面板停用态显示目录工具数。
+  const catalogRuntime: CatalogRuntime = { catalog: {}, dirty: false, persisting: false }
+  // 启动早期加载持久化 catalog（last-good 兜底）；失败置空不阻塞。
+  void loadCatalog(CATALOG_DIR).then(
+    (catalog) => {
+      catalogRuntime.catalog = catalog
+    },
+    () => {
+      catalogRuntime.catalog = {}
+    },
+  )
+
   // 分域缓存 + 事件驱动失效。事件在 root ctx emit（tools/change 来自工具注册表、
   // skills/change 来自 skill registry），必须挂 root 监听才能收到；用 ctx.effect
   // 确保插件卸载时解除监听（root 上的监听不随 fiber 自动清理）。
@@ -932,9 +955,29 @@ export function apply(ctx: Context, config: Config = {}): void {
     'runtime-inventory: cache invalidation',
   )
 
+  // tools/change 增量采集：对 enabled server 重新快照（含 mcp_call 临时启用后）。
+  ctx.effect(() => {
+    let scheduled = false
+    const off = ctx.root.on(
+      'tools/change',
+      () => {
+        if (scheduled) return
+        scheduled = true
+        ctx.timeout(() => {
+          scheduled = false
+          void snapshotEnabled(ctx, catalogRuntime)
+        }, CATALOG_SNAPSHOT_DEBOUNCE_MS)
+      },
+    )
+    return off
+  }, 'mcp-skill-panel: catalog snapshot')
+
+  // 初始快照（可能还没有 agent，mcp__* 会在后续增量补全）。
+  void snapshotEnabled(ctx, catalogRuntime).catch(() => {})
+
   ctx.inject(['webServer'], (httpCtx) => {
     httpCtx.effect(() => {
-      const routes = makeRoutes(httpCtx, caches, config)
+      const routes = makeRoutes(httpCtx, caches, catalogRuntime, config)
       const disposers = routes.map((route) => httpCtx.webServer.register(route))
       return () => {
         for (const dispose of disposers) dispose()
@@ -942,20 +985,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     }, 'runtime-inventory: routes')
   })
 
-  // 形态 2（中间层代理）接线：autoManage=false 时为纯面板，零额外行为。
+  // 形态 2（中间层代理）接线：autoManage=true 时叠加过滤 + 工具 + 回收器。
   if (config.autoManage) {
-    const runtime: CatalogRuntime = { catalog: {}, dirty: false, persisting: false }
-    // 启动早期加载持久化 catalog（last-good 兜底）；失败置空不阻塞。
-    void loadCatalog(CATALOG_DIR).then(
-      (catalog) => {
-        runtime.catalog = catalog
-      },
-      () => {
-        runtime.catalog = {}
-      },
-    )
-
-    const control: McpControlCtx = buildMcpControl(ctx, runtime, config)
+    const control: McpControlCtx = buildMcpControl(ctx, catalogRuntime, config)
     const controller = createMcpCallController(ctx, control)
 
     // 过滤 + 工具注册 + 空闲回收器，全部挂 ctx.effect（卸载即清理）。
@@ -969,25 +1001,5 @@ export function apply(ctx: Context, config: Config = {}): void {
         for (let i = disposers.length - 1; i >= 0; i -= 1) disposers[i]()
       }
     }, 'mcp-skill-panel: autoManage control')
-
-    // tools/change 增量采集：对 enabled server 重新快照（含 mcp_call 临时启用后）。
-    ctx.effect(() => {
-      let scheduled = false
-      const off = ctx.root.on(
-        'tools/change',
-        () => {
-          if (scheduled) return
-          scheduled = true
-          ctx.timeout(() => {
-            scheduled = false
-            void control.snapshotEnabled()
-          }, CATALOG_SNAPSHOT_DEBOUNCE_MS)
-        },
-      )
-      return off
-    }, 'mcp-skill-panel: catalog snapshot')
-
-    // 初始快照（可能还没有 agent，mcp__* 会在后续增量补全）。
-    void control.snapshotEnabled().catch(() => {})
   }
 }
