@@ -101,6 +101,8 @@ interface McpEntryView {
   tools: number
   tokens: number
   status: 'active' | 'disabled' | 'idle' | 'failed'
+  /** 模型是否可见（autoManage 下：启用且非 AI 临时启用 → 可见；关闭模式下全部启用可见）。 */
+  modelVisible: boolean
 }
 
 interface SkillView {
@@ -121,6 +123,8 @@ export interface McpView {
   mcpDisabled: number
   mcpToolsTotal: number
   mcpTokensTotal: number
+  /** AI 中间层当前是否生效（面板开关）。 */
+  autoManage: boolean
   errors: string[]
 }
 
@@ -248,6 +252,8 @@ type StateFile = {
   mcp?: Record<string, Record<string, McpRowState>>
   /** AI 自动启用标记（mcp_call 保活启用）：entryId → 上次启用时间。 */
   ai?: Record<string, { at: number }>
+  /** 面板可写的插件配置（autoManage 开关等），优先于 cordis config。 */
+  config?: { autoManage?: boolean }
 }
 
 async function readState(): Promise<StateFile> {
@@ -366,6 +372,10 @@ interface CatalogRuntime {
   persisting: boolean
   /** 磁盘加载是否已完成（完成前跳过采集，防止空快照覆盖磁盘 last-good）。 */
   loaded: boolean
+  /** AI 中间层当前生效状态（面板开关可动态切换）。 */
+  autoManage: boolean
+  /** 动态切换 AI 中间层（过滤 + mcp_search/mcp_call + 回收器）。 */
+  applyAutoManage: (on: boolean) => void
   /** 诊断计数（debug 端点输出，定位采集链路问题用）。 */
   diag: {
     toolsChangeEvents: number
@@ -561,6 +571,8 @@ interface Deps {
   ctx: Context
   caches: DomainCaches
   catalogRuntime: CatalogRuntime
+  /** 中间层控制层（mcp_call 的 AI 启用标记查询/清除）。 */
+  controller?: import('./mcpcall').McpCallController
 }
 
 function resolveAgent(ctx: Context, sessionId: string | undefined) {
@@ -688,6 +700,9 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
         tools: displayTools,
         tokens: displayTokens,
         status,
+        modelVisible:
+          !disabled &&
+          !(deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(serverName) ?? false)),
       })
     }
   } catch (error) {
@@ -702,6 +717,7 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
     mcpDisabled: mcp.filter((row) => row.disabled).length,
     mcpToolsTotal,
     mcpTokensTotal,
+    autoManage: deps.catalogRuntime.autoManage,
     errors,
   }
 }
@@ -753,6 +769,14 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean) {
   const entry = ctx.loader.resolve(entryId)
   const rowId = entry.options.id
   await entry.update({ disabled })
+  // 用户手动打开（!disabled）：清除 AI 临时启用标记（aiEnabled/计数/lastUsed +
+  // state.json ai owner）—— 转为「用户打开」语义：模型立即可见、回收器不再回收。
+  // 用户手动关闭（disabled）：AI 标记保持原样（若原本 AI 启用中，回收器/失败恢复照常管理）。
+  if (!disabled && deps.controller) {
+    const cfg = entry.options.config
+    const serverName = String((cfg as { serverName?: unknown } | undefined)?.serverName ?? entry.options.id)
+    deps.controller.markUserEnabled(serverName)
+  }
   // 持久化：v0.1.1 起运行期绝不写预设文件（触发 dsh-agent-presets stamp 重挂事故）。
   // 只把意图写入插件状态文件，由下次启动的 syncPresetFiles() 物化到预设文件。
   const tree = entry.parent?.tree as { filename?: string } | undefined
@@ -844,12 +868,13 @@ export function makeRoutes(
   caches: DomainCaches,
   catalogRuntime: CatalogRuntime,
   config: Config = {},
+  controller?: import('./mcpcall').McpCallController,
 ): Array<{
   kind: 'exact'
   path: string
   handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void
 }> {
-  const deps: Deps = { ctx, caches, catalogRuntime }
+  const deps: Deps = { ctx, caches, catalogRuntime, controller }
   const { mcpCache, skillsCache, invalidateMcp, invalidateSkills } = caches
 
   const cachedMcp = (sessionId: string | undefined) => {
@@ -952,6 +977,32 @@ export function makeRoutes(
     },
     {
       kind: 'exact',
+      path: `${API_PREFIX}/config`,
+      handler: (req, res) => {
+        if (req.method === 'POST') {
+          readBody(req)
+            .then((body) => JSON.parse(body || '{}') as { autoManage?: boolean })
+            .then(async (parsed) => {
+              const on = Boolean(parsed.autoManage)
+              const state = await readState()
+              state.config ??= {}
+              state.config.autoManage = on
+              await writeState(state)
+              catalogRuntime.applyAutoManage(on)
+              json(res, 200, { ok: true, autoManage: catalogRuntime.autoManage })
+            })
+            .catch((error) => json(res, 400, { ok: false, error: messageOf(error) }))
+          return
+        }
+        if (req.method !== 'GET') {
+          json(res, 405, { ok: false, error: 'method-not-allowed' })
+          return
+        }
+        json(res, 200, { ok: true, autoManage: catalogRuntime.autoManage, configAutoManage: config.autoManage ?? null })
+      },
+    },
+    {
+      kind: 'exact',
       path: `${API_PREFIX}/debug`,
       handler: (req, res) => {
         if (req.method !== 'GET') {
@@ -1036,6 +1087,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     dirty: false,
     persisting: false,
     loaded: false,
+    // 初始值由下方 applyAutoManage 赋值（control/controller 构建后）
+    autoManage: false,
+    applyAutoManage: () => {},
     diag: {
       toolsChangeEvents: 0,
       snapshots: 0,
@@ -1105,31 +1159,63 @@ export function apply(ctx: Context, config: Config = {}): void {
   // 初始快照（可能还没有 agent，mcp__* 会在后续增量补全）。
   void snapshotEnabled(ctx, catalogRuntime).catch(() => {})
 
+  // ── 形态 2（中间层代理）：动态开关 ──────────────────────────────────────
+  // 控制层（catalog/loader/state 的 IO 封装）常驻构建，零副作用；过滤 + 工具 +
+  // 回收器按 autoManage 开关动态挂载/卸载（面板 /config 端点可切换，state.json
+  // 持久化，config 仅作初始默认）。
+  const control: McpControlCtx = buildMcpControl(ctx, catalogRuntime, config)
+  const controller = createMcpCallController(ctx, control)
+  // 装配可见性判定（v0.4.2）：用户打开的 server 可见（disabled=false 且非 AI 临时启用）；
+  // 停用或 AI 临时启用的 server 对模型过滤，经 mcp_search/mcp_call 按需调用。
+  const isMcpVisible = (serverName: string): boolean => {
+    if (controller.isAiEnabled(serverName)) return false
+    const entry = findMcpEntry(ctx, serverName)
+    if (!entry) return false
+    return !entry.disabled
+  }
+  let autoDisposers: Array<() => void> = []
+  catalogRuntime.applyAutoManage = (on: boolean) => {
+    for (const d of autoDisposers) d()
+    autoDisposers = []
+    catalogRuntime.autoManage = on
+    if (!on) return
+    const disposers: Array<() => void> = []
+    try {
+      disposers.push(installMcpVisibilityFilter(ctx, isMcpVisible))
+      disposers.push(installMcpControlTools(ctx, control, controller))
+      const offReaper = controller.startIdleReaper()
+      disposers.push(() => offReaper())
+    } catch (error) {
+      for (const d of disposers) d()
+      catalogRuntime.autoManage = false
+      ctx.logger.warn?.(`mcp-skill-panel: autoManage enable failed: ${messageOf(error)}`)
+      return
+    }
+    autoDisposers = disposers
+  }
+  // 插件卸载兜底：释放当前挂载的中间层（effect disposer 手动调用后 fiber 卸载不再重复）。
+  ctx.effect(
+    () => () => {
+      for (const d of autoDisposers) d()
+    },
+    'mcp-skill-panel: autoManage teardown',
+  )
+  // 初始：config 默认 → state.json 的面板值覆盖（异步，立即生效）。
+  catalogRuntime.applyAutoManage(Boolean(config.autoManage))
+  void readState().then((state) => {
+    if (typeof state.config?.autoManage === 'boolean' && state.config.autoManage !== Boolean(config.autoManage)) {
+      catalogRuntime.applyAutoManage(state.config.autoManage)
+      ctx.logger.info?.(`mcp-skill-panel: autoManage = ${state.config.autoManage} (from panel state)`)
+    }
+  })
+
   ctx.inject(['webServer'], (httpCtx) => {
     httpCtx.effect(() => {
-      const routes = makeRoutes(httpCtx, caches, catalogRuntime, config)
+      const routes = makeRoutes(httpCtx, caches, catalogRuntime, config, controller)
       const disposers = routes.map((route) => httpCtx.webServer.register(route))
       return () => {
         for (const dispose of disposers) dispose()
       }
     }, 'runtime-inventory: routes')
   })
-
-  // 形态 2（中间层代理）接线：autoManage=true 时叠加过滤 + 工具 + 回收器。
-  if (config.autoManage) {
-    const control: McpControlCtx = buildMcpControl(ctx, catalogRuntime, config)
-    const controller = createMcpCallController(ctx, control)
-
-    // 过滤 + 工具注册 + 空闲回收器，全部挂 ctx.effect（卸载即清理）。
-    ctx.effect(() => {
-      const disposers: Array<() => void> = []
-      disposers.push(installMcpVisibilityFilter(ctx))
-      disposers.push(installMcpControlTools(ctx, control, controller))
-      const offReaper = controller.startIdleReaper()
-      disposers.push(() => offReaper())
-      return () => {
-        for (let i = disposers.length - 1; i >= 0; i -= 1) disposers[i]()
-      }
-    }, 'mcp-skill-panel: autoManage control')
-  }
 }

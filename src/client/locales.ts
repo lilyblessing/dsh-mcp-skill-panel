@@ -41,6 +41,14 @@ export const en: Record<string, string> = {
   'ri.toggleError': 'Toggle failed: {error}',
   'ri.skillToggleOffHint': 'Remove this skill from the model catalog.',
   'ri.skillToggleOnHint': 'Make this skill model-visible again.',
+  // autoManage switch
+  'ri.autoManageTitle': 'AI Middle Layer',
+  'ri.autoManageOn': 'On',
+  'ri.autoManageOff': 'Off',
+  'ri.autoManageDescOn':
+    'Disabled MCP servers stay hidden from the model and are used on demand via mcp_search / mcp_call (keep-alive enable + idle reaping). Servers you enabled stay directly visible (e.g. memory for recall, filesystem for IO); AI-temporarily-enabled servers never pollute context. Manually enabled servers are never auto-disabled.',
+  'ri.autoManageDescOff':
+    'Off: tools of enabled MCP servers are directly visible to the model (classic mode).',
 }
 
 export const zh: Record<string, string> = {
@@ -83,4 +91,12 @@ export const zh: Record<string, string> = {
   'ri.toggleError': '切换失败：{error}',
   'ri.skillToggleOffHint': '将该技能从模型目录移除。',
   'ri.skillToggleOnHint': '恢复该技能的模型可见性。',
+  // autoManage 开关
+  'ri.autoManageTitle': 'AI 中间层',
+  'ri.autoManageOn': '已开启',
+  'ri.autoManageOff': '已关闭',
+  'ri.autoManageDescOn':
+    '停用的 MCP 服务器对模型隐藏，需要时经 mcp_search / mcp_call 按需调用（保活启用 + 空闲回收）；你手动打开的服务器保持模型可见（如 memory 高灵敏召回、filesystem 直接读写）；AI 临时启用的服务器不会污染上下文。用户手动启用的服务器不会被自动停用。',
+  'ri.autoManageDescOff':
+    '关闭后：已启用 MCP 服务器的工具直接对模型可见（经典模式）。',
 }

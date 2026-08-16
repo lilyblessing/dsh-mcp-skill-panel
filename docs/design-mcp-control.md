@@ -1,13 +1,13 @@
 # MCP 中间层控制设计（mcp_search + mcp_call + 私有 catalog）
 
-> 状态：实施中（P0 实测通过，P1+P2 已提交，P3 收尾，P4 待发布） · 基于 2026-08 全部实测结论 · 关联 README「工作原理」
+> 状态：实施中（P0-P4 完成 + v0.4.1 采集链路修复 + v0.4.2 按状态过滤/面板开关） · 基于 2026-08 全部实测结论 · 关联 README「工作原理」
 
 ## 1. 背景与目标
 
 现有插件（dsh-mcp-skill-panel）已实现**人工** MCP 启停面板。本设计新增**模型自主按需使用 MCP** 的形态 2（中间层代理）：
 
-- 模型面恒定两个工具：`mcp_search`（按需检索目录，返回 top-K 精确 schema）+ `mcp_call`（保活启用 → 插件内执行 → 空闲回收）
-- 任何 MCP 工具 schema **永不进入模型上下文**（零长尾污染）
+- 模型面：`mcp_search`（按需检索目录，返回 top-K 精确 schema）+ `mcp_call`（保活启用 → 插件内执行 → 空闲回收）
+- **可见性由用户启停决定**（v0.4.2）：用户打开的 server 工具进上下文（memory 高灵敏召回）；用户停用的 server 对模型隐藏、经中间层按需调用；AI 临时启用的 server 不污染上下文
 - MCP 默认全停 → 模型按能力需要临时启用 → 用完自动回收
 
 ### 实测依据（2026-08）
@@ -37,10 +37,11 @@
 └───────────────────────────────┘  └────────────────────────────────────┘
         │                                       │
         ▼                                       ▼
-┌─ 每回合装配过滤（模型永不见 mcp 工具）───────────┐
-│  监听 system-prompt/assemble Waterfall         │
-│  → assembly.tools 过滤 mcp__* 前缀             │
-└───────────────────────────────────────────────┘
+┌─ 每回合装配过滤（按 server 状态）──────────────────┐
+│  监听 system-prompt/assemble Waterfall             │
+│  → 停用 / AI 临时启用的 server 的 mcp__* 过滤      │
+│  → 用户打开的 server 工具保留（模型可见）           │
+└───────────────────────────────────────────────────┘
 ```
 
 ## 3. 关键机制确认（已核实源码）
@@ -58,10 +59,11 @@
 
 ### A. 可见性过滤（模型侧核心）
 
-- 注册 `ctx.root.on('system-prompt/assemble', ...)`：`assembly.tools = assembly.tools.filter(t => !t.name.startsWith('mcp__'))`，然后 `return next()`
+- 注册 `ctx.root.on('system-prompt/assemble', ...)`：按 server 状态过滤 `assembly.tools`（v0.4.2），然后 `return next()`
+- 判定：`isMcpVisible(serverName)` = 非 AI 临时启用 且 loader entry 非 disabled。**用户打开的 server（含预设默认启用）工具保留进上下文**（memory 高灵敏召回、filesystem 直接读写）；**停用的 server 过滤**（经 mcp_search/mcp_call 按需调用）；**AI 临时启用（mcp_call 保活中）的 server 仍过滤**（按需不污染、无上下文抖动）
 - 每回合装配时执行，实时生效；tools registry 不受影响（`tools.execute` 照常）
-- **影响范围**：autoManage 模式下所有 MCP 工具对模型不可见（含用户手动启用的）——这是设计意图（统一入口）
-- ✅ **已实测（2026-08-17 动态探针）**：`ctx.on('system-prompt/assemble')` 可收到事件（emit ctx 向下传播到后代 ctx），监听器改写 `assembly.tools` 后经 `next()` 传导成立。standing scope 基线 96 工具（含 56 个 `mcp__*`）→ 过滤后 40 工具（0 个 `mcp__*`），非 MCP 工具原样保留
+- **用户手动打开 = 清除 AI 标记**：toggleMcp 启用方向调用 `controller.markUserEnabled()`（清 aiEnabled/计数/lastUsed + state.json ai owner），转为「用户打开」语义 —— 模型立即可见、回收器不再回收
+- ✅ **已实测（2026-08-17 动态探针）**：`ctx.on('system-prompt/assemble')` 可收到事件（emit ctx 向下传播到后代 ctx），监听器改写 `assembly.tools` 后经 `next()` 传导成立。standing scope 基线 96 工具（含 56 个 `mcp__*`）→ 全过滤后 40 工具（0 个 `mcp__*`），非 MCP 工具原样保留；按状态过滤路径（用户打开保留 / 停用过滤）随 v0.4.2 部署验证
 
 ### B. 私有 catalog
 

@@ -39,7 +39,7 @@ DSH Web 设置页新增「MCP 与技能管理面板」入口，把当前 agent �
 | 🧠 **Skill 启停** | 往 SKILL.md frontmatter 注入/移除 `disable-model-invocation: true`，模型 catalog 实时失效（实测停用 cheatengine 173 工具 ≈ 9.6k token 一次释放） |
 | 💾 **重启保持** | MCP 状态经插件状态文件物化进预设组合文件；Skill 状态即 frontmatter 本身 —— 重启后状态不变 |
 | ⚡ **响应快** | skill 开关点击即翻转（乐观更新 + 服务端确认），分域缓存 + 事件驱动失效（`tools/change` / `skills/change`），MCP 页不触发 skill 目录扫描 |
-| 🤖 **AI 中间层（可选）** | `autoManage: true` 后模型经 `mcp_search` / `mcp_call` 两个固定工具按需使用 MCP——目录检索 top-K 精确 schema、保活启用 + 空闲回收，任何 MCP 工具 schema 不进入模型上下文（零长尾污染） |
+| 🤖 **AI 中间层（可选）** | `autoManage: true` 后**停用的 MCP 对模型隐藏**，需要时经 `mcp_search` / `mcp_call` 按需调用（目录检索 top-K 精确 schema、保活启用 + 空闲回收）；**用户手动打开的 MCP 保持模型可见**（memory 高灵敏召回、filesystem 直接读写）；AI 临时启用的 server 不污染上下文 |
 | 🌐 **双语界面** | 设置页入口与全部文案 zh/en 双语，跟随 DSH 界面语言；明暗主题适配 |
 | 🪶 **零上下文占用** | 插件自身不注册任何模型工具，不消耗模型注入面 |
 
@@ -127,6 +127,7 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 
 | 版本 | 内容 |
 | --- | --- |
+| 0.4.2 | 装配过滤按 server 状态：用户打开的 MCP 工具进模型上下文（memory 高灵敏召回），停用的对模型隐藏、经 mcp_search/mcp_call 按需调用；AI 临时启用不污染上下文；用户手动打开清除 AI 标记（防回收器误关）；面板新增 autoManage 开关 + 模型可见徽标 |
 | 0.4.1 | 修复 catalog 采集链路：apply ctx 下 `agents` 为空导致自动采集恒空（fallback `standingKeyFor` 解析 scope）、last-good 守卫失效、启动早期空快照写盘、写盘竞态；新增 debug 诊断端点；案例复测通过（chrome→mimo 跨 server、calcmcp 连击零重复 spawn + 30s 回收） |
 | 0.4.0 | AI 中间层（`autoManage`）：`mcp_search`/`mcp_call` 按需使用 MCP（保活启用 + 空闲回收 + 装配过滤，模型永不见 `mcp__*` schema）；私有 catalog 持久化 + 面板停用态回填目录工具数 |
 | 0.3.2 | API 前缀对齐包名（旧前缀兼容）；本地目录改名 |

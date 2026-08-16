@@ -14,6 +14,7 @@ export interface McpRow {
   tools: number
   tokens: number
   status: 'active' | 'disabled' | 'idle' | 'failed'
+  modelVisible: boolean
 }
 
 export interface SkillRow {
@@ -33,6 +34,7 @@ export interface McpView {
   mcpDisabled: number
   mcpToolsTotal: number
   mcpTokensTotal: number
+  autoManage: boolean
   errors: string[]
 }
 
@@ -295,6 +297,27 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
     )
   }
 
+  const toggleAutoManage = () => {
+    const next = !(mcp?.autoManage ?? false)
+    setBusy((prev) => ({ ...prev, autoManage: true }))
+    setError(null)
+    fetch('/api/mcp-skill-panel/config', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ autoManage: next }),
+    })
+      .then((res) => res.json() as Promise<{ ok: boolean; autoManage?: boolean; error?: string }>)
+      .then((body) => {
+        if (!body.ok) throw new Error(body.error ?? 'config update failed')
+        setMcp((prev) => (prev ? { ...prev, autoManage: Boolean(body.autoManage) } : prev))
+        loadMcp()
+      })
+      .catch((err: unknown) => {
+        setError(t('ri.toggleError', { error: err instanceof Error ? err.message : String(err) }))
+      })
+      .finally(() => setBusy((prev) => ({ ...prev, autoManage: false })))
+  }
+
   const toggleSkill = (row: SkillRow) => {
     post(
       '/api/runtime-inventory/skill/toggle',
@@ -360,9 +383,49 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
 
       {!view && !error && <div style={C.empty}>{t('ri.loading')}</div>}
 
-      {view && tab === 'mcp' && <McpPanel state={view as McpView} t={t} busy={busy} onToggle={toggleMcp} statusOf={mcpStatus} />}
+      {view && tab === 'mcp' && (
+        <>
+          <AutoManageCard on={(view as McpView).autoManage} busy={Boolean(busy.autoManage)} t={t} onToggle={toggleAutoManage} />
+          <McpPanel state={view as McpView} t={t} busy={busy} onToggle={toggleMcp} statusOf={mcpStatus} />
+        </>
+      )}
 
       {view && tab === 'skill' && <SkillPanel state={view as SkillsView} t={t} busy={busy} onToggle={toggleSkill} />}
+    </div>
+  )
+}
+
+function AutoManageCard(props: {
+  on: boolean
+  busy: boolean
+  t: Props['t']
+  onToggle: () => void
+}): React.ReactElement {
+  const { on, busy, t, onToggle } = props
+  return (
+    <div style={C.card}>
+      <div style={C.cardTop}>
+        <h3 style={C.cardTitle}>
+          {t('ri.autoManageTitle')}
+          <span
+            style={C.badge(
+              on ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-tertiary)',
+              on ? 'var(--dsw-alias-state-success-tertiary)' : 'var(--dsw-alias-fill-l2)',
+            )}
+          >
+            {on ? t('ri.autoManageOn') : t('ri.autoManageOff')}
+          </span>
+        </h3>
+        <button
+          type="button"
+          style={{ ...C.toggle(on), ...(busy ? C.toggleDisabled : {}) }}
+          disabled={busy}
+          onClick={onToggle}
+        >
+          {busy ? t('ri.pending') : on ? t('ri.disable') : t('ri.enable')}
+        </button>
+      </div>
+      <p style={C.cardDesc}>{on ? t('ri.autoManageDescOn') : t('ri.autoManageDescOff')}</p>
     </div>
   )
 }
@@ -405,6 +468,22 @@ function McpPanel(props: {
               <h3 style={C.cardTitle}>
                 {row.serverName}
                 <span style={C.badge(st.color, st.bg)}>{st.label}</span>
+                {row.modelVisible ? (
+                  <span
+                    style={C.badge(
+                      'var(--dsw-alias-state-info-primary, #4a90d9)',
+                      'var(--dsw-alias-state-info-tertiary, rgba(74,144,217,0.15))',
+                    )}
+                  >
+                    {t('ri.modelVisible')}
+                  </span>
+                ) : (
+                  !row.disabled && (
+                    <span style={C.badge('var(--dsw-alias-label-tertiary)', 'var(--dsw-alias-fill-l2)')}>
+                      {t('ri.modelHidden')}
+                    </span>
+                  )
+                )}
               </h3>
               <button
                 type="button"

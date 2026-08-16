@@ -76,6 +76,13 @@ interface ControllerState {
 export interface McpCallController {
   /** 保活启用：disabled 时开启并记录 AI owner。返回本次是否由 AI 开启。 */
   ensureEnabled(serverName: string): Promise<boolean>
+  /** 该 server 当前是否由 AI 临时启用（mcp_call 保活中）——装配过滤据此保持其不可见。 */
+  isAiEnabled(serverName: string): boolean
+  /**
+   * 用户手动打开该 server：清除 AI 临时启用标记（aiEnabled/引用计数/lastUsed +
+   * state.json 的 ai owner），使其转为「用户打开」语义 —— 模型立即可见、回收器不再回收。
+   */
+  markUserEnabled(serverName: string): void
   /** 轮询 + 事件加速等待某工具注册。 */
   waitRegistered(name: string, scopeKey: object | undefined, timeoutMs: number): Promise<void>
   /** 完整调用流程，返回给模型的文本结果（不会 throw，错误也转文本）。 */
@@ -248,6 +255,18 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
       const entry = caches.resolveEntry(serverName)
       if (!entry) throw new Error(`unknown MCP server "${serverName}"`)
       return ensureEnabled(caches, ctx, state, serverName, entry)
+    },
+
+    isAiEnabled(serverName): boolean {
+      return state.aiEnabled.has(serverName)
+    },
+
+    markUserEnabled(serverName): void {
+      state.aiEnabled.delete(serverName)
+      state.refCounts.delete(serverName)
+      state.lastUsed.delete(serverName)
+      const entry = caches.resolveEntry(serverName)
+      if (entry) void caches.clearAiOwner(entry.id)
     },
 
     waitRegistered(name, scopeKey, timeoutMs) {
