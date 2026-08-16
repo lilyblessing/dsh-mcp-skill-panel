@@ -360,6 +360,18 @@ function AutoManageCard(props: {
   onToggle: () => void
 }): React.ReactElement {
   const { on, busy, t, onToggle } = props
+  // 状态语义配色（与 MCP 卡片的「动作语义」相反，用户要求）：启用=绿、停用=红
+  const toggleStateStyle: React.CSSProperties = {
+    font: 'inherit',
+    cursor: 'pointer',
+    border: 0,
+    borderRadius: 6,
+    padding: '4px 12px',
+    fontSize: 12,
+    color: 'var(--dsw-alias-label-inverse, #fff)',
+    background: on ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)',
+    whiteSpace: 'nowrap' as const,
+  }
   return (
     <div style={C.card}>
       <div style={C.cardTop}>
@@ -374,7 +386,7 @@ function AutoManageCard(props: {
         </h3>
         <button
           type="button"
-          style={{ ...C.toggle(on), ...(busy ? C.toggleDisabled : {}) }}
+          style={{ ...toggleStateStyle, ...(busy ? C.toggleDisabled : {}) }}
           disabled={busy}
           onClick={onToggle}
         >
