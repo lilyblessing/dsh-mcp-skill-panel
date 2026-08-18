@@ -1,0 +1,96 @@
+name: build
+
+# 纯 registry 自包含构建流水线：本机无需 DSH 闭包（@deepseek-ai/* 作为 devDeps 安装）。
+# 链路：typecheck → build(tsdown→tsc dts) → verify → selftest → （main push 时）自动回写 lib 产物。
+#
+# 关键参数（与本地探针一致）：
+#   npm ci --legacy-peer-deps --ignore-scripts
+#   - --legacy-peer-deps：registry 上 rc.6/rc.7 peer 图互相咬（ERESOLVE），而运行时 peer 由
+#     DSH 闭包注入；类型解析只需包本体在。
+#   - --ignore-scripts：防 postinstall；esbuild 走 optionalDependencies 平台二进制，无需脚本。
+#
+# 产物回写使用 [skip ci] + push paths 不含 lib/**，故不会触发本 workflow 循环。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig*.json'
+      - 'tsdown.config.ts'
+      - 'cordis.patch.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig*.json'
+      - 'tsdown.config.ts'
+      - 'cordis.patch.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build (tsdown -> tsc dts)
+        run: npm run build
+
+      - name: Verify artifacts
+        run: npm run verify
+
+      - name: Selftest (catalog / preset logic)
+        run: node scripts/selftest-mcp.mjs
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lib-${{ github.sha }}
+          path: |
+            lib/index.js
+            lib/catalog.js
+            lib/client.js
+            lib/types
+          if-no-files-found: error
+
+      - name: Auto-commit rebuilt lib/ artifacts (main push only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          if [ -n "$(git status --porcelain -- lib/)" ]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add lib/
+            git commit -m "chore: rebuild lib artifacts via CI [skip ci]"
+            git push
+            echo "lib/ artifacts rebuilt and committed"
+          else
+            echo "lib/ is in sync, nothing to commit"
+          fi

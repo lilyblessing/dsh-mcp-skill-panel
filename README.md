@@ -182,13 +182,20 @@ sequenceDiagram
 
 ## 🛠️ 开发
 
+依赖已**自包含**（`@deepseek-ai/*` 构建期依赖全部并入 devDependencies，纯 registry 安装即可，**无需本机 DSH 闭包**）：
+
 ```sh
-npm run setup      # junction DSH 闭包类型到 node_modules/@deepseek-ai
-npm run typecheck  # tsc 类型检查（闭包类型）
+npm install --legacy-peer-deps --ignore-scripts   # 一次即可（旧流程的 npm run setup / junction 不再必需）
+npm run typecheck  # tsc 类型检查（@deepseek-ai devDeps 提供 Context 服务类型增补）
 npm run build      # tsdown（node external 全部 @deepseek-ai/*）→ 最后 tsc 生成 lib/types（顺序不可换）
 npm run verify     # 产物验证（无 TOOL_RUNTIME_SCHEDULER 内联、client 包装完整、lib/types 齐全）
 node scripts/selftest-mcp.mjs  # catalog 单测
 ```
+
+> **lib/ 产物由 GitHub Actions 自动重建**（`.github/workflows/build.yml`）：提交源码后推送，CI 跑
+> typecheck→build→verify→selftest，在 main 分支把新 `lib/` 以 `[skip ci]` 提交回写；本地记得 pull 收产物。
+> 为什么 `--legacy-peer-deps`：运行时 peer 由 DSH 闭包注入，而 registry 上 rc.6/rc.7 的 peer 声明互相咬（ERESOLVE）；
+> 为什么 `--ignore-scripts`：esbuild 走 optionalDependencies 平台二进制、无需 postinstall。
 
 node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会产生第二个 `TOOL_RUNTIME_SCHEDULER` Symbol，导致工具调度崩溃（dsh-context-doctor 同款教训）。
 `build.mjs` 的顺序必须是「tsdown → tsc dts」：tsdown 的 `clean` 会清掉 `lib/`，若先 tsc 生成、后 tsdown，`lib/types` 会被连带删除（0.4.7 修复，verify 有护栏）。
@@ -197,6 +204,7 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 
 | 版本 | 内容 |
 | --- | --- |
+| 0.4.8 | 构建工程自包含 + CI：14 个 `@deepseek-ai/*` 并入 devDependencies（pin 到 rc.6 系，纯 registry 安装即可 typecheck/build/selftest，无需本机 DSH 闭包）；新增 GitHub Actions 流水线（typecheck→build→verify→selftest；main push 自动重建并 `[skip ci]` 回写 lib 产物）|
 | 0.4.7 | 安全与健壮性加固：toggle 端点校验目标行必须是 MCP 行（防停用任意 loader 行）；全部写端点加进程级 token 鉴权（`x-panel-token`，阻断跨源/DNS-rebinding 盲写）；readBody 限长 64KB；waitRegistered 绑定上下文销毁/AbortSignal（卸载不再挂起 mcp_call）；移除硬编码 DEFAULT_SUMMARY（能力摘要只列真实 server）；client 统一新 API 前缀并自动携带 token；build 顺序修复使 lib/types 产物入库（types 声明不再悬空）；空 package-lock.json 修复 |
 | 0.4.6 | 修复 0.4.5 引入的 catalog 清空事故：prune 增加「loader 视图为空跳过」保护（组合未挂载时序不再删 last-good）；空采集一律不写盘（prev 丢失后空快照不再续写污染） |
 | 0.4.5 | catalog 失效清理：移除 MCP 行 / serverName 重命名后，残留快照从 catalog 与 mcp_search 能力表中自动清除（停用的 server 保留供面板回填） |
