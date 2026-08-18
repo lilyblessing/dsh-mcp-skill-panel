@@ -9,7 +9,7 @@
 
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.4.2-green.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.4.7-green.svg">
 </p>
 
 ---
@@ -101,7 +101,9 @@ Prebuilt artifacts are committed (`lib/`), so the git-source one-liner installs 
 | POST | `/api/mcp-skill-panel/config` | `{ autoManage: boolean }` toggle the AI middle layer (persisted to state.json) |
 | GET | `/api/mcp-skill-panel/debug` | Catalog collection diagnostics (event counters / snapshot telemetry / in-memory catalog summary) |
 | POST | `/api/mcp-skill-panel/debug/collect` | Trigger one catalog snapshot manually |
+| GET | `/api/mcp-skill-panel/token` | Per-process random token (the panel fetches it and attaches `x-panel-token` on every POST) |
 
+> **Write auth (0.4.7+)**: every POST (mcp/skill toggle, config, debug/collect) requires an `x-panel-token` header equal to the per-process random token, else 401 — this blocks cross-origin / DNS-rebinding blind writes to the local control endpoints; read-only GET endpoints (state/config/debug/token) stay open.
 > The legacy prefix `/api/runtime-inventory/*` (≤0.3.1) is still registered for compatibility. Domain caches (60s TTL fallback) are invalidated precisely by events: `tools/change` / `loader/partial-dispose` → MCP domain; `skills/change` → Skill domain.
 
 ## ⚙️ How it works
@@ -174,6 +176,7 @@ sequenceDiagram
 - **Manually editing MCP rows in the preset file** (e.g. removing `disabled: true` by hand) removes that row from the plugin's management (your edit is respected at next startup).
 - Writing SKILL.md at runtime is safe (the skill-filesystem watcher expects edits); writing the preset composition file at runtime triggers the stamp-remount incident, which the plugin deliberately never does.
 - The capability summary (`mcp_search` with no args) only covers servers that have a catalog snapshot or a configured `serverSummary`; servers that never started successfully (e.g. codegraph) are not listed.
+- **Control-endpoint auth**: writes are gated by a per-process random token (`x-panel-token`), auto-attached by the same-origin panel; GET reads stay open. The host webServer has no auth layer of its own — if you expose the listener on `0.0.0.0`, rely on external network isolation.
 
 ## 🛠️ Development
 
@@ -191,6 +194,7 @@ The node-half tsdown build must use `external: [/^@deepseek-ai\//]`: inlining ds
 
 | Version | Content |
 | --- | --- |
+| 0.4.7 | Security & robustness: the toggle endpoint now validates the target row is an MCP row (blocks disabling arbitrary loader rows); all write endpoints are gated by a per-process token (`x-panel-token`, blocks cross-origin/DNS-rebinding blind writes); 64KB request-body cap; `waitRegistered` bound to context disposal/AbortSignal (no hung mcp_call on unload); removed hardcoded DEFAULT_SUMMARY (capability summary lists real servers only); client unified on the new API prefix and auto-attaches the token; build order fixed so lib/types artifacts ship (types declaration no longer dangles); empty package-lock.json fixed |
 | 0.4.3 | Performance pass: restore race fixed (a user manually enabling a server mid-call is never disabled on failure); per-turn visibility Map cache in the assembly filter (O(1) lookups); 500ms schemas reuse window; 300ms catalog persist debounce; in-memory state.json with write merging; 80-char summary truncation; disabled-state token estimate cache; proactive TTL pruning of cache maps; snapshotServer dead code removed |
 | 0.4.2 | Assembly filter keyed by server state: MCP tools of user-enabled servers enter the model context (memory high-sensitivity recall); disabled ones are hidden and called on demand via mcp_search/mcp_call; AI-temporary enables never pollute context; manual enable clears AI marks (reaper safety); panel autoManage switch + model-visibility badges |
 | 0.4.1 | Catalog collection pipeline fixes: empty `agents` in apply ctx made auto collection always empty (fallback to `standingKeyFor` for scope), last-good guard failure, empty-snapshot disk overwrite at startup, persist race; debug diagnostic endpoints; case retests passed (chrome→mimo cross-server, calcmcp burst zero-respawn + 30s reaping) |

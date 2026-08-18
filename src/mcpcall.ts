@@ -81,8 +81,8 @@ export interface McpCallController {
    * state.json 的 ai owner），使其转为「用户打开」语义 —— 模型立即可见、回收器不再回收。
    */
   markUserEnabled(serverName: string): void
-  /** 轮询 + 事件加速等待某工具注册。 */
-  waitRegistered(name: string, scopeKey: object | undefined, timeoutMs: number): Promise<void>
+  /** 轮询 + 事件加速等待某工具注册；signal 中止 / 上下文销毁时立即终局。 */
+  waitRegistered(name: string, scopeKey: object | undefined, timeoutMs: number, signal?: AbortSignal): Promise<void>
   /** 完整调用流程，返回给模型的文本结果（不会 throw，错误也转文本）。 */
   call(
     serverName: string,
@@ -116,13 +116,6 @@ function contentText(content: unknown): string {
   return parts.join('\n').trim()
 }
 
-const DEFAULT_SUMMARY: Record<string, string> = {
-  cheatengine: '游戏进程内存读写与调试',
-  'mimo-image': '图片理解与描述（多模态模型）',
-  chrome: '浏览器自动化（导航/点击/截图/控制台/上传下载）',
-  calcmcp: '数学计算（numpy / scipy 数值与符号计算）',
-}
-
 async function ensureEnabled(
   control: McpControlCtx,
   ctx: Context,
@@ -147,6 +140,7 @@ async function waitRegistered(
   name: string,
   scopeKey: object | undefined,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<void> {
   void control
   const start = Date.now()
@@ -154,11 +148,16 @@ async function waitRegistered(
     let settled = false
     let pollTimer: (() => void) | undefined
     let offTools: (() => boolean) | undefined
+    let offAbort: (() => void) | undefined
+    let offDispose: (() => void) | undefined
+    const onAbort = () => finish(new Error('aborted'))
     const finish = (error?: Error) => {
       if (settled) return
       settled = true
       pollTimer?.()
       offTools?.()
+      offAbort?.()
+      offDispose?.()
       if (error) reject(error)
       else resolve()
     }
@@ -177,6 +176,17 @@ async function waitRegistered(
       pollTimer = ctx.timeout(check, REGISTER_POLL_MS)
     }
     offTools = ctx.root.on('tools/change', () => check())
+    // 上下文销毁 → 立即终局：此前无 dispose 监听时 Promise 永不 settle，会挂起 mcp_call。
+    offDispose = ctx.effect(() => () => finish(new Error('context disposed')), 'mcp-skill-panel: waitRegistered')
+    // 调用方中止（exec.signal）→ 立即终局。
+    if (signal) {
+      if (signal.aborted) {
+        finish(new Error('aborted'))
+        return
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      offAbort = () => signal.removeEventListener('abort', onAbort)
+    }
     check()
   })
 }
@@ -275,8 +285,8 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
       if (entry) void caches.clearAiOwner(entry.id)
     },
 
-    waitRegistered(name, scopeKey, timeoutMs) {
-      return waitRegistered(caches, ctx, name, scopeKey, timeoutMs)
+    waitRegistered(name, scopeKey, timeoutMs, signal) {
+      return waitRegistered(caches, ctx, name, scopeKey, timeoutMs, signal)
     },
 
     async call(serverName, toolName, args, agent, signal, explicitTimeoutMs) {
@@ -298,7 +308,7 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
 
       let failed = false
       try {
-        await waitRegistered(caches, ctx, name, scopeKey, timeoutMs)
+        await waitRegistered(caches, ctx, name, scopeKey, timeoutMs, signal)
         const result = await ctx.tools.execute({
           callId: `mcp-call-${randomUUID()}` as import('@deepseek-ai/dsh-llm').CallId,
           name,
@@ -354,7 +364,9 @@ const SUMMARY_MAX_LEN = 80
 
 function buildSummary(control: McpControlCtx): Array<{ server: string; summary: string }> {
   const catalog = control.getCatalog()
-  const merged: Record<string, string> = { ...DEFAULT_SUMMARY, ...control.serverSummary }
+  // 只列「配置了 serverSummary 或 catalog 有快照」的 server（此前硬编码作者机器上的
+  // cheatengine/mimo-image/chrome/calcmcp 摘要，本机没装这些 server 的用户会看到误导条目）。
+  const merged: Record<string, string> = { ...control.serverSummary }
   const lines: Array<{ server: string; summary: string }> = []
   const seen = new Set<string>()
   for (const [server, summary] of Object.entries(merged)) {

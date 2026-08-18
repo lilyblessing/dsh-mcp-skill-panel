@@ -1,5 +1,5 @@
-// 产物验证：无 TOOL_RUNTIME_SCHEDULER 内联、external import 正确、导出完整
-import { readFileSync, existsSync } from 'node:fs'
+// 产物验证：无 TOOL_RUNTIME_SCHEDULER 内联、external import 正确、导出完整、类型产物齐全
+import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -12,9 +12,11 @@ const check = (ok, label) => {
 
 const nodeOut = join(root, 'lib', 'index.js')
 const clientOut = join(root, 'lib', 'client.js')
+const typesDir = join(root, 'lib', 'types')
 
 check(existsSync(nodeOut), `node bundle exists: ${nodeOut}`)
 check(existsSync(clientOut), `client bundle exists: ${clientOut}`)
+check(existsSync(typesDir) && readdirSync(typesDir, { recursive: true }).some((f) => String(f).endsWith('.d.ts')), 'lib/types/*.d.ts generated (package.json types must not dangle)')
 
 if (existsSync(nodeOut)) {
   const src = readFileSync(nodeOut, 'utf8')

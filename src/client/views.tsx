@@ -213,13 +213,29 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
     else loadSkills()
   }, [tab, loadMcp, loadSkills])
 
+  // 进程级 token：所有 POST 前取一次并缓存（服务端随机令牌，阻断跨源/DNS-rebinding
+  // 对本地控制端点的盲写）。tokenPromise 缓存 Promise，无需重复请求。
+  const tokenPromise = React.useRef<Promise<string | null> | null>(null)
+  const ensureToken = useCallback(() => {
+    if (!tokenPromise.current) {
+      tokenPromise.current = fetch('/api/mcp-skill-panel/token')
+        .then((r) => r.json() as Promise<{ token?: string }>)
+        .then((b) => b?.token ?? null)
+        .catch(() => null)
+    }
+    return tokenPromise.current
+  }, [])
+
   const post = useCallback(
-    (path: string, payload: Record<string, unknown>, key: string, onOk: () => void) => {
+    async (path: string, payload: Record<string, unknown>, key: string, onOk: () => void) => {
       setBusy((prev) => ({ ...prev, [key]: true }))
       setError(null)
+      const token = await ensureToken()
+      const headers: Record<string, string> = { 'content-type': 'application/json' }
+      if (token) headers['x-panel-token'] = token
       fetch(path, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers,
         body: JSON.stringify(payload),
       })
         .then((res) => res.json() as Promise<{ ok: boolean; error?: string }>)
@@ -234,25 +250,28 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
         })
         .finally(() => setBusy((prev) => ({ ...prev, [key]: false })))
     },
-    [t, loadMcp, loadSkills],
+    [t, loadMcp, loadSkills, ensureToken],
   )
 
   const toggleMcp = (row: McpRow) => {
     post(
-      '/api/runtime-inventory/mcp/toggle',
+      '/api/mcp-skill-panel/mcp/toggle',
       { entryId: row.entryId, disabled: !row.disabled },
       `mcp:${row.rowId}`,
       () => loadMcp(),
     )
   }
 
-  const toggleAutoManage = () => {
+  const toggleAutoManage = async () => {
     const next = !(mcp?.autoManage ?? false)
     setBusy((prev) => ({ ...prev, autoManage: true }))
     setError(null)
+    const token = await ensureToken()
+    const headers: Record<string, string> = { 'content-type': 'application/json' }
+    if (token) headers['x-panel-token'] = token
     fetch('/api/mcp-skill-panel/config', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers,
       body: JSON.stringify({ autoManage: next }),
     })
       .then((res) => res.json() as Promise<{ ok: boolean; autoManage?: boolean; error?: string }>)
@@ -269,7 +288,7 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
 
   const toggleSkill = (row: SkillRow) => {
     post(
-      '/api/runtime-inventory/skill/toggle',
+      '/api/mcp-skill-panel/skill/toggle',
       { name: row.name, disabled: row.modelInvocable },
       `skill:${row.name}`,
       () => {

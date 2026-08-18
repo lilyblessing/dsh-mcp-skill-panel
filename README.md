@@ -9,7 +9,7 @@
 
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.4.4-green.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.4.7-green.svg">
 </p>
 
 ---
@@ -103,7 +103,9 @@ dsh plugin --profile web add "github:lilyblessing/dsh-mcp-skill-panel#main"
 | POST | `/api/mcp-skill-panel/config` | `{ autoManage: boolean }` 切换 AI 中间层（持久化到 state.json） |
 | GET | `/api/mcp-skill-panel/debug` | catalog 采集诊断（事件计数/快照现场/内存目录摘要），运维排障用 |
 | POST | `/api/mcp-skill-panel/debug/collect` | 手动触发一次 catalog 采集 |
+| GET | `/api/mcp-skill-panel/token` | 取本进程随机令牌（面板 POST 前自动获取并携带 `x-panel-token` 头） |
 
+> **写操作鉴权（0.4.7+）**：全部 POST（mcp/skill toggle、config、debug/collect）要求 `x-panel-token` 头与本进程随机令牌一致，否则 401 —— 阻断跨源 / DNS-rebinding 对本地控制端点的盲写；GET 只读端点（state/config/debug/token）保持开放。令牌由客户端在 `/token` 获取并自动携带。
 > 旧前缀 `/api/runtime-inventory/*`（≤0.3.1）仍兼容注册。分域缓存（60s TTL 兜底）由事件驱动精确失效：`tools/change` / `loader/partial-dispose` → MCP 域；`skills/change` → Skill 域。
 
 ## ⚙️ 工作原理
@@ -176,23 +178,26 @@ sequenceDiagram
 - **手动编辑预设组合文件的 mcp 行**（如手动移除 `disabled: true`）会令该行退出插件的持久化管理（下次启动尊重你的改动，不再覆盖）。
 - 运行期写 SKILL.md 安全（skill-filesystem 的 watcher 本就预期文件被改）；运行期写预设组合文件会触发 dsh-agent-presets 的 stamp 重挂事故，插件刻意不做。
 - 能力摘要表（`mcp_search` 空查询）只覆盖有 catalog 快照或配置了 `serverSummary` 的 server；从未成功启动过的 server（如 codegraph）不会列出。
+- **控制端点鉴权**：写操作由进程级随机令牌（`x-panel-token`）保护，仅面板同源客户端自动携带；GET 只读开放。宿主 webServer 本身无鉴权层，若将监听地址改为 `0.0.0.0` 对外暴露，建议同时依赖外层网络隔离。
 
 ## 🛠️ 开发
 
 ```sh
 npm run setup      # junction DSH 闭包类型到 node_modules/@deepseek-ai
 npm run typecheck  # tsc 类型检查（闭包类型）
-npm run build      # tsc dts + tsdown（node external 全部 @deepseek-ai/*）
-npm run verify     # 产物验证（无 TOOL_RUNTIME_SCHEDULER 内联、client 包装完整）
+npm run build      # tsdown（node external 全部 @deepseek-ai/*）→ 最后 tsc 生成 lib/types（顺序不可换）
+npm run verify     # 产物验证（无 TOOL_RUNTIME_SCHEDULER 内联、client 包装完整、lib/types 齐全）
 node scripts/selftest-mcp.mjs  # catalog 单测
 ```
 
 node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会产生第二个 `TOOL_RUNTIME_SCHEDULER` Symbol，导致工具调度崩溃（dsh-context-doctor 同款教训）。
+`build.mjs` 的顺序必须是「tsdown → tsc dts」：tsdown 的 `clean` 会清掉 `lib/`，若先 tsc 生成、后 tsdown，`lib/types` 会被连带删除（0.4.7 修复，verify 有护栏）。
 
 ## 📋 变更日志
 
 | 版本 | 内容 |
 | --- | --- |
+| 0.4.7 | 安全与健壮性加固：toggle 端点校验目标行必须是 MCP 行（防停用任意 loader 行）；全部写端点加进程级 token 鉴权（`x-panel-token`，阻断跨源/DNS-rebinding 盲写）；readBody 限长 64KB；waitRegistered 绑定上下文销毁/AbortSignal（卸载不再挂起 mcp_call）；移除硬编码 DEFAULT_SUMMARY（能力摘要只列真实 server）；client 统一新 API 前缀并自动携带 token；build 顺序修复使 lib/types 产物入库（types 声明不再悬空）；空 package-lock.json 修复 |
 | 0.4.6 | 修复 0.4.5 引入的 catalog 清空事故：prune 增加「loader 视图为空跳过」保护（组合未挂载时序不再删 last-good）；空采集一律不写盘（prev 丢失后空快照不再续写污染） |
 | 0.4.5 | catalog 失效清理：移除 MCP 行 / serverName 重命名后，残留快照从 catalog 与 mcp_search 能力表中自动清除（停用的 server 保留供面板回填） |
 | 0.4.4 | 可维护性重构：index.ts 拆分（state.ts/preset.ts/collect.ts/routes.ts/util.ts/mcp-entry.ts/shared-types.ts）；MCP entry 判定 4 处重复收敛；前后端视图类型单一来源；HTTP 端点样板收敛（defineHandler/ok）；client 平台类型声明替换 any；setSkillFlag 移除残留空行修复；peerDependencies 补全 |

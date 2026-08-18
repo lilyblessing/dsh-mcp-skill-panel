@@ -4,12 +4,13 @@
  * 从 index.ts 拆出（可维护性批次 P1-1），并收敛端点样板（P2-6）：
  * defineHandler 统一 method 校验 / 异步错误响应 / {ok:true,...} 包装。
  */
+import { randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { readFile, writeFile } from 'node:fs/promises'
 import { readState, writeState } from './state'
 import { setSkillFlag, rowDisabledState } from './preset'
 import { resolveAgent, collectMcp, collectSkills, confirmedSkills, pruneExpired, DOMAIN_TTL_MS, SKILL_TOGGLE_POLL_MS, type DomainCaches, type Deps } from './collect'
-import { serverNameOf } from './mcp-entry'
+import { isMcpEntry, serverNameOf } from './mcp-entry'
 import type { McpCallController } from './mcpcall'
 import type { CatalogRuntime, Config } from './index'
 import { messageOf } from './util'
@@ -19,6 +20,11 @@ const API_PREFIX = '/api/mcp-skill-panel'
 const LEGACY_API_PREFIX = '/api/runtime-inventory'
 /** skill toggle 后等待 watcher 失效 catalog 的最长时间 */
 const SKILL_TOGGLE_CONFIRM_MS = 5_000
+/** 进程级随机令牌：写操作（启停/config）要求客户端在 x-panel-token 头携带；
+ * 阻断跨源 / DNS-rebinding 对本地控制端点的盲写。GET 只读保持开放。 */
+const PANEL_TOKEN = randomBytes(32).toString('hex')
+/** readBody 体积上限：防无界 body 累积（本地 DoS 向量）。 */
+const MAX_BODY_BYTES = 64 * 1024
 
 type Req = import('node:http').IncomingMessage
 type Res = import('node:http').ServerResponse
@@ -40,12 +46,31 @@ function ok(res: Res, data: object): void {
 }
 
 function readBody(req: Req): Promise<string> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let body = ''
-    req.on('data', (chunk) => {
+    const onData = (chunk: Buffer | string) => {
       body += String(chunk)
-    })
-    req.on('end', () => resolve(body))
+      if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) {
+        req.destroy()
+        reject(new Error(`body exceeds ${MAX_BODY_BYTES} bytes`))
+      }
+    }
+    const onEnd = () => {
+      cleanup()
+      resolve(body)
+    }
+    const onError = (error: Error) => {
+      cleanup()
+      reject(error)
+    }
+    const cleanup = () => {
+      req.off('data', onData)
+      req.off('end', onEnd)
+      req.off('error', onError)
+    }
+    req.on('data', onData)
+    req.on('end', onEnd)
+    req.on('error', onError)
   })
 }
 
@@ -54,11 +79,21 @@ function queryParam(url: string, key: string): string | undefined {
   return m ? decodeURIComponent(m[1]) : undefined
 }
 
-/** 端点样板：method 校验 + 异步执行 + {ok:true} 包装 + 统一错误码（POST 参数错 400 / GET 服务错 500）。 */
-function handle(method: 'GET' | 'POST', run: (req: Req) => Promise<object>): (req: Req, res: Res) => void {
+/** 写操作 token 校验（x-panel-token === 本进程随机令牌）。 */
+function tokenOk(req: Req): boolean {
+  return req.headers['x-panel-token'] === PANEL_TOKEN
+}
+
+/** 端点样板：method 校验 + 异步执行 + {ok:true} 包装 + 统一错误码（POST 参数错 400 / GET 服务错 500）。
+ * guarded=true 时要求 x-panel-token 匹配（写操作鉴权）。 */
+function handle(method: 'GET' | 'POST', run: (req: Req) => Promise<object>, guarded = false): (req: Req, res: Res) => void {
   return (req, res) => {
     if (req.method !== method) {
       json(res, 405, { ok: false, error: 'method-not-allowed' })
+      return
+    }
+    if (guarded && !tokenOk(req)) {
+      json(res, 401, { ok: false, error: 'unauthorized' })
       return
     }
     Promise.resolve(run(req))
@@ -71,11 +106,15 @@ function handle(method: 'GET' | 'POST', run: (req: Req) => Promise<object>): (re
  * 同 path 多 method 路由：webServer 的 exact 路由按 path 唯一（同 path 重复注册
  * 会中断后续注册），因此 GET+POST 共存的端点必须合并为单个 handler 内部分发。
  */
-function handleAny(entries: Array<{ method: 'GET' | 'POST'; run: (req: Req) => Promise<object> }>): (req: Req, res: Res) => void {
+function handleAny(entries: Array<{ method: 'GET' | 'POST'; run: (req: Req) => Promise<object> }>, guardPosts = false): (req: Req, res: Res) => void {
   return (req, res) => {
     const entry = entries.find((e) => e.method === req.method)
     if (!entry) {
       json(res, 405, { ok: false, error: 'method-not-allowed' })
+      return
+    }
+    if (guardPosts && req.method === 'POST' && !tokenOk(req)) {
+      json(res, 401, { ok: false, error: 'unauthorized' })
       return
     }
     handle(entry.method, entry.run)(req, res)
@@ -87,6 +126,10 @@ function handleAny(entries: Array<{ method: 'GET' | 'POST'; run: (req: Req) => P
 async function toggleMcp(deps: Deps, entryId: string, disabled: boolean) {
   const { ctx } = deps
   const entry = ctx.loader.resolve(entryId)
+  // 只允许启停 MCP 行：防止调用方传入任意 loader 行（含核心/其他插件行）被误停用。
+  if (!isMcpEntry(entry)) {
+    throw new Error(`entry "${entryId}" is not an MCP row`)
+  }
   const rowId = entry.options.id
   await entry.update({ disabled })
   // 用户手动打开（!disabled）：清除 AI 临时启用标记（aiEnabled/计数/lastUsed +
@@ -218,7 +261,7 @@ export function makeRoutes(
         const result = await toggleMcp(deps, parsed.entryId, Boolean(parsed.disabled))
         invalidateMcp()
         return result
-      }),
+      }, true),
     },
     {
       kind: 'exact',
@@ -229,7 +272,7 @@ export function makeRoutes(
         const result = await toggleSkill(deps, parsed.name, Boolean(parsed.disabled), parsed.session)
         invalidateSkills()
         return result
-      }),
+      }, true),
     },
     {
       kind: 'exact',
@@ -255,7 +298,12 @@ export function makeRoutes(
             return { autoManage: catalogRuntime.autoManage }
           },
         },
-      ]),
+      ], true),
+    },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/token`,
+      handler: handle('GET', async () => ({ token: PANEL_TOKEN })),
     },
     {
       kind: 'exact',
@@ -274,7 +322,7 @@ export function makeRoutes(
       handler: handle('POST', async () => {
         await triggerSnapshot()
         return { diag: catalogRuntime.diag }
-      }),
+      }, true),
     },
   ]
   // 旧前缀兼容（0.3.1 及以前）：同一组路由在新旧前缀下都注册
