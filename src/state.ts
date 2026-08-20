@@ -25,8 +25,16 @@ export type StateFile = {
   mcp?: Record<string, Record<string, McpRowState>>
   /** AI 自动启用标记（mcp_call 保活启用）：entryId → 上次启用时间。 */
   ai?: Record<string, { at: number }>
-  /** 面板可写的插件配置（autoManage 开关等），优先于 cordis config。 */
-  config?: { autoManage?: boolean }
+  /** 面板可写的插件配置（autoManage 开关、生效时机等），优先于 cordis config。 */
+  config?: { autoManage?: boolean; applyMode?: ApplyMode }
+}
+
+/** 生效时机：immediate=立即（默认，下轮生效）；next-session=记意图、新会话/重启生效。 */
+export type ApplyMode = 'immediate' | 'next-session'
+
+/** 当前生效时机（缺省 immediate）。 */
+export function stateApplyMode(state: StateFile): ApplyMode {
+  return state.config?.applyMode === 'next-session' ? 'next-session' : 'immediate'
 }
 
 let stateCache: StateFile | null = null

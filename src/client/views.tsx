@@ -231,13 +231,16 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
   const [warn, setWarn] = useState<{ text: string; severe: boolean } | null>(null)
   const warnTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const showWarn = useCallback(
-    (severe: boolean) => {
-      setWarn({ text: t('ri.cacheWarn'), severe })
+    (text: string, severe: boolean) => {
+      setWarn({ text, severe })
       if (warnTimer.current) clearTimeout(warnTimer.current)
       warnTimer.current = setTimeout(() => setWarn(null), CACHE_WARN_AUTO_DISMISS_MS)
     },
-    [t],
+    [],
   )
+
+  // 生效时机：immediate（默认）/ next-session
+  const [applyMode, setApplyMode] = useState<'immediate' | 'next-session'>('immediate')
 
   // 分域加载：MCP tab 只拉 MCP 数据（不触发 skill 目录发现），切 tab 时按需刷新。
   // 乱序防护：自增序号，过期响应直接丢弃（快速连点多个开关时慢响应不会覆盖新状态）。
@@ -270,6 +273,17 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
     if (tab === 'mcp') loadMcp()
     else loadSkills()
   }, [tab, loadMcp, loadSkills])
+
+  // 启动时拉取 applyMode（与 state 加载并行，互不阻塞）；失败回退 immediate
+  useEffect(() => {
+    fetch('/api/mcp-skill-panel/config')
+      .then((r) => r.json() as Promise<{ ok: boolean; applyMode?: 'immediate' | 'next-session' }>)
+      .then((b) => { if (b.ok && b.applyMode) setApplyMode(b.applyMode) })
+      .catch(() => { /* 默认 immediate，静默回退 */ })
+  }, [])
+
+  // 派生：是否有任意 MCP 行处于 pending 状态
+  const hasPending = Boolean(mcp?.mcp?.some((r) => r.pending))
 
   // 进程级 token：所有 POST 前取一次并缓存（服务端随机令牌，阻断跨源/DNS-rebinding
   // 对本地控制端点的盲写）。tokenPromise 缓存 Promise，无需重复请求。
@@ -359,14 +373,18 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
 
   const toggleMcp = useCallback(
     (row: McpRow) => {
-      // P0：触发切换即提示——大包（>50 工具 / >10k token）红字高亮
-      showWarn(row.tools > CACHE_WARN_MAX_TOOLS || row.tokens > CACHE_WARN_MAX_TOKENS)
+      // 生效时机感知：immediate 模式弹缓存失效警示，next-session 弹轻度提示
+      if (applyMode === 'immediate') {
+        showWarn(t('ri.cacheWarn'), row.tools > CACHE_WARN_MAX_TOOLS || row.tokens > CACHE_WARN_MAX_TOKENS)
+      } else {
+        showWarn(t('ri.applyDeferredHint'), false)
+      }
       // 入队 + 重置去抖窗口（后续点击顺延到 400ms 后统一 flush）
       mcpBatch.current.set(row.entryId, { entryId: row.entryId, rowId: row.rowId, disabled: !row.disabled })
       if (mcpBatchTimer.current) clearTimeout(mcpBatchTimer.current)
       mcpBatchTimer.current = setTimeout(() => void flushMcpBatch(), MCP_BATCH_DEBOUNCE_MS)
     },
-    [showWarn, flushMcpBatch],
+    [showWarn, flushMcpBatch, applyMode, t],
   )
 
   // 卸载清理：丢弃未 flush 的批量 toggle（否则 400ms 窗口内关面板会丢操作）并清提示定时器。
@@ -382,7 +400,7 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
   const toggleAutoManage = async () => {
     const next = !(mcp?.autoManage ?? false)
     // P0：autoManage 开关会瞬变 tools 注入量（如 96→40），同样提示缓存失效
-    showWarn(false)
+    showWarn(t('ri.cacheWarn'), false)
     setBusy((prev) => ({ ...prev, autoManage: true }))
     setError(null)
     const token = await ensureToken()
@@ -407,7 +425,7 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
 
   const toggleSkill = (row: SkillRow) => {
     // P0：Skill 目录消息位于前缀首部，中途开关同样使该位置起全量 miss
-    showWarn(false)
+    showWarn(t('ri.cacheWarn'), false)
     post(
       '/api/mcp-skill-panel/skill/toggle',
       { name: row.name, disabled: row.modelInvocable },
@@ -504,7 +522,19 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
       {view && tab === 'mcp' && (
         <>
           <AutoManageCard on={(view as McpView).autoManage} busy={Boolean(busy.autoManage)} t={t} onToggle={toggleAutoManage} />
-          <McpPanel state={view as McpView} t={t} busy={busy} onToggle={toggleMcp} statusOf={mcpStatus} />
+          <ApplyTimingCard
+            applyMode={applyMode}
+            hasPending={hasPending}
+            busy={Boolean(busy.applyMode)}
+            t={t}
+            onModeChange={setApplyMode}
+            loadMcp={loadMcp}
+            ensureToken={ensureToken}
+            setError={setError}
+            showWarn={showWarn}
+            setBusy={setBusy}
+          />
+          <McpPanel state={view as McpView} t={t} busy={busy} onToggle={toggleMcp} statusOf={mcpStatus} applyMode={applyMode} />
         </>
       )}
 
@@ -554,14 +584,119 @@ function AutoManageCard(props: {
   )
 }
 
+function ApplyTimingCard(props: {
+  applyMode: 'immediate' | 'next-session'
+  hasPending: boolean
+  busy: boolean
+  t: Props['t']
+  onModeChange: (mode: 'immediate' | 'next-session') => void
+  loadMcp: () => void
+  ensureToken: () => Promise<string | null>
+  setError: (msg: string | null) => void
+  showWarn: (text: string, severe: boolean) => void
+  setBusy: React.Dispatch<React.SetStateAction<Record<string, boolean>>>
+}): React.ReactElement {
+  const { applyMode, hasPending, busy, t, onModeChange, loadMcp, ensureToken, setError, showWarn, setBusy } = props
+
+  const switchMode = useCallback(async (mode: 'immediate' | 'next-session') => {
+    if (mode === applyMode) return
+    const token = await ensureToken()
+    const headers: Record<string, string> = { 'content-type': 'application/json' }
+    if (token) headers['x-panel-token'] = token
+    fetch('/api/mcp-skill-panel/config', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ applyMode: mode }),
+    })
+      .then((r) => r.json() as Promise<{ ok: boolean; applyMode?: string; error?: string }>)
+      .then((b) => {
+        if (!b.ok) throw new Error(b.error ?? 'config update failed')
+        onModeChange(mode)
+        loadMcp()
+      })
+      .catch((err: unknown) => {
+        setError(t('ri.toggleError', { error: err instanceof Error ? err.message : String(err) }))
+      })
+  }, [applyMode, ensureToken, onModeChange, loadMcp, setError, t])
+
+  const applyPending = useCallback(async () => {
+    // 「立即应用（知晓费用）」：强制把这批待办在当轮改变工具集 → 前缀失效、按 miss 计费。
+    // 点按钮即弹出账提示，让用户在费用知情下操作。
+    showWarn(t('ri.cacheWarn'), true)
+    setBusy((prev) => ({ ...prev, applyMode: true }))
+    setError(null)
+    const token = await ensureToken()
+    const headers: Record<string, string> = { 'content-type': 'application/json' }
+    if (token) headers['x-panel-token'] = token
+    fetch('/api/mcp-skill-panel/mcp/applyPending', { method: 'POST', headers })
+      .then((r) => r.json() as Promise<{ ok: boolean; applied?: number; error?: string }>)
+      .then((b) => {
+        if (!b.ok) throw new Error(b.error ?? 'applyPending failed')
+        loadMcp()
+        showWarn(t('ri.appliedPending', { n: b.applied ?? 0 }), false)
+      })
+      .catch((err: unknown) => {
+        setError(t('ri.toggleError', { error: err instanceof Error ? err.message : String(err) }))
+      })
+      .finally(() => setBusy((prev) => ({ ...prev, applyMode: false })))
+  }, [ensureToken, loadMcp, showWarn, setError, setBusy, t])
+
+  const modeBtn = (mode: 'immediate' | 'next-session'): React.CSSProperties => ({
+    font: 'inherit',
+    cursor: 'pointer',
+    border: '1px solid',
+    borderRadius: 6,
+    padding: '4px 12px',
+    fontSize: 12,
+    fontWeight: applyMode === mode ? 600 : 400,
+    color: applyMode === mode
+      ? 'var(--dsw-alias-label-primary)'
+      : 'var(--dsw-alias-label-tertiary)',
+    background: applyMode === mode
+      ? 'color-mix(in srgb, var(--dsw-alias-state-info-primary, #4a90d9) 16%, transparent)'
+      : 'transparent',
+    borderColor: applyMode === mode
+      ? 'var(--dsw-alias-state-info-primary, #4a90d9)'
+      : 'var(--dsw-alias-border-l2)',
+  })
+
+  return (
+    <div style={C.card}>
+      <div style={C.cardTop}>
+        <h3 style={C.cardTitle}>{t('ri.applyTiming')}</h3>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button type="button" style={modeBtn('immediate')} onClick={() => void switchMode('immediate')}>
+            {t('ri.applyImmediate')}
+          </button>
+          <button type="button" style={modeBtn('next-session')} onClick={() => void switchMode('next-session')}>
+            {t('ri.applyNextSession')}
+          </button>
+        </div>
+      </div>
+      <p style={{ ...C.cardDesc, whiteSpace: 'pre-line' }}>{t('ri.applyModeDesc')}</p>
+      {applyMode === 'next-session' && hasPending && (
+        <button
+          type="button"
+          style={{ ...C.toggle(true), ...(busy ? C.toggleDisabled : {}), alignSelf: 'flex-start', marginTop: 4 }}
+          disabled={busy}
+          onClick={() => void applyPending()}
+        >
+          {busy ? t('ri.pending') : t('ri.applyPendingBtn')}
+        </button>
+      )}
+    </div>
+  )
+}
+
 function McpPanel(props: {
   state: McpView
   t: Props['t']
   busy: Record<string, boolean>
   onToggle: (row: McpRow) => void
   statusOf: (row: McpRow) => { label: string; color: string; bg: string }
+  applyMode: 'immediate' | 'next-session'
 }): React.ReactElement {
-  const { state, t, busy, onToggle, statusOf } = props
+  const { state, t, busy, onToggle, statusOf, applyMode } = props
   return (
     <>
       <div style={C.stats}>
@@ -594,6 +729,11 @@ function McpPanel(props: {
                 <Badge color={st.color} bg={st.bg}>
                   {st.label}
                 </Badge>
+                {row.pending && (
+                  <Badge color="var(--dsw-alias-state-warn-primary)" bg="var(--dsw-alias-state-warn-tertiary)">
+                    {t('ri.pendingBadge')}
+                  </Badge>
+                )}
                 {row.modelVisible ? (
                   <Badge color="var(--dsw-alias-state-info-primary, #4a90d9)" bg="var(--dsw-alias-state-info-tertiary, rgba(74,144,217,0.15))">
                     {t('ri.modelVisible')}
@@ -619,7 +759,14 @@ function McpPanel(props: {
               {t('ri.toolsCount', { n: row.tools })} · {t('ri.tokensCount', { n: formatK(row.tokens) })}
               {row.transport ? ` · ${t('ri.transport')}: ${row.transport}` : ''}
             </div>
-            <p style={C.hint}>{row.disabled ? t('ri.toggleOnHint') : t('ri.toggleOffHint')}</p>
+            <p style={C.hint}>
+              {row.pending
+                ? t('ri.applyDeferredHint')
+                : row.disabled
+                  ? t('ri.toggleOnHint')
+                  : t('ri.toggleOffHint')
+              }
+            </p>
           </div>
         )
       })}

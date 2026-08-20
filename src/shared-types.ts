@@ -21,6 +21,10 @@ export interface McpRow {
   status: McpStatus
   /** 模型是否可见（autoManage 下：启用且非 AI 临时启用 → 可见；关闭模式下全部启用可见）。 */
   modelVisible: boolean
+  /** 宿主侧期望状态（next-session 模式下可能与 disabled 不同）。 */
+  desired?: boolean
+  /** true = 已记录意图但尚未在运行时生效（待下次会话/重启）。 */
+  pending?: boolean
 }
 
 export interface McpView {
