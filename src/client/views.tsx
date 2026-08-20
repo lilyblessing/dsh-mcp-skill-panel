@@ -156,8 +156,11 @@ const C = {
   },
   error: {
     fontSize: 12,
-    color: 'var(--dsw-alias-state-error-primary)',
-    background: 'var(--dsw-alias-state-error-secondary)',
+    // v0.5.0 修复：早期用 state-error-primary 作文字色、secondary 作背景，这套令牌是
+    // 「表面/色块」级同色系，文字糊进背景（实测不可读）。改 label-primary 文字 + 淡染背景
+    color: 'var(--dsw-alias-label-primary)',
+    background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent)',
+    borderLeft: '3px solid var(--dsw-alias-state-error-primary)',
     borderRadius: 6,
     padding: '8px 10px',
   },
@@ -167,7 +170,9 @@ const C = {
     padding: '16px 0',
     textAlign: 'center' as const,
   },
-  // P0 提示：会话中途开关致 Prompt Cache 失效的警示条（severe 时叠加 warnSevere 红字）
+  // P0 提示：会话中途开关致 Prompt Cache 失效的警示条（severe 时叠加 warnSevere 加深）。
+  // 文字用 label-primary（主题文字前景），背景为语义色淡染 + 左侧语义色竖条——
+  // 避免 primary/secondary 令牌同色系导致"同色不可读"（2026-08-20 实测踩坑）。
   warn: {
     display: 'flex',
     alignItems: 'center',
@@ -175,14 +180,17 @@ const C = {
     gap: '8px',
     fontSize: 12,
     lineHeight: '18px',
-    color: 'var(--dsw-alias-state-warn-primary)',
-    background: 'var(--dsw-alias-state-warn-secondary)',
+    color: 'var(--dsw-alias-label-primary)',
+    background: 'color-mix(in srgb, var(--dsw-alias-state-warn-primary) 16%, transparent)',
+    borderLeft: '3px solid var(--dsw-alias-state-warn-primary)',
     borderRadius: 6,
     padding: '8px 10px',
   },
   warnSevere: {
-    color: 'var(--dsw-alias-state-error-primary)',
-    background: 'var(--dsw-alias-state-error-secondary)',
+    color: 'var(--dsw-alias-label-primary)',
+    background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 24%, transparent)',
+    borderLeft: '3px solid var(--dsw-alias-state-error-primary)',
+    fontWeight: 600,
   } as React.CSSProperties,
   warnDismiss: {
     font: 'inherit',
