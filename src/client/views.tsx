@@ -379,8 +379,11 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
       } else {
         showWarn(t('ri.applyDeferredHint'), false)
       }
-      // 入队 + 重置去抖窗口（后续点击顺延到 400ms 后统一 flush）
-      mcpBatch.current.set(row.entryId, { entryId: row.entryId, rowId: row.rowId, disabled: !row.disabled })
+      // 入队 + 重置去抖窗口（后续点击顺延到 400ms 后统一 flush）。
+      // 有效状态取「待生效意图」（next-session 有 pending 时按钮翻转的是意图而非 live），
+      // 让用户能通过 UI 逆向撤销待生效意图（TC8 修复）。
+      const effDisabled = applyMode === 'next-session' && row.pending ? (row.desired ?? row.disabled) : row.disabled
+      mcpBatch.current.set(row.entryId, { entryId: row.entryId, rowId: row.rowId, disabled: !effDisabled })
       if (mcpBatchTimer.current) clearTimeout(mcpBatchTimer.current)
       mcpBatchTimer.current = setTimeout(() => void flushMcpBatch(), MCP_BATCH_DEBOUNCE_MS)
     },
@@ -721,6 +724,9 @@ function McpPanel(props: {
       {state.mcp.map((row) => {
         const st = statusOf(row)
         const isBusy = busy[`mcp:${row.rowId}`]
+        // 有效状态：next-session 且有待生效意图时按意图显示/动作（按钮=翻转意图，可撤销）；
+        // immediate 或无 pending 时 = live disabled（原行为）。
+        const effDisabled = applyMode === 'next-session' && row.pending ? (row.desired ?? row.disabled) : row.disabled
         return (
           <div key={row.entryId} style={C.card}>
             <div style={C.cardTop}>
@@ -748,11 +754,11 @@ function McpPanel(props: {
               </h3>
               <button
                 type="button"
-                style={{ ...C.toggle(row.disabled), ...(isBusy ? C.toggleDisabled : {}) }}
+                style={{ ...C.toggle(effDisabled), ...(isBusy ? C.toggleDisabled : {}) }}
                 disabled={isBusy}
                 onClick={() => onToggle(row)}
               >
-                {isBusy ? t('ri.pending') : row.disabled ? t('ri.enable') : t('ri.disable')}
+                {isBusy ? t('ri.pending') : effDisabled ? t('ri.enable') : t('ri.disable')}
               </button>
             </div>
             <div style={C.cardMeta}>
