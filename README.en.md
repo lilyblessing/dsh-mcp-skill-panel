@@ -80,6 +80,8 @@ dsh plugin --profile web add "github:lilyblessing/dsh-mcp-skill-panel#main"
 
 Prebuilt artifacts are committed (`lib/`), so the git-source one-liner installs without a build step. **Restart `dsh web`** after installing (bundles are composed at startup; hot reload does not apply), then open Settings → **MCP & Skill Manager**.
 
+> 📦 Also published on **npm**: `dsh-mcp-skill-panel` ([npm page](https://www.npmjs.com/package/dsh-mcp-skill-panel)). The npm release ships prebuilt artifacts and can be installed by package name, skipping the `allowBuilds` approval; the git-source one-liner above always works.
+
 ## 🚀 Usage
 
 1. Settings → **MCP & Skill Manager**

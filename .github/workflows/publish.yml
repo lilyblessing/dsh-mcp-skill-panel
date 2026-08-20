@@ -1,0 +1,64 @@
+name: publish
+
+# npm Trusted Publishing（OIDC）自动发布 —— 无需长期 npm token。
+#
+# 前置条件（一次性）：
+#   1) 首次在本地手动 `npm publish` 一次创建包 —— Trusted Publisher 配置入口在「包的 Settings 页面」，
+#      包必须已存在于 registry 才能进入该页面。
+#   2) 在 npmjs.com 该包页面：Settings → Trusted publishing → GitHub Actions，填写：
+#        Organization or user : lilyblessing
+#        Repository          : dsh-mcp-skill-panel
+#        Workflow filename   : publish.yml   ← 必须与本文件名完全一致
+#        Environment name    : 留空
+#        Allowed actions     : npm publish
+#   3) 之后每个新版本：bump package.json version → 推 main（build.yml 自动重建 lib）→ 发 GitHub Release（或打 v* tag），
+#      本流水线即自动发布；provenance 由 trusted publishing 自动附加，无需 --provenance、无需 NODE_AUTH_TOKEN。
+#
+# 注意：Trusted Publishing 要求 npm CLI >= 11.5.1（node 22 自带 npm 10），故先全局升级 npm。
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write   # OIDC trusted publishing 必需
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+          registry-url: https://registry.npmjs.org
+
+      - name: Upgrade npm (>= 11.5.1 required for trusted publishing)
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps --ignore-scripts --no-audit --no-fund
+
+      - name: Build (tsdown -> tsc dts)
+        run: npm run build
+
+      - name: Verify artifacts
+        run: npm run verify
+
+      - name: Selftest (catalog / preset logic)
+        run: node scripts/selftest-mcp.mjs
+
+      - name: Publish to npm (OIDC trusted publishing, provenance auto-attached)
+        run: npm publish

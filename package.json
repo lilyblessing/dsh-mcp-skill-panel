@@ -38,7 +38,8 @@
     "setup": "node scripts/setup-dsh-deps.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
     "build": "node scripts/build.mjs",
-    "verify": "node scripts/verify.mjs"
+    "verify": "node scripts/verify.mjs",
+    "prepublishOnly": "npm run build && npm run verify"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1-rc.1",
@@ -68,5 +69,23 @@
   "engines": {
     "node": ">=22.19"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lilyblessing/dsh-mcp-skill-panel.git"
+  },
+  "homepage": "https://github.com/lilyblessing/dsh-mcp-skill-panel#readme",
+  "bugs": {
+    "url": "https://github.com/lilyblessing/dsh-mcp-skill-panel/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "mcp",
+    "skill",
+    "panel",
+    "agent"
+  ]
 }
