@@ -9,7 +9,7 @@
 
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.4.8-green.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.4.9-green.svg">
 </p>
 
 ---
@@ -193,7 +193,7 @@ node scripts/selftest-mcp.mjs  # catalog unit tests
 ```
 
 > **lib/ artifacts are rebuilt by GitHub Actions** (`.github/workflows/build.yml`): push your source, CI runs typecheck → build → verify → selftest and, on `main`, commits the fresh `lib/` back with `[skip ci]` — remember to `git pull` to collect it.
-> Why `--legacy-peer-deps`: runtime peers come from the DSH closure, while rc.6/rc.7 registry peer graphs conflict (ERESOLVE); why `--ignore-scripts`: esbuild ships platform binaries via optionalDependencies, no postinstall needed.
+> Why `--legacy-peer-deps`: runtime peers come from the DSH closure, while rc.6~rc.8 registry peer graphs conflict (ERESOLVE); why `--ignore-scripts`: esbuild ships platform binaries via optionalDependencies, no postinstall needed.
 
 The node-half tsdown build must use `external: [/^@deepseek-ai\//]`: inlining dsh-tools creates a second `TOOL_RUNTIME_SCHEDULER` Symbol and breaks tool dispatch (same lesson as dsh-context-doctor).
 
@@ -201,6 +201,7 @@ The node-half tsdown build must use `external: [/^@deepseek-ai\//]`: inlining ds
 
 | Version | Content |
 | --- | --- |
+| 0.4.9 | Dependency alignment to the DSH rc.8 line (full pipeline verified on rc.8): 10 `@deepseek-ai/*` devDeps 0.1.0-rc.6 → 0.1.0-rc.8, peers tightened (cordis ^4.0.1 stable / schemastery ^3.18.1 / dsh-scope ^0.1.0-rc.8); published on npm (first release 0.4.8, `repository` points back here) + new Trusted Publishing pipeline (publish.yml, OIDC, tokenless) |
 | 0.4.8 | Self-contained build + CI: 14 `@deepseek-ai/*` added to devDependencies (pinned to the rc.6 line; plain registry install enables typecheck/build/selftest without the local DSH closure); new GitHub Actions pipeline (typecheck → build → verify → selftest; on main push it rebuilds and commits `lib/` back with `[skip ci]`) |
 | 0.4.7 | Security & robustness: the toggle endpoint now validates the target row is an MCP row (blocks disabling arbitrary loader rows); all write endpoints are gated by a per-process token (`x-panel-token`, blocks cross-origin/DNS-rebinding blind writes); 64KB request-body cap; `waitRegistered` bound to context disposal/AbortSignal (no hung mcp_call on unload); removed hardcoded DEFAULT_SUMMARY (capability summary lists real servers only); client unified on the new API prefix and auto-attaches the token; build order fixed so lib/types artifacts ship (types declaration no longer dangles); empty package-lock.json fixed |
 | 0.4.3 | Performance pass: restore race fixed (a user manually enabling a server mid-call is never disabled on failure); per-turn visibility Map cache in the assembly filter (O(1) lookups); 500ms schemas reuse window; 300ms catalog persist debounce; in-memory state.json with write merging; 80-char summary truncation; disabled-state token estimate cache; proactive TTL pruning of cache maps; snapshotServer dead code removed |
