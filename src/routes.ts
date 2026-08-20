@@ -265,6 +265,27 @@ export function makeRoutes(
     },
     {
       kind: 'exact',
+      path: `${API_PREFIX}/mcp/toggleBatch`,
+      handler: handle('POST', async (req) => {
+        // P1 批量合并：一次事务内串行多次 entry.update，循环外单次 invalidateMcp。
+        // 探索式批量启停的 N 次独立 toggle → N 次 tools/change → N 次 100% 前缀 miss；
+        // 合并后收敛为单次 tools/change → 单次 miss。运行期仍不写预设文件（事故 5.1 铁律）。
+        const parsed = JSON.parse((await readBody(req)) || '{}') as {
+          toggles?: Array<{ entryId?: string; disabled?: boolean }>
+        }
+        const toggles = Array.isArray(parsed.toggles) ? parsed.toggles : []
+        if (toggles.length === 0) throw new Error('toggles array is required (non-empty)')
+        const results: Array<Awaited<ReturnType<typeof toggleMcp>>> = []
+        for (const item of toggles) {
+          if (!item?.entryId) throw new Error('entryId is required in every toggle item')
+          results.push(await toggleMcp(deps, item.entryId, Boolean(item.disabled)))
+        }
+        invalidateMcp()
+        return { results, count: results.length }
+      }, true),
+    },
+    {
+      kind: 'exact',
       path: `${API_PREFIX}/skill/toggle`,
       handler: handle('POST', async (req) => {
         const parsed = JSON.parse((await readBody(req)) || '{}') as { name?: string; disabled?: boolean; session?: string }

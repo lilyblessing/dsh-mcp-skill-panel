@@ -41,6 +41,10 @@ export const en: Record<string, string> = {
   'ri.toggleError': 'Toggle failed: {error}',
   'ri.skillToggleOffHint': 'Remove this skill from the model catalog.',
   'ri.skillToggleOnHint': 'Make this skill model-visible again.',
+  // prompt-cache warning (P0: mid-session toggle invalidation)
+  'ri.cacheWarn':
+    "Toggling mid-session invalidates this session's prompt cache: the next request is billed at miss rate (~5-12.5× hit). Prefer toggling at a session boundary.",
+  'ri.cacheWarnDismiss': 'Dismiss',
   // autoManage switch
   'ri.autoManageTitle': 'AI Middle Layer',
   'ri.autoManageOn': 'On',
@@ -91,6 +95,10 @@ export const zh: Record<string, string> = {
   'ri.toggleError': '切换失败：{error}',
   'ri.skillToggleOffHint': '将该技能从模型目录移除。',
   'ri.skillToggleOnHint': '恢复该技能的模型可见性。',
+  // prompt-cache 警示（P0：会话中途开关致缓存失效）
+  'ri.cacheWarn':
+    '会话中途开关会使本会话的 Prompt Cache 失效，下次请求按 miss 费率计费（约为 hit 的 5~12.5 倍），建议在会话边界操作。',
+  'ri.cacheWarnDismiss': '知道了',
   // autoManage 开关
   'ri.autoManageTitle': 'AI 中间层',
   'ri.autoManageOn': '已开启',

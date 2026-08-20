@@ -167,11 +167,50 @@ const C = {
     padding: '16px 0',
     textAlign: 'center' as const,
   },
+  // P0 提示：会话中途开关致 Prompt Cache 失效的警示条（severe 时叠加 warnSevere 红字）
+  warn: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '8px',
+    fontSize: 12,
+    lineHeight: '18px',
+    color: 'var(--dsw-alias-state-warn-primary)',
+    background: 'var(--dsw-alias-state-warn-secondary)',
+    borderRadius: 6,
+    padding: '8px 10px',
+  },
+  warnSevere: {
+    color: 'var(--dsw-alias-state-error-primary)',
+    background: 'var(--dsw-alias-state-error-secondary)',
+  } as React.CSSProperties,
+  warnDismiss: {
+    font: 'inherit',
+    cursor: 'pointer',
+    border: 0,
+    background: 'transparent',
+    color: 'inherit',
+    opacity: 0.85,
+    padding: '2px 6px',
+    borderRadius: 4,
+    fontSize: 12,
+    whiteSpace: 'nowrap' as const,
+  },
 }
 
 function formatK(n: number): string {
   return n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') : String(n)
 }
+
+// P1 批量合并：MCP toggle 合并窗口（issue #1 建议 300~500ms，取 400ms）。
+// 窗口内多次点击只在 flush 时发一次 toggleBatch → 服务端单次 invalidateMcp →
+// N 次 toggle 收敛为 1 次 tools/change（1 次 Prompt Cache miss）。
+const MCP_BATCH_DEBOUNCE_MS = 400
+// P0 提示：大包阈值（工具 >50 或 token ~>10k 红字高亮，issue #1 P0）。
+const CACHE_WARN_MAX_TOOLS = 50
+const CACHE_WARN_MAX_TOKENS = 10_000
+// P0 警示条自动消失时长（ms）。
+const CACHE_WARN_AUTO_DISMISS_MS = 12_000
 
 export function RuntimeInventorySection(props: Props): React.ReactElement {
   const { t } = props
@@ -180,6 +219,17 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
   const [skills, setSkills] = useState<SkillsView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<Record<string, boolean>>({})
+  // P0 提示：瞬态警示条（text + severe 红字高亮），自动消失 + 可手动关闭
+  const [warn, setWarn] = useState<{ text: string; severe: boolean } | null>(null)
+  const warnTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const showWarn = useCallback(
+    (severe: boolean) => {
+      setWarn({ text: t('ri.cacheWarn'), severe })
+      if (warnTimer.current) clearTimeout(warnTimer.current)
+      warnTimer.current = setTimeout(() => setWarn(null), CACHE_WARN_AUTO_DISMISS_MS)
+    },
+    [t],
+  )
 
   // 分域加载：MCP tab 只拉 MCP 数据（不触发 skill 目录发现），切 tab 时按需刷新。
   // 乱序防护：自增序号，过期响应直接丢弃（快速连点多个开关时慢响应不会覆盖新状态）。
@@ -253,17 +303,78 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
     [t, loadMcp, loadSkills, ensureToken],
   )
 
-  const toggleMcp = (row: McpRow) => {
-    post(
-      '/api/mcp-skill-panel/mcp/toggle',
-      { entryId: row.entryId, disabled: !row.disabled },
-      `mcp:${row.rowId}`,
-      () => loadMcp(),
-    )
-  }
+  // P1 批量合并：MCP toggle 先入队，400ms 去抖窗口合并为一次 toggleBatch。
+  // 队列按 entryId 去重（同窗口内同行连点取最后一次意图）；窗口内跨行点击合并，
+  // 服务端单次 invalidateMcp → N 次 toggle 收敛为 1 次 Prompt Cache miss。
+  const mcpBatch = React.useRef<Map<string, { entryId: string; rowId: string; disabled: boolean }>>(new Map())
+  const mcpBatchTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const flushMcpBatch = useCallback(async () => {
+    if (mcpBatchTimer.current) {
+      clearTimeout(mcpBatchTimer.current)
+      mcpBatchTimer.current = null
+    }
+    const items = Array.from(mcpBatch.current.values())
+    mcpBatch.current.clear()
+    if (items.length === 0) return
+    const keys = items.map((it) => `mcp:${it.rowId}`)
+    setBusy((prev) => {
+      const next = { ...prev }
+      for (const k of keys) next[k] = true
+      return next
+    })
+    setError(null)
+    const token = await ensureToken()
+    const headers: Record<string, string> = { 'content-type': 'application/json' }
+    if (token) headers['x-panel-token'] = token
+    try {
+      const res = await fetch('/api/mcp-skill-panel/mcp/toggleBatch', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ toggles: items.map(({ entryId, disabled }) => ({ entryId, disabled })) }),
+      })
+      const body = (await res.json()) as { ok: boolean; error?: string }
+      if (!body.ok) throw new Error(body.error ?? 'batch toggle failed')
+      loadMcp()
+    } catch (err) {
+      setError(t('ri.toggleError', { error: err instanceof Error ? err.message : String(err) }))
+      loadMcp()
+      loadSkills()
+    } finally {
+      setBusy((prev) => {
+        const next = { ...prev }
+        for (const k of keys) next[k] = false
+        return next
+      })
+    }
+  }, [t, loadMcp, loadSkills, ensureToken])
+
+  const toggleMcp = useCallback(
+    (row: McpRow) => {
+      // P0：触发切换即提示——大包（>50 工具 / >10k token）红字高亮
+      showWarn(row.tools > CACHE_WARN_MAX_TOOLS || row.tokens > CACHE_WARN_MAX_TOKENS)
+      // 入队 + 重置去抖窗口（后续点击顺延到 400ms 后统一 flush）
+      mcpBatch.current.set(row.entryId, { entryId: row.entryId, rowId: row.rowId, disabled: !row.disabled })
+      if (mcpBatchTimer.current) clearTimeout(mcpBatchTimer.current)
+      mcpBatchTimer.current = setTimeout(() => void flushMcpBatch(), MCP_BATCH_DEBOUNCE_MS)
+    },
+    [showWarn, flushMcpBatch],
+  )
+
+  // 卸载清理：丢弃未 flush 的批量 toggle（否则 400ms 窗口内关面板会丢操作）并清提示定时器。
+  // 必须置于 flushMcpBatch 定义之后注册 effect，避免渲染期 TDZ 引用未初始化的 const。
+  useEffect(
+    () => () => {
+      if (warnTimer.current) clearTimeout(warnTimer.current)
+      void flushMcpBatch()
+    },
+    [flushMcpBatch],
+  )
 
   const toggleAutoManage = async () => {
     const next = !(mcp?.autoManage ?? false)
+    // P0：autoManage 开关会瞬变 tools 注入量（如 96→40），同样提示缓存失效
+    showWarn(false)
     setBusy((prev) => ({ ...prev, autoManage: true }))
     setError(null)
     const token = await ensureToken()
@@ -287,6 +398,8 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
   }
 
   const toggleSkill = (row: SkillRow) => {
+    // P0：Skill 目录消息位于前缀首部，中途开关同样使该位置起全量 miss
+    showWarn(false)
     post(
       '/api/mcp-skill-panel/skill/toggle',
       { name: row.name, disabled: row.modelInvocable },
@@ -337,7 +450,16 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
             {view ? `${t('ri.preset')}: ${view.preset ?? '—'} · ${t('ri.session')}: ${view.sessionId ?? '—'}` : ''}
           </p>
         </div>
-        <button type="button" style={C.refresh} onClick={() => (tab === 'mcp' ? loadMcp() : loadSkills())}>
+        <button
+          type="button"
+          style={C.refresh}
+          onClick={() => {
+            // 手动刷新前先 flush 积压的批量 toggle，避免读到申请前状态
+            void flushMcpBatch()
+            if (tab === 'mcp') loadMcp()
+            else loadSkills()
+          }}
+        >
           {t('ri.refresh')}
         </button>
       </div>
@@ -352,6 +474,22 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
       </div>
 
       {error && <div style={C.error}>{error}</div>}
+
+      {warn && (
+        <div style={{ ...C.warn, ...(warn.severe ? C.warnSevere : {}) }} role="status">
+          <span>{warn.text}</span>
+          <button
+            type="button"
+            style={C.warnDismiss}
+            onClick={() => {
+              if (warnTimer.current) clearTimeout(warnTimer.current)
+              setWarn(null)
+            }}
+          >
+            {t('ri.cacheWarnDismiss')}
+          </button>
+        </div>
+      )}
 
       {!view && !error && <div style={C.empty}>{t('ri.loading')}</div>}
 
