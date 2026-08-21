@@ -3,6 +3,15 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader';
 import type { Catalog } from './catalog';
 /**
+ * 归一化 mcp_call 的 tool 参数（2026-08-22 修补）：模型可能把 mcp_search 返回的
+ * 注册全名（mcp__<server>__<tool>）直接填入 tool，无条件拼接会生成双重前缀。
+ * 规则：以 mcp__ 开头视为注册全名形态 → 循环剥离本 server 前缀（兼容嵌套重复）；
+ * 剥完仍以 mcp__ 开头 → 传的是其他 server 的注册全名或格式异常 → 快速失败
+ * （避免在 waitRegistered 白等满 toolCallTimeoutMs，默认 60s、mimo-image 300s）。
+ * 注：远端工具裸名恰好以 mcp__ 开头属生态外的病态命名，会被误判，可接受。
+ */
+export declare function normalizeToolName(serverName: string, toolName: string): string;
+/**
  * 控制层依赖：由 src/index.ts 在 apply 里构建并注入。这些 helper 封闭了
  * 插件对 catalog 内存态、catalog.json 持久化、loader entry 反查、state.json
  * AI-owner 标记的读写 —— 这样控制层不反向依赖 index.ts（避免循环依赖）。

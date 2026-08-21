@@ -29,6 +29,7 @@
 import Schema from '@deepseek-ai/schemastery';
 import type { Context } from '@deepseek-ai/cordis';
 import type { Catalog } from './catalog';
+export { normalizeToolName } from './mcpcall';
 import type { McpView, SkillsView } from './shared-types';
 export type { McpView, SkillsView, McpRow, SkillRow } from './shared-types';
 export type { DomainCaches } from './collect';

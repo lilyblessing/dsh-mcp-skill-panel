@@ -31,6 +31,28 @@ const REGISTER_POLL_MS = 50
 const DEFAULT_TOOL_TIMEOUT_MS = 60_000
 
 /**
+ * 归一化 mcp_call 的 tool 参数（2026-08-22 修补）：模型可能把 mcp_search 返回的
+ * 注册全名（mcp__<server>__<tool>）直接填入 tool，无条件拼接会生成双重前缀。
+ * 规则：以 mcp__ 开头视为注册全名形态 → 循环剥离本 server 前缀（兼容嵌套重复）；
+ * 剥完仍以 mcp__ 开头 → 传的是其他 server 的注册全名或格式异常 → 快速失败
+ * （避免在 waitRegistered 白等满 toolCallTimeoutMs，默认 60s、mimo-image 300s）。
+ * 注：远端工具裸名恰好以 mcp__ 开头属生态外的病态命名，会被误判，可接受。
+ */
+export function normalizeToolName(serverName: string, toolName: string): string {
+  const prefix = `mcp__${serverName}__`
+  let name = toolName
+  if (name.startsWith('mcp__')) {
+    while (name.startsWith(prefix)) name = name.slice(prefix.length)
+    if (name.startsWith('mcp__')) {
+      throw new Error(
+        `mcp_call: tool 参数疑似其他 MCP server 的注册全名（${JSON.stringify(toolName)}，server="${serverName}"）；请传该 server 上的裸名（如 understand_image，不带 mcp__ 前缀）`,
+      )
+    }
+  }
+  return name
+}
+
+/**
  * 控制层依赖：由 src/index.ts 在 apply 里构建并注入。这些 helper 封闭了
  * 插件对 catalog 内存态、catalog.json 持久化、loader entry 反查、state.json
  * AI-owner 标记的读写 —— 这样控制层不反向依赖 index.ts（避免循环依赖）。
@@ -290,7 +312,8 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
     },
 
     async call(serverName, toolName, args, agent, signal, explicitTimeoutMs) {
-      const name = `mcp__${serverName}__${toolName}`
+      const bareTool = normalizeToolName(serverName, toolName)
+      const name = `mcp__${serverName}__${bareTool}`
       const scopeKey = agent ? scopeOf(agent.ctx) : undefined
       const entry = caches.resolveEntry(serverName)
       if (!entry) return `未知 MCP server：${serverName}（不在 loader 中）`
@@ -319,13 +342,13 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
         state.lastUsed.set(serverName, Date.now())
         if (result && result.isError) {
           failed = true
-          return `MCP ${serverName}.${toolName} 调用失败：${msgOf((result as { error?: unknown }).error ?? 'unknown error')}`
+          return `MCP ${serverName}.${bareTool} 调用失败：${msgOf((result as { error?: unknown }).error ?? 'unknown error')}`
         }
         const text = contentText(result ? (result as { content?: unknown }).content : undefined)
-        return text.length > 0 ? text : `MCP ${serverName}.${toolName} 无返回内容`
+        return text.length > 0 ? text : `MCP ${serverName}.${bareTool} 无返回内容`
       } catch (error) {
         failed = true
-        return `MCP ${serverName}.${toolName} 调用异常：${msgOf(error)}`
+        return `MCP ${serverName}.${bareTool} 调用异常：${msgOf(error)}（提示：tool 参数应传该 server 上的裸名；server/tool 是否存在可先 mcp_search 确认）`
       } finally {
         const next = (state.refCounts.get(serverName) ?? 1) - 1
         if (next <= 0) state.refCounts.delete(serverName)
@@ -446,7 +469,7 @@ function registerMcpCallTool(ctx: Context, controller: McpCallController): () =>
       '调用一个 MCP 服务器上的工具。自动保活启用目标 server（用完按 keepAliveMs 空闲回收），等待注册后在下层执行。参数透传给远端工具。',
     parameters: {
       server: { type: 'string', required: true, description: 'MCP 服务器名（见 mcp_search 摘要）' },
-      tool: { type: 'string', required: true, description: '该 server 上的工具名' },
+      tool: { type: 'string', required: true, description: '该 server 上的工具名（裸名，如 understand_image；误传注册全名 mcp__<server>__<tool> 会自动归一化）' },
       arguments: { type: 'json', description: '传给远端工具的参数字典' },
     },
     output: {

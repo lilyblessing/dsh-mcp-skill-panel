@@ -37,6 +37,8 @@ import { snapshotFromSchemas, loadCatalog, saveCatalog } from './catalog'
 import { installMcpVisibilityFilter } from './filter'
 import type { McpControlCtx, McpCallController } from './mcpcall'
 import { createMcpCallController, installMcpControlTools } from './mcpcall'
+
+export { normalizeToolName } from './mcpcall'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
 import type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
 import { createDomainCaches, type DomainCaches } from './collect'
