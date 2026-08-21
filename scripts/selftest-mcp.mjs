@@ -35,6 +35,20 @@ const checkAsync = async (label, fn) => {
   }
 }
 
+// mcp_call 前缀归一化（2026-08-22 修补：双重前缀缺陷回归测试）
+check('normalizeToolName：裸名原样透传', () => {
+  assert.equal(index.normalizeToolName('exa', 'web_search_exa'), 'web_search_exa')
+})
+check('normalizeToolName：注册全名剥一次前缀', () => {
+  assert.equal(index.normalizeToolName('exa', 'mcp__exa__web_search_exa'), 'web_search_exa')
+})
+check('normalizeToolName：双重前缀循环剥净（2026-08-22 缺陷）', () => {
+  assert.equal(index.normalizeToolName('mimo-image', 'mcp__mimo-image__mcp__mimo-image__understand_image'), 'understand_image')
+})
+check('normalizeToolName：其他 server 注册全名快速失败', () => {
+  assert.throws(() => index.normalizeToolName('exa', 'mcp__mimo-image__understand_image'), /裸名/)
+})
+
 const schemas = [
   { name: 'mcp__cheatengine__read_memory', description: '读取游戏进程内存', parameters: { type: 'object', properties: { addr: { type: 'string' } }, required: ['addr'] } },
   { name: 'mcp__cheatengine__write_memory', description: '写入游戏进程内存', parameters: { type: 'object', properties: { addr: { type: 'string' }, value: { type: 'integer' } } } },
