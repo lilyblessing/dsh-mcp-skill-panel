@@ -1,14 +1,3 @@
-/**
- * 延迟生效（P1 会话边界）：MCP 启停意图的待生效队列。
- *
- * next-session 模式下 toggle 不立即 entry.update（避免中途改 tools 前缀 → 缓存 miss），
- * 只写 state.json.desired 并进入本模块的 pendingMcp 内存队列；在边界统一应用：
- * - 实时：新会话 `agent/session-start`（首次请求前）调用 applyPendingMcp
- * - 兜底：DSH 重启后由 syncPresetFiles() 从 state.json 物化到预设组合（既有路径）
- * - 强制：面板「立即应用待生效变更」端点同样调用 applyPendingMcp
- *
- * immediate 模式不经过本队列（toggleMcp 直接 entry.update）。
- */
 import type { Context } from '@deepseek-ai/cordis';
 import type { McpCallController } from './mcpcall';
 /** 单个待生效项（key = entryId）。 */

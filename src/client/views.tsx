@@ -355,8 +355,17 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
         headers,
         body: JSON.stringify({ toggles: items.map(({ entryId, disabled }) => ({ entryId, disabled })) }),
       })
-      const body = (await res.json()) as { ok: boolean; error?: string }
+      const body = (await res.json()) as {
+        ok: boolean
+        error?: string
+        failed?: number
+        results?: Array<{ ok?: boolean; error?: string }>
+      }
       if (!body.ok) throw new Error(body.error ?? 'batch toggle failed')
+      if (body.failed && body.failed > 0) {
+        const firstErr = body.results?.find((r) => r.ok === false)?.error
+        setError(t('ri.toggleError', { error: `batch: ${body.failed} failed${firstErr ? ` — ${firstErr}` : ''}` }))
+      }
       loadMcp()
     } catch (err) {
       setError(t('ri.toggleError', { error: err instanceof Error ? err.message : String(err) }))

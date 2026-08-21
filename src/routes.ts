@@ -292,13 +292,23 @@ export function makeRoutes(
         const toggles = Array.isArray(parsed.toggles) ? parsed.toggles : []
         if (toggles.length === 0) throw new Error('toggles array is required (non-empty)')
         const applyMode = stateApplyMode(await readState())
-        const results: Array<Awaited<ReturnType<typeof toggleMcp>>> = []
+        const results: Array<
+          | Awaited<ReturnType<typeof toggleMcp>>
+          | { entryId: string; ok: false; error: string }
+        > = []
+        let failed = 0
         for (const item of toggles) {
           if (!item?.entryId) throw new Error('entryId is required in every toggle item')
-          results.push(await toggleMcp(deps, item.entryId, Boolean(item.disabled), applyMode))
+          try {
+            results.push(await toggleMcp(deps, item.entryId, Boolean(item.disabled), applyMode))
+          } catch (error) {
+            // 单项失败（如行已失效）不阻断整批：其余项照常应用，失败信息随结果返回
+            failed += 1
+            results.push({ entryId: item.entryId, ok: false, error: messageOf(error) })
+          }
         }
         invalidateMcp()
-        return { results, count: results.length }
+        return { results, count: results.length, failed }
       }, true),
     },
     {

@@ -115,7 +115,10 @@ export async function syncPresetFiles(ctx: Context): Promise<number> {
           continue
         }
       }
-      next[rowId] = { desired: entry.desired, lastApplied: curBool }
+      // lastApplied 记录物化后的文件状态（= desired），而非物化前 curBool：
+      // 否则下次启动 cur(文件=desired) !== lastApplied(旧值) 被误判为「外部修改」而放弃管理，
+      // 导致 desired 残留 + 面板徽标悬挂（P1 重启链路闭环）。
+      next[rowId] = { desired: entry.desired, lastApplied: entry.desired }
     }
     if (changed) await writeFile(file, text, 'utf8')
     mcp[file] = next
