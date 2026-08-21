@@ -70,6 +70,9 @@ jobs:
       - name: Selftest (catalog / preset logic)
         run: node scripts/selftest-mcp.mjs
 
+      - name: Selftest (P1 session-boundary apply chain)
+        run: node scripts/selftest-pending.mjs
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:

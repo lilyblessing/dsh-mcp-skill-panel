@@ -49,7 +49,10 @@ import { messageOf } from './util'
 export type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
 export type { DomainCaches } from './collect'
 // 预设文件文本操作（selftest 回归护栏 + 潜在外部复用）
-export { setRowFlag, setSkillFlag, rowDisabledState } from './preset'
+export { setRowFlag, setSkillFlag, rowDisabledState, syncPresetFiles } from './preset'
+export { readState, writeState } from './state'
+// P1 会话边界：待生效队列与边界应用入口（selftest 直接测构建产物行为）
+export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending'
 
 export const name = 'runtime-inventory'
 

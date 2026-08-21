@@ -32,7 +32,9 @@ import type { Catalog } from './catalog';
 import type { McpView, SkillsView } from './shared-types';
 export type { McpView, SkillsView, McpRow, SkillRow } from './shared-types';
 export type { DomainCaches } from './collect';
-export { setRowFlag, setSkillFlag, rowDisabledState } from './preset';
+export { setRowFlag, setSkillFlag, rowDisabledState, syncPresetFiles } from './preset';
+export { readState, writeState } from './state';
+export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending';
 export declare const name = "runtime-inventory";
 export declare const inject: string[];
 export interface Config {
