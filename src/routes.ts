@@ -7,8 +7,9 @@
 import { randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { readFile, writeFile } from 'node:fs/promises'
-import { readState, writeState } from './state'
+import { readState, writeState, stateApplyMode, type ApplyMode } from './state'
 import { setSkillFlag, rowDisabledState } from './preset'
+import { pendingMcp, applyPendingMcp } from './pending'
 import { resolveAgent, collectMcp, collectSkills, confirmedSkills, pruneExpired, DOMAIN_TTL_MS, SKILL_TOGGLE_POLL_MS, type DomainCaches, type Deps } from './collect'
 import { isMcpEntry, serverNameOf } from './mcp-entry'
 import type { McpCallController } from './mcpcall'
@@ -123,20 +124,31 @@ function handleAny(entries: Array<{ method: 'GET' | 'POST'; run: (req: Req) => P
 
 /* ── 控制动作 ──────────────────────────────────────────────────────────── */
 
-async function toggleMcp(deps: Deps, entryId: string, disabled: boolean) {
+async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMode?: ApplyMode) {
   const { ctx } = deps
+  const mode = applyMode ?? stateApplyMode(await readState())
   const entry = ctx.loader.resolve(entryId)
   // 只允许启停 MCP 行：防止调用方传入任意 loader 行（含核心/其他插件行）被误停用。
   if (!isMcpEntry(entry)) {
     throw new Error(`entry "${entryId}" is not an MCP row`)
   }
   const rowId = entry.options.id
-  await entry.update({ disabled })
-  // 用户手动打开（!disabled）：清除 AI 临时启用标记（aiEnabled/计数/lastUsed +
-  // state.json ai owner）—— 转为「用户打开」语义：模型立即可见、回收器不再回收。
-  // 用户手动关闭（disabled）：AI 标记保持原样（若原本 AI 启用中，回收器/失败恢复照常管理）。
-  if (!disabled && deps.controller) {
-    deps.controller.markUserEnabled(serverNameOf(entry))
+  // P1 会话边界生效（v0.5.0）：next-session 模式只记意图（进入待生效队列），
+  // 不立即 entry.update —— 运行时 tools 前缀不变 → 当前会话零缓存失效、零费用。
+  // 生效时机：新会话 agent/session-start 首次请求前 applyPendingMcp，或重启后
+  // syncPresetFiles 物化预设。immediate（默认）保持原行为：下轮即生效（会 miss）。
+  const deferred = mode === 'next-session'
+  if (deferred) {
+    pendingMcp.set(entryId, { entryId, file: (entry.parent?.tree as { filename?: string } | undefined)?.filename ?? null, rowId, disabled })
+  } else {
+    pendingMcp.delete(entryId)
+    await entry.update({ disabled })
+    // 用户手动打开（!disabled）：清除 AI 临时启用标记（aiEnabled/计数/lastUsed +
+    // state.json ai owner）—— 转为「用户打开」语义：模型立即可见、回收器不再回收。
+    // 用户手动关闭（disabled）：AI 标记保持原样（若原本 AI 启用中，回收器/失败恢复照常管理）。
+    if (!disabled && deps.controller) {
+      deps.controller.markUserEnabled(serverNameOf(entry))
+    }
   }
   // 持久化：v0.1.1 起运行期绝不写预设文件（触发 dsh-agent-presets stamp 重挂事故）。
   // 只把意图写入插件状态文件，由下次启动的 syncPresetFiles() 物化到预设文件。
@@ -166,6 +178,8 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean) {
     running: entry.fiber !== undefined,
     persisted,
     file: file ?? null,
+    applied: !deferred,
+    pending: deferred,
   }
 }
 
@@ -258,9 +272,54 @@ export function makeRoutes(
       handler: handle('POST', async (req) => {
         const parsed = JSON.parse((await readBody(req)) || '{}') as { entryId?: string; disabled?: boolean }
         if (!parsed.entryId) throw new Error('entryId is required')
-        const result = await toggleMcp(deps, parsed.entryId, Boolean(parsed.disabled))
+        const applyMode = stateApplyMode(await readState())
+        const result = await toggleMcp(deps, parsed.entryId, Boolean(parsed.disabled), applyMode)
         invalidateMcp()
         return result
+      }, true),
+    },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/mcp/toggleBatch`,
+      handler: handle('POST', async (req) => {
+        // P1 批量合并：一次请求内串行多次 entry.update（immediate 模式），循环外单次
+        // invalidateMcp。探索式批量启停的 N 次独立 toggle → N 次 tools/change → N 次
+        // 100% 前缀 miss；合并后收敛为单次。next-session 模式则只记意图进待生效队列，
+        // 无任何运行时 tools 变化（零 miss）。运行期仍不写预设文件（事故 5.1 铁律）。
+        const parsed = JSON.parse((await readBody(req)) || '{}') as {
+          toggles?: Array<{ entryId?: string; disabled?: boolean }>
+        }
+        const toggles = Array.isArray(parsed.toggles) ? parsed.toggles : []
+        if (toggles.length === 0) throw new Error('toggles array is required (non-empty)')
+        const applyMode = stateApplyMode(await readState())
+        const results: Array<
+          | Awaited<ReturnType<typeof toggleMcp>>
+          | { entryId: string; ok: false; error: string }
+        > = []
+        let failed = 0
+        for (const item of toggles) {
+          if (!item?.entryId) throw new Error('entryId is required in every toggle item')
+          try {
+            results.push(await toggleMcp(deps, item.entryId, Boolean(item.disabled), applyMode))
+          } catch (error) {
+            // 单项失败（如行已失效）不阻断整批：其余项照常应用，失败信息随结果返回
+            failed += 1
+            results.push({ entryId: item.entryId, ok: false, error: messageOf(error) })
+          }
+        }
+        invalidateMcp()
+        return { results, count: results.length, failed }
+      }, true),
+    },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/mcp/applyPending`,
+      handler: handle('POST', async () => {
+        // P1 会话边界：「立即应用待生效变更」强制生效入口。把 next-session 模式积压的
+        // 待办一次性 entry.update（=临时转 immediate），随后的请求会 miss（调用方提示费用）。
+        const applied = await applyPendingMcp(deps)
+        invalidateMcp()
+        return { applied }
       }, true),
     },
     {
@@ -280,22 +339,33 @@ export function makeRoutes(
       handler: handleAny([
         {
           method: 'GET',
-          run: async () => ({
-            autoManage: catalogRuntime.autoManage,
-            configAutoManage: config.autoManage ?? null,
-          }),
+          run: async () => {
+            const state = await readState()
+            return {
+              autoManage: catalogRuntime.autoManage,
+              applyMode: stateApplyMode(state),
+              configAutoManage: config.autoManage ?? null,
+            }
+          },
         },
         {
           method: 'POST',
           run: async (req) => {
-            const parsed = JSON.parse((await readBody(req)) || '{}') as { autoManage?: boolean }
-            const on = Boolean(parsed.autoManage)
+            const parsed = JSON.parse((await readBody(req)) || '{}') as {
+              autoManage?: boolean
+              applyMode?: ApplyMode
+            }
             const state = await readState()
             state.config ??= {}
-            state.config.autoManage = on
+            if (typeof parsed.autoManage === 'boolean') {
+              state.config.autoManage = parsed.autoManage
+            }
+            if (parsed.applyMode === 'immediate' || parsed.applyMode === 'next-session') {
+              state.config.applyMode = parsed.applyMode
+            }
             await writeState(state)
-            catalogRuntime.applyAutoManage(on)
-            return { autoManage: catalogRuntime.autoManage }
+            if (typeof parsed.autoManage === 'boolean') catalogRuntime.applyAutoManage(parsed.autoManage)
+            return { autoManage: catalogRuntime.autoManage, applyMode: stateApplyMode(state) }
           },
         },
       ], true),

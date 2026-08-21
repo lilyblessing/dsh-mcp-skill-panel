@@ -43,6 +43,7 @@ import { createDomainCaches, type DomainCaches } from './collect'
 import { makeRoutes } from './routes'
 import { readState, writeState, setStateAiOwner, clearStateAiOwner } from './state'
 import { syncPresetFiles } from './preset'
+import { applyPendingMcp } from './pending'
 import { messageOf } from './util'
 
 export type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
@@ -492,6 +493,35 @@ export function apply(ctx: Context, config: Config = {}): void {
       ctx.logger.info(`mcp-skill-panel: autoManage = ${state.config.autoManage} (from panel state)`)
     }
   })
+
+  // P1 会话边界生效（v0.5.0）：next-session 模式下，新会话首次请求前应用待生效队列。
+  // agent/session-start 是 Scoped<Agent> 的 emit，root 监听可收到；应用失败保留队列，
+  // 由下次边界或「立即应用」端点重试。entry.update 触发 tools/change → 新会话前缀自建
+  // （无缓存可破坏）。immediate 模式不产生待办，此监听零副作用。
+  ctx.effect(() => {
+    let guard = false
+    const off = ctx.root.on(
+      'agent/session-start',
+      () => {
+        if (guard) return
+        guard = true
+        void applyPendingMcp({ ctx, controller })
+          .then((count) => {
+            if (count > 0) {
+              caches.invalidateMcp()
+              ctx.logger.info(`runtime-inventory: applied ${count} pending MCP change(s) at session boundary`)
+            }
+          })
+          .catch((error: unknown) => {
+            ctx.logger.warn(`runtime-inventory: session-boundary apply failed: ${messageOf(error)}`)
+          })
+          .finally(() => {
+            guard = false
+          })
+      },
+    )
+    return off
+  }, 'runtime-inventory: session-boundary apply')
 
   ctx.inject(['webServer'], (httpCtx) => {
     httpCtx.effect(() => {

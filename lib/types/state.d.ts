@@ -11,11 +11,16 @@ export type StateFile = {
     ai?: Record<string, {
         at: number;
     }>;
-    /** 面板可写的插件配置（autoManage 开关等），优先于 cordis config。 */
+    /** 面板可写的插件配置（autoManage 开关、生效时机等），优先于 cordis config。 */
     config?: {
         autoManage?: boolean;
+        applyMode?: ApplyMode;
     };
 };
+/** 生效时机：immediate=立即（默认，下轮生效）；next-session=记意图、新会话/重启生效。 */
+export type ApplyMode = 'immediate' | 'next-session';
+/** 当前生效时机（缺省 immediate）。 */
+export declare function stateApplyMode(state: StateFile): ApplyMode;
 export declare function readState(): Promise<StateFile>;
 export declare function writeState(state: StateFile): Promise<void>;
 /** AI-owner 标记读写：state.json 的 ai 段（entryId → {at}）。 */

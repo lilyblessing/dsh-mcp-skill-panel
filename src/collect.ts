@@ -12,6 +12,7 @@ import type { CatalogServer } from './catalog'
 import type { McpCallController } from './mcpcall'
 import type { CatalogRuntime } from './index'
 import { messageOf } from './util'
+import { readState } from './state'
 
 /** 分域缓存 TTL：事件驱动失效为主，TTL 只是兜底（事件丢失场景） */
 export const DOMAIN_TTL_MS = 60_000
@@ -191,6 +192,9 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
   const { byServer, mcpToolsTotal, mcpTokensTotal } = getMcpAggregate(ctx, deps.caches, scopeKey, errors)
 
   const mcp: McpRow[] = []
+  // P1 会话边界：读一次 state.json 的 desired 意图（延迟生效模式下与 live disabled 不同，
+  // 驱动 UI「待生效」徽标）。readState 有内存缓存，成本忽略。
+  const state = await readState().catch(() => undefined)
   try {
     for (const entry of ctx.loader.entries()) {
       if (!isMcpEntry(entry)) continue
@@ -199,6 +203,11 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
       const liveTools = agg?.tools ?? 0
       const running = entry.fiber !== undefined
       const disabled = entry.disabled
+      // P1 会话边界：该行在预设文件下的 desired 意图与待生效判定（desired !== live disabled）。
+      const tree = entry.parent?.tree as { filename?: string } | undefined
+      const rowFile = tree?.filename
+      const rowDesired =
+        typeof rowFile === 'string' && rowFile.length > 0 ? state?.mcp?.[rowFile]?.[entry.options.id]?.desired : undefined
       // 面板联动（P3）：停用/未挂载时优先显示 catalog 目录值（工具数与 token 估算），
       // 让用户看到「该 MCP 有哪些工具可用」而不只是 0
       const catalogInfo = deps.catalogRuntime.catalog[serverName]
@@ -226,6 +235,8 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
         modelVisible:
           !disabled &&
           !(deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(serverName) ?? false)),
+        desired: rowDesired,
+        pending: rowDesired !== undefined ? rowDesired !== disabled : false,
       })
     }
   } catch (error) {

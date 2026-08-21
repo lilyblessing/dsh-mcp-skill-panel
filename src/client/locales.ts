@@ -41,6 +41,20 @@ export const en: Record<string, string> = {
   'ri.toggleError': 'Toggle failed: {error}',
   'ri.skillToggleOffHint': 'Remove this skill from the model catalog.',
   'ri.skillToggleOnHint': 'Make this skill model-visible again.',
+  // prompt-cache warning (P0: mid-session toggle invalidation)
+  'ri.cacheWarn':
+    "Toggling mid-session invalidates this session's prompt cache: the next request is billed at miss rate (~5-12.5× hit). Prefer toggling at a session boundary.",
+  'ri.cacheWarnDismiss': 'Dismiss',
+  // apply timing
+  'ri.applyTiming': 'Apply timing',
+  'ri.applyImmediate': 'Immediate',
+  'ri.applyNextSession': 'Next session',
+  'ri.applyModeDesc':
+    "How manual toggles differ from on-demand middle-layer calls:\n· Immediate (default): a manual toggle changes the model-visible tools on the very next turn, invalidating this session's prefix cache from that turn onward — billed at miss rate (~5-12.5× hit). Use when you need to release/restore context right away.\n· Next session: a manual toggle only records intent; the current session keeps its toolset unchanged for all remaining turns (zero cache invalidation, zero extra cost) and applies at the next new session (before its first request) or after a DSH restart. Note: the current session will NOT release context just because you turned an MCP off (use \"Apply pending\" to force it).\n· Both modes: on-demand calls to disabled MCPs via the AI middle layer (mcp_search / mcp_call) always work — they temporarily enable and call outside the model request and never change your per-turn prefix, so they never cause a cache miss. Only manual toggles change the prefix.",
+  'ri.applyPendingBtn': 'Apply pending now',
+  'ri.applyDeferredHint': 'Intent recorded; it takes effect at the next new session or after a DSH restart.',
+  'ri.pendingBadge': 'Pending',
+  'ri.appliedPending': 'Applied {n} pending change(s).',
   // autoManage switch
   'ri.autoManageTitle': 'AI Middle Layer',
   'ri.autoManageOn': 'On',
@@ -91,6 +105,20 @@ export const zh: Record<string, string> = {
   'ri.toggleError': '切换失败：{error}',
   'ri.skillToggleOffHint': '将该技能从模型目录移除。',
   'ri.skillToggleOnHint': '恢复该技能的模型可见性。',
+  // prompt-cache 警示（P0：会话中途开关致缓存失效）
+  'ri.cacheWarn':
+    '会话中途开关会使本会话的 Prompt Cache 失效，下次请求按 miss 费率计费（约为 hit 的 5~12.5 倍），建议在会话边界操作。',
+  'ri.cacheWarnDismiss': '知道了',
+  // 生效时机（applyMode）
+  'ri.applyTiming': '生效时机',
+  'ri.applyImmediate': '立即生效',
+  'ri.applyNextSession': '下次会话生效',
+  'ri.applyModeDesc':
+    '用户手动启停开关 与 AI 中间层调用的区别：\n· 立即生效（默认）：手动开关会在下一轮对话立即改变模型看到的工具集，导致该轮起前缀缓存 100% 失效、按 miss 费率计费（约为 hit 的 5~12.5 倍）；适合需要马上释放/恢复上下文时。\n· 下次会话生效：手动开关只记录意图，当前会话全程工具集不变（零缓存失效、零额外费用），直到新开一个会话（其首次请求前）或重启 DSH 才生效；注意此时当前会话不会因为你关掉某 MCP 而立刻释放上下文（可用"立即应用"强制生效）。\n· 两者共同点：AI 中间层对已停用 MCP 的按需调用（mcp_search / mcp_call）始终可用——它在模型请求之外临时启用并调用，不改变每轮请求前缀，因此不会造成缓存 miss；只有"手动开关"才会改变前缀、从而可能造成 miss。',
+  'ri.applyPendingBtn': '立即应用待生效变更',
+  'ri.applyDeferredHint': '已记录意图，将在下次（新）会话或 DSH 重启后生效。',
+  'ri.pendingBadge': '待生效',
+  'ri.appliedPending': '已应用 {n} 项待生效变更。',
   // autoManage 开关
   'ri.autoManageTitle': 'AI 中间层',
   'ri.autoManageOn': '已开启',
