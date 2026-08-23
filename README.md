@@ -9,7 +9,7 @@
 
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.5.0-green.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.5.1-green.svg">
 </p>
 
 ---
@@ -116,7 +116,7 @@ dsh plugin --profile web add "github:lilyblessing/dsh-mcp-skill-panel#main"
 
 > 📦 已发布到 **npm**：`dsh-mcp-skill-panel`（[npm 页面](https://www.npmjs.com/package/dsh-mcp-skill-panel)）。npm 版为预构建产物，安装可跳过 `allowBuilds` 构建授权，也可直接以包名安装；git 源方式始终可用。
 
-> ⬆️ **升级**：git 源用户请在 DSH profile 目录执行 `pnpm update dsh-mcp-skill-panel`（`pnpm add` 对相同 spec 不会重解析 git 分支）；npm 用户 `pnpm add dsh-mcp-skill-panel@0.5.0` 即可。
+> ⬆️ **升级**：git 源用户请在 DSH profile 目录执行 `pnpm update dsh-mcp-skill-panel`（`pnpm add` 对相同 spec 不会重解析 git 分支）；npm 用户 `pnpm add dsh-mcp-skill-panel@0.5.1` 即可。
 
 ## 🚀 使用
 
@@ -189,6 +189,8 @@ sequenceDiagram
     Note over P: 引用计数 -1；空闲 30s 后回收（仅回收 AI 启用的）
 ```
 
+> **tool 参数契约（0.5.1+）**：`mcp_call` 的 `tool` 应传该 server 上的**裸名**（如 `understand_image`）；误传 `mcp_search` 返回的注册全名（`mcp__<server>__<tool>`）或双重前缀会自动归一化，其他 server 的注册全名立即快速失败并提示。
+
 **catalog 采集**：`tools/change` 事件（root 监听，150ms 去抖）对 enabled server 增量快照；apply ctx 的 `agents` 不可用时 fallback `agentPresets.standingKeyFor()` 解析 scope（v0.4.1 修复）；空快照不覆盖磁盘 last-good；`catalog.json` 原子写回（tmp + rename，0600）。
 
 ## ✅ 验证清单
@@ -240,6 +242,7 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 
 | 版本 | 内容 |
 | --- | --- |
+| 0.5.1 | mcp_call 工具名前缀防御（PR #4）：tool 参数误传注册全名/双重前缀自动归一化（新增 normalizeToolName，循环剥离 mcp__<server>__ 前缀）；其他 server 注册全名立即快速失败并提示裸名（不再白等 toolCallTimeoutMs 60s/300s）；mcp_call schema 描述注明裸名；selftest 新增 4 条回归断言；宿主端到端验证通过 |
 | 0.5.0 | Prompt Cache 优化（P0+P1，issue #1）：中途开关必现 miss 警示条（大包红色 severe 变体、12s 自动消失）；生效时机选项 immediate / next-session（后者记意图待生效队列，新会话 `agent/session-start` 或重启物化时统一应用，当前会话零 miss）；开关 400ms 合并为单次 toggleBatch（单次 invalidateMcp）；applyPendingMcp 增加 state.json 残留兜底（重启/热重载后 desired 与 live 不一致的行自动补齐，外部修改行尊重并清除残留）+ 新增 selftest-pending 链路自测（CI 纳入）；toggleBatch 单项失败不阻断整批；UI 封面更新 |
 | 0.4.9 | 依赖对齐 DSH rc.8 系（rc.8 全链路实测通过）：devDeps 中 10 个 `@deepseek-ai/*` 由 0.1.0-rc.6 → 0.1.0-rc.8，peers 收紧（cordis ^4.0.1 稳定版 / schemastery ^3.18.1 / dsh-scope ^0.1.0-rc.8）；已发布至 npm（0.4.8 首次上架，repository 指回本仓库）+ 新增 Trusted Publishing 自动发布流水线（publish.yml，OIDC 免 token）|
 | 0.4.8 | 构建工程自包含 + CI：14 个 `@deepseek-ai/*` 并入 devDependencies（pin 到 rc.6 系，纯 registry 安装即可 typecheck/build/selftest，无需本机 DSH 闭包）；新增 GitHub Actions 流水线（typecheck→build→verify→selftest；main push 自动重建并 `[skip ci]` 回写 lib 产物）|
