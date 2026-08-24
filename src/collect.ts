@@ -9,6 +9,7 @@ import { scopeOf } from '@deepseek-ai/dsh-scope'
 import type { McpRow, McpView, SkillsView } from './shared-types'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
 import type { CatalogServer } from './catalog'
+import { serverOfMcp } from './catalog'
 import type { McpCallController } from './mcpcall'
 import type { CatalogRuntime } from './index'
 import { messageOf } from './util'
@@ -52,6 +53,8 @@ export interface DomainCaches {
   skillsCache: Map<string, { at: number; promise: Promise<SkillsView> }>
   /** MCP 工具聚合缓存（per scope），tools/change 时随 mcpCache 一起清 */
   mcpAggregates: Map<object | null, { at: number; value: McpAggregate }>
+  /** schemas 原始缓存（per scope），路径 A/B 共享同一份深克隆结果 */
+  schemasCache: Map<object | null, { at: number; schemas: Array<{ name?: unknown; description?: unknown; parameters?: unknown }> }>
   invalidateMcp: () => void
   invalidateSkills: () => void
 }
@@ -60,13 +63,16 @@ export function createDomainCaches(): DomainCaches {
   const mcpCache = new Map<string, { at: number; promise: Promise<McpView> }>()
   const skillsCache = new Map<string, { at: number; promise: Promise<SkillsView> }>()
   const mcpAggregates = new Map<object | null, { at: number; value: McpAggregate }>()
+  const schemasCache = new Map<object | null, { at: number; schemas: Array<{ name?: unknown; description?: unknown; parameters?: unknown }> }>()
   return {
     mcpCache,
     skillsCache,
     mcpAggregates,
+    schemasCache,
     invalidateMcp: () => {
       mcpCache.clear()
       mcpAggregates.clear()
+      schemasCache.clear()
     },
     invalidateSkills: () => skillsCache.clear(),
   }
@@ -80,19 +86,38 @@ function tokenEstimate(parameters: unknown): number {
   }
 }
 
-function serverOf(name: string): string | null {
-  if (!name.startsWith('mcp__')) return null
-  const rest = name.slice('mcp__'.length)
-  const at = rest.indexOf('__')
-  if (at < 0) return null
-  return rest.slice(0, at)
-}
-
 /** 写时清理过期条目（P2-8）：分域缓存 / 聚合 / 已确认 skill 的 Map 长期运行不膨胀。 */
 export function pruneExpired<T>(map: Map<T, { at: number }>, now: number): void {
   for (const [key, entry] of map) {
     if (now - entry.at >= DOMAIN_TTL_MS) map.delete(key)
   }
+}
+
+/**
+ * 按 scope 共享的 schemas 原始缓存：路径 A（catalog 采集）与路径 B（面板聚合）
+ * 共用同一份深克隆结果，避免 tools.change 风暴期内重复深克隆。
+ * key = scopeKey ?? null；TTL 由调用方指定（路径 A 500ms，路径 B 60s）。
+ */
+export function getSchemasView(
+  ctx: Context,
+  caches: DomainCaches,
+  scopeKey: object | undefined,
+  ttlMs: number,
+): Array<{ name?: unknown; description?: unknown; parameters?: unknown }> {
+  const key = scopeKey ?? null
+  const now = Date.now()
+  // 轻量清理：删除超过 max(ttlMs, DOMAIN_TTL_MS) 的旧条目（防驻留）
+  const maxTtl = Math.max(ttlMs, DOMAIN_TTL_MS)
+  for (const [k, entry] of caches.schemasCache) {
+    if (now - entry.at >= maxTtl) caches.schemasCache.delete(k)
+  }
+  const hit = caches.schemasCache.get(key)
+  if (hit && now - hit.at < ttlMs) return hit.schemas
+  const schemas: Array<{ name?: unknown; description?: unknown; parameters?: unknown }> = scopeKey
+    ? ctx.tools.schemas(scopeKey as Parameters<typeof ctx.tools.schemas>[0])
+    : ctx.tools.schemas()
+  caches.schemasCache.set(key, { at: now, schemas })
+  return schemas
 }
 
 export function resolveAgent(ctx: Context, sessionId: string | undefined) {
@@ -132,14 +157,15 @@ function computeAggregate(schemas: Array<{ name?: string; parameters?: unknown }
   let mcpToolsTotal = 0
   let mcpTokensTotal = 0
   for (const schema of schemas) {
-    const server = serverOf(String(schema.name ?? ''))
+    const server = serverOfMcp(String(schema.name ?? ''))
     if (!server) continue
     const entry = byServer.get(server) ?? { tools: 0, tokens: 0 }
     entry.tools += 1
-    entry.tokens += tokenEstimate(schema.parameters)
+    const est = tokenEstimate(schema.parameters)
+    entry.tokens += est
     byServer.set(server, entry)
     mcpToolsTotal += 1
-    mcpTokensTotal += tokenEstimate(schema.parameters)
+    mcpTokensTotal += est
   }
   return { byServer, mcpToolsTotal, mcpTokensTotal }
 }
@@ -159,13 +185,13 @@ function getMcpAggregate(
   pruneExpired(caches.mcpAggregates, Date.now())
   const hit = caches.mcpAggregates.get(key)
   if (hit && Date.now() - hit.at < DOMAIN_TTL_MS) return hit.value
-  let schemas: Array<{ name?: string; parameters?: unknown }> = []
+  let schemas: Array<{ name?: unknown; description?: unknown; parameters?: unknown }> = []
   try {
-    schemas = scopeKey ? ctx.tools.schemas(scopeKey) : ctx.tools.schemas()
+    schemas = getSchemasView(ctx, caches, scopeKey, DOMAIN_TTL_MS)
   } catch (error) {
     errors.push(`tools.schemas: ${messageOf(error)}`)
   }
-  const value = computeAggregate(schemas)
+  const value = computeAggregate(schemas as Array<{ name?: string; parameters?: unknown }>)
   caches.mcpAggregates.set(key, { at: Date.now(), value })
   return value
 }

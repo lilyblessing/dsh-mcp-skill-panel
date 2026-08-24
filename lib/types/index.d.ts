@@ -39,8 +39,6 @@ export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } fr
 export declare const name = "runtime-inventory";
 export declare const inject: string[];
 export interface Config {
-    /** @deprecated 0.3.0 起分域缓存由事件驱动失效，TTL 为常量；保留字段仅为向后兼容 */
-    cacheTtlMs?: number;
     /**
      * 形态 2（中间层代理）：停用的 MCP 对模型隐藏、经 mcp_search/mcp_call 按需调用；
      * 用户打开的 MCP 保持模型可见。默认 false（现状，纯面板）。

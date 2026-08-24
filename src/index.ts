@@ -41,7 +41,7 @@ import { createMcpCallController, installMcpControlTools } from './mcpcall'
 export { normalizeToolName, normalizeArguments, msgOf } from './mcpcall'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
 import type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
-import { createDomainCaches, type DomainCaches } from './collect'
+import { createDomainCaches, getSchemasView, type DomainCaches } from './collect'
 import { makeRoutes } from './routes'
 import { readState, writeState, setStateAiOwner, clearStateAiOwner } from './state'
 import { syncPresetFiles } from './preset'
@@ -61,8 +61,6 @@ export const name = 'runtime-inventory'
 export const inject = ['fs', 'skills', 'tools', 'agents', 'agentPresets', 'loader', 'systemPrompt', 'timer']
 
 export interface Config {
-  /** @deprecated 0.3.0 起分域缓存由事件驱动失效，TTL 为常量；保留字段仅为向后兼容 */
-  cacheTtlMs?: number
   /**
    * 形态 2（中间层代理）：停用的 MCP 对模型隐藏、经 mcp_search/mcp_call 按需调用；
    * 用户打开的 MCP 保持模型可见。默认 false（现状，纯面板）。
@@ -79,7 +77,6 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
-  cacheTtlMs: Schema.number().min(0),
   autoManage: Schema.boolean().description('MCP 中间层控制（停用的 MCP 经 mcp_search/mcp_call 按需调用）').default(false),
   keepAliveMs: Schema.number().min(1000).description('MCP 保活空闲回收窗口（ms）').default(30_000),
   searchLimitDefault: Schema.number().min(1).description('mcp_search 缺省 top-K').default(5),
@@ -93,8 +90,6 @@ const CATALOG_DIR = join(homedir(), '.dsh', 'dsh-mcp-skill-panel')
 const DEFAULT_TOOL_TIMEOUT_MS = 60_000
 /** tools/change 后增量快照的去抖窗口。 */
 const CATALOG_SNAPSHOT_DEBOUNCE_MS = 150
-/** tools.schemas 短窗口复用（P1-2）：覆盖「聚合失效 + 采集」两次调用间隔。 */
-const SCHEMAS_CACHE_WINDOW_MS = 500
 /** catalog 持久化写盘防抖（P1-3）：tools/change 风暴期合并写盘。 */
 const CATALOG_PERSIST_DEBOUNCE_MS = 300
 
@@ -193,14 +188,6 @@ async function persistCatalog(next: () => Context, runtime: CatalogRuntime): Pro
   }
 }
 
-/** tools.schemas 短窗口复用缓存（P1-2）：tools/change 风暴期内「聚合失效 + 采集」
- * 两次调用共享一次 schemas（95 schema 深克隆），窗口 + scopeKey 引用匹配。 */
-let schemasCache: {
-  at: number
-  scopeKey: unknown
-  schemas: Array<{ name?: unknown; description?: unknown; parameters?: unknown }>
-} | null = null
-
 /**
  * 解析 scope 并取 schema 视图（preset 层共享，任一 standing 即可）。
  *
@@ -211,6 +198,7 @@ let schemasCache: {
  */
 async function resolveScopeSchemas(
   ctx: Context,
+  caches: DomainCaches,
 ): Promise<Array<{ name?: unknown; description?: unknown; parameters?: unknown }>> {
   let scopeKey: unknown
   try {
@@ -227,17 +215,7 @@ async function resolveScopeSchemas(
     }
   }
   if (scopeKey === undefined) return []
-  const now = Date.now()
-  if (schemasCache && schemasCache.scopeKey === scopeKey && now - schemasCache.at < SCHEMAS_CACHE_WINDOW_MS) {
-    return schemasCache.schemas
-  }
-  const schemas = ctx.tools.schemas(scopeKey as Parameters<typeof ctx.tools.schemas>[0]) as Array<{
-    name?: unknown
-    description?: unknown
-    parameters?: unknown
-  }>
-  schemasCache = { at: now, scopeKey, schemas }
-  return schemas
+  return getSchemasView(ctx, caches, scopeKey as object | undefined, 500)
 }
 
 /** 本地 resolveAgent：避免 collect.ts 的依赖方向（本文件已 import collect）。 */
@@ -248,7 +226,7 @@ function resolveAgentLocal(ctx: Context) {
 }
 
 /** 对所有当前 enabled 的 mcp server 重新快照。 */
-async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime): Promise<void> {
+async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime, caches: DomainCaches): Promise<void> {
   runtime.diag.snapshots += 1
   // 磁盘 last-good 尚未加载完成：跳过采集，避免空快照覆盖磁盘好数据。
   if (!runtime.loaded) {
@@ -271,7 +249,7 @@ async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime): Promise<v
     }
     runtime.diag.lastAgentRoots = rootsCount
     runtime.diag.lastAgentList = listCount
-    const schemas = await resolveScopeSchemas(ctx)
+    const schemas = await resolveScopeSchemas(ctx, caches)
     runtime.diag.lastSchemasTotal = schemas.length
     let mcpTools = 0
     for (const schema of schemas) {
@@ -328,7 +306,7 @@ async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime): Promise<v
 }
 
 /** 构建控制层依赖（McpControlCtx）：封闭 catalog/loader/state 的 IO。 */
-function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config): McpControlCtx {
+function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config, caches: DomainCaches): McpControlCtx {
   // 默认值与 Config schema 的 .default() 一致：schema 生效后 config 必有值，
   // ?? 是「config 未经 schema 直接传入」时的防御性兜底（P2-10 收敛说明）。
   return {
@@ -345,7 +323,7 @@ function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config):
     serverTimeoutMs: (serverName) => serverTimeoutMs(ctx, serverName),
     setAiOwner: (entryId, at) => setStateAiOwner(entryId, at),
     clearAiOwner: (entryId) => clearStateAiOwner(entryId),
-    snapshotEnabled: () => snapshotEnabled(ctx, runtime),
+    snapshotEnabled: () => snapshotEnabled(ctx, runtime, caches),
   }
 }
 
@@ -435,7 +413,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         scheduled = true
         ctx.timeout(() => {
           scheduled = false
-          void snapshotEnabled(ctx, catalogRuntime)
+          void snapshotEnabled(ctx, catalogRuntime, caches)
         }, CATALOG_SNAPSHOT_DEBOUNCE_MS)
       },
     )
@@ -443,13 +421,13 @@ export function apply(ctx: Context, config: Config = {}): void {
   }, 'mcp-skill-panel: catalog snapshot')
 
   // 初始快照（可能还没有 agent，mcp__* 会在后续增量补全）。
-  void snapshotEnabled(ctx, catalogRuntime).catch(() => {})
+  void snapshotEnabled(ctx, catalogRuntime, caches).catch(() => {})
 
   // ── 形态 2（中间层代理）：动态开关 ──────────────────────────────────────
   // 控制层（catalog/loader/state 的 IO 封装）常驻构建，零副作用；过滤 + 工具 +
   // 回收器按 autoManage 开关动态挂载/卸载（面板 /config 端点可切换，state.json
   // 持久化，config 仅作初始默认）。
-  const control: McpControlCtx = buildMcpControl(ctx, catalogRuntime, config)
+  const control: McpControlCtx = buildMcpControl(ctx, catalogRuntime, config, caches)
   const controller = createMcpCallController(ctx, control)
   // 装配可见性（v0.4.2+）：每回合构建一次 server → 可见性 Map（单次 loader 遍历），
   // 过滤时 O(1) 查表。用户打开的 server 可见（disabled=false 且非 AI 临时启用）；
@@ -530,7 +508,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.inject(['webServer'], (httpCtx) => {
     httpCtx.effect(() => {
-      const routes = makeRoutes(httpCtx, caches, catalogRuntime, config, controller, () => snapshotEnabled(httpCtx, catalogRuntime))
+      const routes = makeRoutes(httpCtx, caches, catalogRuntime, config, controller, () => snapshotEnabled(httpCtx, catalogRuntime, caches))
       const disposers = routes.map((route) => httpCtx.webServer.register(route))
       return () => {
         for (const dispose of disposers) dispose()

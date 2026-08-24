@@ -54,6 +54,15 @@ export interface DomainCaches {
         at: number;
         value: McpAggregate;
     }>;
+    /** schemas 原始缓存（per scope），路径 A/B 共享同一份深克隆结果 */
+    schemasCache: Map<object | null, {
+        at: number;
+        schemas: Array<{
+            name?: unknown;
+            description?: unknown;
+            parameters?: unknown;
+        }>;
+    }>;
     invalidateMcp: () => void;
     invalidateSkills: () => void;
 }
@@ -62,6 +71,16 @@ export declare function createDomainCaches(): DomainCaches;
 export declare function pruneExpired<T>(map: Map<T, {
     at: number;
 }>, now: number): void;
+/**
+ * 按 scope 共享的 schemas 原始缓存：路径 A（catalog 采集）与路径 B（面板聚合）
+ * 共用同一份深克隆结果，避免 tools.change 风暴期内重复深克隆。
+ * key = scopeKey ?? null；TTL 由调用方指定（路径 A 500ms，路径 B 60s）。
+ */
+export declare function getSchemasView(ctx: Context, caches: DomainCaches, scopeKey: object | undefined, ttlMs: number): Array<{
+    name?: unknown;
+    description?: unknown;
+    parameters?: unknown;
+}>;
 export declare function resolveAgent(ctx: Context, sessionId: string | undefined): import("@deepseek-ai/dsh-agent").Agent;
 /** MCP 工具聚合结果：per-server 工具数 + token 估算。tools/change 间隙复用，跳过 schemas 深克隆。 */
 export interface McpAggregate {

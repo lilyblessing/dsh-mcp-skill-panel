@@ -114,11 +114,7 @@ function handleAny(entries: Array<{ method: 'GET' | 'POST'; run: (req: Req) => P
       json(res, 405, { ok: false, error: 'method-not-allowed' })
       return
     }
-    if (guardPosts && req.method === 'POST' && !tokenOk(req)) {
-      json(res, 401, { ok: false, error: 'unauthorized' })
-      return
-    }
-    handle(entry.method, entry.run)(req, res)
+    handle(entry.method, entry.run, guardPosts)(req, res)
   }
 }
 
@@ -198,13 +194,17 @@ async function toggleSkill(deps: Deps, skillName: string, disabled: boolean, ses
   // 让响应即真相，前端无需等下一轮全量刷新才看到新状态。
   const deadline = Date.now() + SKILL_TOGGLE_CONFIRM_MS
   let confirmed = false
+  let wait = SKILL_TOGGLE_POLL_MS
   while (Date.now() < deadline) {
     const after = await ctx.skills.get(skillName, { scope: agent, cwd })
     if (after && after.invocation?.modelInvocable === !disabled) {
       confirmed = true
       break
     }
-    await ctx.timeout(SKILL_TOGGLE_POLL_MS)
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) break
+    await ctx.timeout(Math.min(wait, remaining))
+    wait = Math.min(wait * 2, 1000)
   }
   // 记录确认值，供 collectState 覆盖 snapshot 的陈旧 candidate（watcher 未及失效）
   pruneExpired(confirmedSkills, Date.now())

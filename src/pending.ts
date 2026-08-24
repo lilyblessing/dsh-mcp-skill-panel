@@ -82,6 +82,8 @@ async function applyStateResidue(deps: PendingDeps, state: StateFile | undefined
   if (!mcp || Object.keys(mcp).length === 0) return 0
   let applied = 0
   let residueCleared = false
+  // 按 file 分组：同一文件只读盘一次
+  const byFile = new Map<string, { entry: Entry; rowState: NonNullable<NonNullable<StateFile['mcp']>[string]>[string] }[]>()
   for (const entry of ctx.loader.entries()) {
     if (!isMcpEntry(entry)) continue
     if (pendingMcp.has(entry.id)) continue
@@ -91,32 +93,41 @@ async function applyStateResidue(deps: PendingDeps, state: StateFile | undefined
     const rowState = mcp[file]?.[entry.options.id]
     if (!rowState || typeof rowState.desired !== 'boolean') continue
     if (rowState.desired === entry.disabled) continue
+    let bucket = byFile.get(file)
+    if (!bucket) { bucket = []; byFile.set(file, bucket) }
+    bucket.push({ entry, rowState })
+  }
+  for (const [file, entries] of byFile) {
     let text: string
     try {
       text = await readFile(file, 'utf8')
     } catch {
-      // 文件已不存在：无法判定，跳过（不动 state）
+      // 文件已不存在：该文件下全部 entry 跳过（不动 state）
       continue
     }
-    const cur = rowDisabledState(text, entry.options.id)
-    if (cur !== rowState.lastApplied) {
-      // 预设文件被外部/其他途径改过：尊重现状，放弃对该行的管理并清除残留
-      delete mcp[file][entry.options.id]
-      if (Object.keys(mcp[file]).length === 0) delete mcp[file]
-      residueCleared = true
-      ctx.logger.info?.(`mcp-skill-panel: state-residue ${entry.id}: preset file externally modified, dropping row`)
-      continue
-    }
-    try {
-      await entry.update({ disabled: rowState.desired })
-      if (!rowState.desired && deps.controller) {
-        deps.controller.markUserEnabled(serverNameOf(entry))
+    let fileCleared = false
+    for (const { entry, rowState } of entries) {
+      const cur = rowDisabledState(text, entry.options.id)
+      if (cur !== rowState.lastApplied) {
+        // 预设文件被外部/其他途径改过：尊重现状，放弃对该行的管理并清除残留
+        delete mcp[file][entry.options.id]
+        if (Object.keys(mcp[file]).length === 0) delete mcp[file]
+        fileCleared = true
+        ctx.logger.info?.(`mcp-skill-panel: state-residue ${entry.id}: preset file externally modified, dropping row`)
+        continue
       }
-      applied += 1
-      ctx.logger.info?.(`mcp-skill-panel: applied state-residue toggle ${entry.id} → disabled=${rowState.desired}`)
-    } catch (error) {
-      ctx.logger.warn?.(`mcp-skill-panel: state-residue apply "${entry.id}" failed: ${messageOf(error)}`)
+      try {
+        await entry.update({ disabled: rowState.desired })
+        if (!rowState.desired && deps.controller) {
+          deps.controller.markUserEnabled(serverNameOf(entry))
+        }
+        applied += 1
+        ctx.logger.info?.(`mcp-skill-panel: applied state-residue toggle ${entry.id} → disabled=${rowState.desired}`)
+      } catch (error) {
+        ctx.logger.warn?.(`mcp-skill-panel: state-residue apply "${entry.id}" failed: ${messageOf(error)}`)
+      }
     }
+    if (fileCleared) residueCleared = true
   }
   if (residueCleared) await writeState(state ?? {}).catch(() => undefined)
   return applied

@@ -60,8 +60,6 @@ export interface McpCallController {
      * state.json 的 ai owner），使其转为「用户打开」语义 —— 模型立即可见、回收器不再回收。
      */
     markUserEnabled(serverName: string): void;
-    /** 轮询 + 事件加速等待某工具注册；signal 中止 / 上下文销毁时立即终局。 */
-    waitRegistered(name: string, scopeKey: object | undefined, timeoutMs: number, signal?: AbortSignal): Promise<void>;
     /** 完整调用流程，返回给模型的文本结果（不会 throw，错误也转文本）。 */
     call(serverName: string, toolName: string, args: unknown, agent: Agent | undefined, signal: AbortSignal, explicitTimeoutMs?: number): Promise<string>;
     /** 启动空闲回收器；返回 disposer。 */

@@ -140,8 +140,6 @@ export interface McpCallController {
    * state.json 的 ai owner），使其转为「用户打开」语义 —— 模型立即可见、回收器不再回收。
    */
   markUserEnabled(serverName: string): void
-  /** 轮询 + 事件加速等待某工具注册；signal 中止 / 上下文销毁时立即终局。 */
-  waitRegistered(name: string, scopeKey: object | undefined, timeoutMs: number, signal?: AbortSignal): Promise<void>
   /** 完整调用流程，返回给模型的文本结果（不会 throw，错误也转文本）。 */
   call(
     serverName: string,
@@ -226,14 +224,12 @@ async function ensureEnabled(
 }
 
 async function waitRegistered(
-  control: McpControlCtx,
   ctx: Context,
   name: string,
   views: Array<ToolView>,
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<ToolView | undefined> {
-  void control
   const start = Date.now()
   return new Promise<ToolView | undefined>((resolve, reject) => {
     let settled = false
@@ -336,14 +332,20 @@ function startIdleReaper(control: McpControlCtx, ctx: Context, state: Controller
       void (async () => {
         try {
           if (!entry.disabled) await entry.update({ disabled: true })
+          // 二次检查：await 让出事件循环期间可能有新 call() 接手（refCount 升到 1），
+          // 此时放弃本轮回收，不清 owner 不打日志。
+          if ((state.refCounts.get(server) ?? 0) > 0) return
           await control.clearAiOwner(entryId)
           ctx.logger.info?.(`mcp-skill-panel: idle-reaped MCP server "${server}"`)
         } catch (error) {
           ctx.logger.warn?.(`mcp-skill-panel: idle reaper disable "${server}" failed: ${msgOf(error)}`)
         } finally {
-          state.aiEnabled.delete(server)
-          state.refCounts.delete(server)
-          state.lastUsed.delete(server)
+          // 仅在无新调用接手时才删除状态，防止把新 call() 的计数清掉。
+          if ((state.refCounts.get(server) ?? 0) === 0) {
+            state.aiEnabled.delete(server)
+            state.refCounts.delete(server)
+            state.lastUsed.delete(server)
+          }
         }
       })()
     }
@@ -380,12 +382,6 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
       if (entry) void caches.clearAiOwner(entry.id)
     },
 
-    waitRegistered(name, scopeKey, timeoutMs, signal) {
-      // 兼容旧调用形态：按单视图（宿主 + 传入 scope）包装
-      const views: Array<ToolView> = [{ label: 'legacy-scoped', tools: ctx.tools, scope: scopeKey as object | undefined }]
-      return waitRegistered(caches, ctx, name, views, timeoutMs, signal).then(() => undefined)
-    },
-
     async call(serverName, toolName, args, agent, signal, explicitTimeoutMs) {
       const bareTool = normalizeToolName(serverName, toolName)
       const name = `mcp__${serverName}__${bareTool}`
@@ -408,8 +404,9 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
         // 2026-08-24：多视图轮询（agent 作用域/全局 + 宿主作用域/全局），
         // 命中视图负责执行；未见任何视图注册时保持原有超时语义。
         const views = collectToolViews(ctx, agent)
-        const view = await waitRegistered(caches, ctx, name, views, timeoutMs, signal)
-        const execTools = view?.tools ?? ctx.tools
+        const view = await waitRegistered(ctx, name, views, timeoutMs, signal)
+        // view 在 waitRegistered resolve 时必定存在（ToolView 已被解析）
+        const execTools = view!.tools!
         const result = (await execTools.execute({
           callId: `mcp-call-${randomUUID()}` as import('@deepseek-ai/dsh-llm').CallId,
           name,
@@ -509,12 +506,13 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx): () => void
       const limit = clampLimit(typeof args.limit === 'number' ? args.limit : undefined, control.searchLimitDefault, control.searchLimitMax)
 
       if (server) {
-        const tools = listServer(catalog, server) ?? []
+        const result = listServer(catalog, server)
+        const tools = result ?? []
         return toJson({
           ok: true,
           kind: 'list',
           server,
-          found: listServer(catalog, server) !== undefined,
+          found: result !== undefined,
           count: tools.length,
           tools,
         })

@@ -7,7 +7,7 @@
  * 本模块为纯文本操作，可被 selftest 覆盖。
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, writeFile, rename } from 'node:fs/promises'
 import { readState, writeState, type McpRowState } from './state'
 
 const DISABLE_KEY = 'disable-model-invocation'
@@ -120,7 +120,11 @@ export async function syncPresetFiles(ctx: Context): Promise<number> {
       // 导致 desired 残留 + 面板徽标悬挂（P1 重启链路闭环）。
       next[rowId] = { desired: entry.desired, lastApplied: entry.desired }
     }
-    if (changed) await writeFile(file, text, 'utf8')
+    if (changed) {
+      const tmp = `${file}.tmp`
+      await writeFile(tmp, text, 'utf8')
+      await rename(tmp, file)
+    }
     mcp[file] = next
   }
   await writeState(state)
