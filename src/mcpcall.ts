@@ -53,6 +53,43 @@ export function normalizeToolName(serverName: string, toolName: string): string 
 }
 
 /**
+ * 归一化 mcp_call 的 arguments 参数（2026-08-24 修补）：type:'json' 参数的编译产物
+ * 不带 type 标注，模型直连 Tool call 时倾向把参数字典填成 JSON 字符串（实测 flash 与
+ * mimo 两系均会出现）。这里循环安全解析为对象后再透传：
+ * - 值以 { / [ 开头 → 直接按容器 JSON 解析；
+ * - 值以 " 开头（引号包裹层）→ 解包后若内层仍是容器形态才继续剥，防止误改合法标量入参；
+ * - 解析失败或非字典形态 → 保留原值交由远端给出可读错误。
+ */
+export function normalizeArguments(raw: unknown): unknown {
+  let value: unknown = raw ?? {}
+  let depth = 0
+  while (typeof value === 'string' && depth < 4) {
+    const trimmed = value.trim()
+    if (trimmed.length === 0) return {}
+    const head = trimmed.charCodeAt(0)
+    const isContainerJson = head === 123 /* { */ || head === 91 /* [ */
+    const isQuotedJson = head === 34 /* " */
+    if (!isContainerJson && !isQuotedJson) break
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      break
+    }
+    if (parsed !== null && typeof parsed === 'object') {
+      return parsed
+    }
+    // 解出标量：仅「引号包裹层 + 内层仍为容器形态」才继续剥，其余视为字面量入参
+    const inner = typeof parsed === 'string' ? parsed.trim() : ''
+    const innerLooksContainer = inner.startsWith('{') || inner.startsWith('[')
+    if (!isQuotedJson || !innerLooksContainer) break
+    value = parsed
+    depth++
+  }
+  return value
+}
+
+/**
  * 控制层依赖：由 src/index.ts 在 apply 里构建并注入。这些 helper 封闭了
  * 插件对 catalog 内存态、catalog.json 持久化、loader entry 反查、state.json
  * AI-owner 标记的读写 —— 这样控制层不反向依赖 index.ts（避免循环依赖）。
@@ -120,8 +157,18 @@ export interface McpCallController {
   status(): Array<{ server: string; refCount: number; lastUsed: number }>
 }
 
-function msgOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+export function msgOf(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
+  if (error && typeof error === 'object') {
+    try {
+      const text = JSON.stringify(error)
+      if (typeof text === 'string' && text.length > 0) return text
+    } catch {
+      /* 循环引用等序列化失败 → 回退 String */
+    }
+  }
+  return String(error)
 }
 
 /** 从 execute 结果的 content 块抽取文本（防御式）。 */
@@ -470,14 +517,15 @@ function registerMcpCallTool(ctx: Context, controller: McpCallController): () =>
     parameters: {
       server: { type: 'string', required: true, description: 'MCP 服务器名（见 mcp_search 摘要）' },
       tool: { type: 'string', required: true, description: '该 server 上的工具名（裸名，如 understand_image；误传注册全名 mcp__<server>__<tool> 会自动归一化）' },
-      arguments: { type: 'json', description: '传给远端工具的参数字典' },
+      arguments: { type: 'json', description: '传给远端工具的参数字典；必须传 JSON 对象本身，不要传 JSON 字符串（兼容：误传字符串会自动解析）' },
     },
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     execute: (args, exec) => {
-      return controller.call(args.server, args.tool, args.arguments ?? {}, exec.agent, exec.signal)
+      // 2026-08-24：模型可能把 arguments 填成 JSON 字符串（见 normalizeArguments 注释），先归一化再透传
+      return controller.call(args.server, args.tool, normalizeArguments(args.arguments), exec.agent, exec.signal)
     },
   })
   return ctx.tools.register(definition)

@@ -12,6 +12,15 @@ import type { Catalog } from './catalog';
  */
 export declare function normalizeToolName(serverName: string, toolName: string): string;
 /**
+ * 归一化 mcp_call 的 arguments 参数（2026-08-24 修补）：type:'json' 参数的编译产物
+ * 不带 type 标注，模型直连 Tool call 时倾向把参数字典填成 JSON 字符串（实测 flash 与
+ * mimo 两系均会出现）。这里循环安全解析为对象后再透传：
+ * - 值以 { / [ 开头 → 直接按容器 JSON 解析；
+ * - 值以 " 开头（引号包裹层）→ 解包后若内层仍是容器形态才继续剥，防止误改合法标量入参；
+ * - 解析失败或非字典形态 → 保留原值交由远端给出可读错误。
+ */
+export declare function normalizeArguments(raw: unknown): unknown;
+/**
  * 控制层依赖：由 src/index.ts 在 apply 里构建并注入。这些 helper 封闭了
  * 插件对 catalog 内存态、catalog.json 持久化、loader entry 反查、state.json
  * AI-owner 标记的读写 —— 这样控制层不反向依赖 index.ts（避免循环依赖）。
@@ -64,6 +73,7 @@ export interface McpCallController {
         lastUsed: number;
     }>;
 }
+export declare function msgOf(error: unknown): string;
 /**
  * 创建控制层控制器。`caches` 即控制层依赖（McpControlCtx），由 index.ts
  * 在 apply 里构建并封闭所有 IO。

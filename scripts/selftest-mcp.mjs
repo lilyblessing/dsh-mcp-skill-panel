@@ -49,6 +49,44 @@ check('normalizeToolName：其他 server 注册全名快速失败', () => {
   assert.throws(() => index.normalizeToolName('exa', 'mcp__mimo-image__understand_image'), /裸名/)
 })
 
+// mcp_call arguments 归一化 + 错误呈现（2026-08-24 修补：参数双编码与 [object Object] 缺陷回归）
+check('normalizeArguments：对象原样透传（同引用）', () => {
+  const input = { path: 'a.md', n: 1 }
+  assert.equal(index.normalizeArguments(input), input)
+})
+check('normalizeArguments：单层 JSON 字符串解析为对象', () => {
+  assert.deepEqual(index.normalizeArguments('{"path": "README.md"}'), { path: 'README.md' })
+})
+check('normalizeArguments：双编码字符串循环剥净（2026-08-24 实测缺陷形态）', () => {
+  const once = JSON.stringify({ path: 'README.md' })
+  assert.deepEqual(index.normalizeArguments(JSON.stringify(once)), { path: 'README.md' })
+})
+check('normalizeArguments：数组形态 JSON 也接受', () => {
+  assert.deepEqual(index.normalizeArguments('[1,2]'), [1, 2])
+})
+check('normalizeArguments：非法/普通字符串保留原值交由远端报错', () => {
+  assert.equal(index.normalizeArguments('{bad json'), '{bad json')
+  assert.equal(index.normalizeArguments('plain text'), 'plain text')
+})
+check('normalizeArguments：null/undefined/空白串归一为空对象', () => {
+  assert.deepEqual(index.normalizeArguments(undefined), {})
+  assert.deepEqual(index.normalizeArguments(null), {})
+  assert.deepEqual(index.normalizeArguments('   '), {})
+})
+check('normalizeArguments：超过 3 层编码不再继续剥离（防失控）', () => {
+  let v = { deep: 1 }
+  for (let i = 0; i < 5; i++) v = JSON.stringify(v)
+  assert.equal(typeof index.normalizeArguments(v), 'string')
+})
+
+check('msgOf：Error 取 message；普通对象输出 JSON 文本而非 [object Object]（2026-08-24 缺陷）', () => {
+  assert.equal(index.msgOf(new Error('boom')), 'boom')
+  const rendered = index.msgOf({ code: -32602, message: 'missing required path' })
+  assert.ok(rendered.includes('missing required path'))
+  assert.ok(!rendered.includes('[object Object]'))
+  assert.equal(index.msgOf('plain'), 'plain')
+})
+
 const schemas = [
   { name: 'mcp__cheatengine__read_memory', description: '读取游戏进程内存', parameters: { type: 'object', properties: { addr: { type: 'string' } }, required: ['addr'] } },
   { name: 'mcp__cheatengine__write_memory', description: '写入游戏进程内存', parameters: { type: 'object', properties: { addr: { type: 'string' }, value: { type: 'integer' } } } },
