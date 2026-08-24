@@ -193,29 +193,16 @@ interface ToolView {
 }
 
 /**
- * 组装候选工具视图（2026-08-24 scope 回归修复）：session-boundary 会把 MCP 工具
- * 注册进会话作用域层（applyMode=next-session 时尤为明显），而 mcp_call 运行在宿主
- * ctx —— 宿主角度的查询可能看不到会话层注册，表现为「工具未在超时内注册」。
- * 按「调用方 agent 作用域 → agent 全局 → 宿主作用域 → 宿主全局」顺序轮询，
- * 任一视图命中即用该视图执行；命中视图会打日志，便于事后定位注册层。
+ * 组装候选工具视图（2026-08-24 scope 回归第二版修复）：dsh-tools 注册表的
+ * scope 约定是「agent 对象」而非 `scopeOf(agent.ctx)` 的 ctx 标签——模型面的
+ * schemas(exec.agent) / 执行面 get(name, agent) 均以 agent 对象为钥匙建立层级链，
+ * session-boundary 下 MCP 工具注册进该链可达的作用域层；而旧实现用 scopeOf(agent.ctx)
+ * 查询同一注册表，链条不达 → 全部「未在超时内注册」。现改为直接以 agent 对象为
+ * 作用域钥匙，与模型面/执行面完全同构；无 agent 时退回全局视图。
  */
 function collectToolViews(ctx: Context, agent: Agent | undefined): Array<ToolView> {
   const views: Array<ToolView> = []
-  const agentTools = (() => {
-    try {
-      return agent && agent.ctx
-        ? (agent.ctx as unknown as { tools?: ToolView['tools'] }).tools
-        : undefined
-    } catch {
-      return undefined
-    }
-  })()
-  const agentScope = agent ? scopeOf(agent.ctx) : undefined
-  if (agentTools) {
-    views.push({ label: 'agent-scoped', tools: agentTools, scope: agentScope })
-    views.push({ label: 'agent-global', tools: agentTools, scope: undefined })
-  }
-  views.push({ label: 'host-scoped', tools: ctx.tools, scope: agentScope })
+  if (agent) views.push({ label: 'agent-object', tools: ctx.tools, scope: agent })
   views.push({ label: 'host-global', tools: ctx.tools, scope: undefined })
   return views
 }
