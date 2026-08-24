@@ -9,7 +9,7 @@
 
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.5.1-green.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.5.2-green.svg">
 </p>
 
 ---
@@ -242,6 +242,7 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 
 | 版本 | 内容 |
 | --- | --- |
+| 0.5.2 | 审计修复（2026-08-24）：reaper×call 竞态（空闲回收 await 后二次检查引用计数，杜绝在途 mcp_call 被误清归属）；mcp_call 参数双编码归一化（normalizeArguments，模型直连把 arguments 填成 JSON 字符串/双编码时循环安全解析）与错误呈现（msgOf JSON 化，杜绝 [object Object]）；scope 钥匙改用 agent 对象（修复重启后 mcp_call 全量「未在超时内注册」，session-boundary 注册层可见）；双缓存统一（getSchemasView 共享 raw schemas，快照/面板两路径 TTL 语义各自保留）；toggleSkill 确认改指数退避；applyStateResidue 按文件分组读盘；preset 原子写；serverOfMcp 收敛；cacheTtlMs 废弃字段移除；/config 鉴权回归修复（独立审查拦截） |
 | 0.5.1 | mcp_call 工具名前缀防御（PR #4）：tool 参数误传注册全名/双重前缀自动归一化（新增 normalizeToolName，循环剥离 mcp__<server>__ 前缀）；其他 server 注册全名立即快速失败并提示裸名（不再白等 toolCallTimeoutMs 60s/300s）；mcp_call schema 描述注明裸名；selftest 新增 4 条回归断言；宿主端到端验证通过 |
 | 0.5.0 | Prompt Cache 优化（P0+P1，issue #1）：中途开关必现 miss 警示条（大包红色 severe 变体、12s 自动消失）；生效时机选项 immediate / next-session（后者记意图待生效队列，新会话 `agent/session-start` 或重启物化时统一应用，当前会话零 miss）；开关 400ms 合并为单次 toggleBatch（单次 invalidateMcp）；applyPendingMcp 增加 state.json 残留兜底（重启/热重载后 desired 与 live 不一致的行自动补齐，外部修改行尊重并清除残留）+ 新增 selftest-pending 链路自测（CI 纳入）；toggleBatch 单项失败不阻断整批；UI 封面更新 |
 | 0.4.9 | 依赖对齐 DSH rc.8 系（rc.8 全链路实测通过）：devDeps 中 10 个 `@deepseek-ai/*` 由 0.1.0-rc.6 → 0.1.0-rc.8，peers 收紧（cordis ^4.0.1 稳定版 / schemastery ^3.18.1 / dsh-scope ^0.1.0-rc.8）；已发布至 npm（0.4.8 首次上架，repository 指回本仓库）+ 新增 Trusted Publishing 自动发布流水线（publish.yml，OIDC 免 token）|
