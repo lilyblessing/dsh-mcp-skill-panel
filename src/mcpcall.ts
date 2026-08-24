@@ -185,6 +185,41 @@ function contentText(content: unknown): string {
   return parts.join('\n').trim()
 }
 
+/** 可执行一个注册工具的最小视图（宿主 ctx 或调用方 agent ctx 的 tools 服务）。 */
+interface ToolView {
+  label: string
+  tools: { get(name: string, scope?: object): unknown; execute(exec: unknown): Promise<unknown> } | undefined
+  scope: object | undefined
+}
+
+/**
+ * 组装候选工具视图（2026-08-24 scope 回归修复）：session-boundary 会把 MCP 工具
+ * 注册进会话作用域层（applyMode=next-session 时尤为明显），而 mcp_call 运行在宿主
+ * ctx —— 宿主角度的查询可能看不到会话层注册，表现为「工具未在超时内注册」。
+ * 按「调用方 agent 作用域 → agent 全局 → 宿主作用域 → 宿主全局」顺序轮询，
+ * 任一视图命中即用该视图执行；命中视图会打日志，便于事后定位注册层。
+ */
+function collectToolViews(ctx: Context, agent: Agent | undefined): Array<ToolView> {
+  const views: Array<ToolView> = []
+  const agentTools = (() => {
+    try {
+      return agent && agent.ctx
+        ? (agent.ctx as unknown as { tools?: ToolView['tools'] }).tools
+        : undefined
+    } catch {
+      return undefined
+    }
+  })()
+  const agentScope = agent ? scopeOf(agent.ctx) : undefined
+  if (agentTools) {
+    views.push({ label: 'agent-scoped', tools: agentTools, scope: agentScope })
+    views.push({ label: 'agent-global', tools: agentTools, scope: undefined })
+  }
+  views.push({ label: 'host-scoped', tools: ctx.tools, scope: agentScope })
+  views.push({ label: 'host-global', tools: ctx.tools, scope: undefined })
+  return views
+}
+
 async function ensureEnabled(
   control: McpControlCtx,
   ctx: Context,
@@ -207,20 +242,20 @@ async function waitRegistered(
   control: McpControlCtx,
   ctx: Context,
   name: string,
-  scopeKey: object | undefined,
+  views: Array<ToolView>,
   timeoutMs: number,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<ToolView | undefined> {
   void control
   const start = Date.now()
-  return new Promise<void>((resolve, reject) => {
+  return new Promise<ToolView | undefined>((resolve, reject) => {
     let settled = false
     let pollTimer: (() => void) | undefined
     let offTools: (() => boolean) | undefined
     let offAbort: (() => void) | undefined
     let offDispose: (() => void) | undefined
     const onAbort = () => finish(new Error('aborted'))
-    const finish = (error?: Error) => {
+    const finish = (error?: Error, view?: ToolView) => {
       if (settled) return
       settled = true
       pollTimer?.()
@@ -228,17 +263,21 @@ async function waitRegistered(
       offAbort?.()
       offDispose?.()
       if (error) reject(error)
-      else resolve()
+      else resolve(view)
     }
     const check = () => {
       if (settled) return
-      let found = false
-      try {
-        found = Boolean(ctx.tools.get(name, scopeKey as import('@deepseek-ai/dsh-scope').ScopeKey | undefined))
-      } catch {
-        found = false
+      for (const view of views) {
+        if (!view.tools) continue
+        try {
+          if (Boolean(view.tools.get(name, view.scope as object | undefined))) {
+            ctx.logger.info?.(`mcp-skill-panel: tool "${name}" resolved via view "${view.label}"`)
+            return finish(undefined, view)
+          }
+        } catch {
+          /* 该视图查询失败，换下一个 */
+        }
       }
-      if (found) return finish()
       if (Date.now() - start >= timeoutMs) {
         return finish(new Error(`tool "${name}" 未在 ${timeoutMs}ms 内注册`))
       }
@@ -355,13 +394,14 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
     },
 
     waitRegistered(name, scopeKey, timeoutMs, signal) {
-      return waitRegistered(caches, ctx, name, scopeKey, timeoutMs, signal)
+      // 兼容旧调用形态：按单视图（宿主 + 传入 scope）包装
+      const views: Array<ToolView> = [{ label: 'legacy-scoped', tools: ctx.tools, scope: scopeKey as object | undefined }]
+      return waitRegistered(caches, ctx, name, views, timeoutMs, signal).then(() => undefined)
     },
 
     async call(serverName, toolName, args, agent, signal, explicitTimeoutMs) {
       const bareTool = normalizeToolName(serverName, toolName)
       const name = `mcp__${serverName}__${bareTool}`
-      const scopeKey = agent ? scopeOf(agent.ctx) : undefined
       const entry = caches.resolveEntry(serverName)
       if (!entry) return `未知 MCP server：${serverName}（不在 loader 中）`
       const entryId = entry.id
@@ -378,14 +418,18 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
 
       let failed = false
       try {
-        await waitRegistered(caches, ctx, name, scopeKey, timeoutMs, signal)
-        const result = await ctx.tools.execute({
+        // 2026-08-24：多视图轮询（agent 作用域/全局 + 宿主作用域/全局），
+        // 命中视图负责执行；未见任何视图注册时保持原有超时语义。
+        const views = collectToolViews(ctx, agent)
+        const view = await waitRegistered(caches, ctx, name, views, timeoutMs, signal)
+        const execTools = view?.tools ?? ctx.tools
+        const result = (await execTools.execute({
           callId: `mcp-call-${randomUUID()}` as import('@deepseek-ai/dsh-llm').CallId,
           name,
           arguments: args,
           agent,
           signal,
-        })
+        })) as { isError?: boolean; error?: unknown; content?: unknown } | undefined
         state.lastUsed.set(serverName, Date.now())
         if (result && result.isError) {
           failed = true
