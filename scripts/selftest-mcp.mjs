@@ -222,6 +222,39 @@ check('setRowFlag：已有 disabled: false 时置 true 必须反转（2026-08-27
   assert.equal(index.rowDisabledState(removed, 'mcp-obsidian'), null)
 })
 
+check('mergeSchemas：agent scope ∪ 全局视图，按 name 去重不重复计数（filesystem 无工具事故回归）', () => {
+  const scoped = [
+    { name: 'mcp__calcmcp__add', description: 'a' },
+    { name: 'mcp__calcmcp__sub', description: 'b' },
+  ]
+  const globalView = [
+    { name: 'mcp__filesystem__read_text_file', description: 'fs' },
+    { name: 'mcp__calcmcp__add', description: 'dup-scoped' }, // 与 scoped 重名 → 丢弃
+  ]
+  const merged = index.mergeSchemas(scoped, globalView)
+  assert.equal(merged.length, 3, 'scoped 2 + global 新增 1（重名去重）')
+  assert.ok(merged.some((s) => s.name === 'mcp__filesystem__read_text_file'), '全局视图工具应并入')
+  assert.equal(merged.filter((s) => s.name === 'mcp__calcmcp__add').length, 1, '重名只保留 scoped 一份')
+  // 无全局视图 → 原样返回
+  assert.equal(index.mergeSchemas(scoped, []), scoped)
+})
+
+check('computeStatus：表驱动四态（active 以 liveTools 真实注册为准，catalog 快照不参与）', () => {
+  const cases = [
+    // [disabled, running, liveTools, expected]
+    [false, true, 14, 'active'],   // 启用 + 注册工具 → active
+    [false, true, 0, 'idle'],      // 启用 + 无注册（catalog 有旧快照也判 idle，防掩盖故障现场）
+    [true, true, 14, 'disabled'],  // 停用优先
+    [true, false, 14, 'disabled'],
+    [false, false, 0, 'failed'],   // 未运行
+    [false, false, 14, 'failed'],
+  ]
+  for (const [disabled, running, liveTools, expected] of cases) {
+    const got = index.computeStatus(disabled, running, liveTools)
+    assert.equal(got, expected, `computeStatus(${disabled}, ${running}, ${liveTools}) -> ${got}, expected ${expected}`)
+  }
+})
+
 // setSkillFlag / rowDisabledState（可维护性批次 P1-1 拆出 preset.ts 后的回归护栏）
 check('setSkillFlag 注入/移除 + rowDisabledState 读取', () => {
   const text = '---\ntags:\n  - a\n---\n# title\n'

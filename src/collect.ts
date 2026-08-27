@@ -133,6 +133,65 @@ export function resolveAgent(ctx: Context, sessionId: string | undefined) {
   return ctx.agents.list()[0]
 }
 
+/**
+ * 进程级共享的 scope key（standing 层）。
+ *
+ * 关键坑（2026-08-27 实测）：HTTP 请求路径（routes 的 httpCtx）下既解析不到
+ * agent（roots/list 空或非目标）也拿不到 agentPresets.standingKeyFor()（该服务
+ * 视图受限）→ scope key 恒 undefined → schemas 落入空视图，面板聚合全 0
+ * （filesystem 等「无工具」）。而 apply 早期 ctx 下 standingKeyFor() 可解析
+ * （快照路径一直正常，lastMcpTools=17）。
+ * 解法：scope key 在 apply 早期解析一次并缓存（进程级单例），所有路径复用。
+ */
+let sharedScopeKey: object | undefined
+/** scope key 解析来源（NIT-1：scopeDiag 现场取证用）：'agent' | 'standing' | null。 */
+let sharedScopeKeySource: 'agent' | 'standing' | null = null
+
+export async function resolveCollectScopeKey(ctx: Context, sessionId: string | undefined): Promise<object | undefined> {
+  if (sharedScopeKey !== undefined) return sharedScopeKey
+  try {
+    const agent = resolveAgent(ctx, sessionId)
+    if (agent) {
+      const key = scopeOf(agent.ctx)
+      if (key !== undefined) {
+        sharedScopeKey = key
+        sharedScopeKeySource = 'agent'
+        return key
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
+    const key = await ctx.agentPresets.standingKeyFor()
+    if (key !== undefined) {
+      sharedScopeKey = key as object
+      sharedScopeKeySource = 'standing'
+      return key as object
+    }
+  } catch {
+    /* ignore */
+  }
+  return sharedScopeKey
+}
+
+/** scope key 解析来源（/debug scopeDiag 展示用）。 */
+export function scopeKeySource(): 'agent' | 'standing' | null {
+  return sharedScopeKeySource
+}
+
+/** 行状态徽标判定（纯函数，selftest 表驱动回归）。
+ * 语义（2026-08-27 发布前独立审查修正）：active/idle 以 **liveTools**（真实注册）
+ * 为准——displayTools 含 catalog 快照兜底，用它判定 active 会掩盖「scope 解析
+ * 失败但 catalog 有旧快照」的故障现场（面板显示健康而实际工具未注册）。
+ * displayTools 仅用于 tools/tokens 数值展示与停用态回填。
+ */
+export function computeStatus(disabled: boolean, running: boolean, liveTools: number): McpRow['status'] {
+  if (disabled) return 'disabled'
+  if (!running) return 'failed'
+  return liveTools > 0 ? 'active' : 'idle'
+}
+
 function baseView(
   ctx: Context,
   agent: ReturnType<typeof resolveAgent>,
@@ -152,6 +211,33 @@ export interface McpAggregate {
   byServer: Map<string, { tools: number; tokens: number }>
   mcpToolsTotal: number
   mcpTokensTotal: number
+}
+
+/**
+ * 按 name 去重合并两个 schemas 视图（scoped 优先）。
+ *
+ * ⚠️ 2026-08-27 实测结论：`tools.schemas()`（无参全局视图）**不含任何 mcp__ 工具**
+ * （全部 mcp 工具注册在 scope 层）→ 本合并当前环境恒为 no-op，属**防御性合并**：
+ * 若未来出现联邦/全局作用域注册的 mcp 工具，此路径才生效。filesystem 等 patch 层
+ * server 此前「无工具」的真正根因是 HTTP 路径 scope key 解析失败（3872206 共享缓存
+ * 修复），与全局视图无关——维护时勿按旧注释误判为「全局 realm 有工具」。
+ * 同名条目 scoped 优先（占位条目会压过全局完整 schema，当前两视图同源不触发）。
+ */
+export function mergeSchemas(
+  scoped: Array<{ name?: unknown; description?: unknown; parameters?: unknown }>,
+  global: Array<{ name?: unknown; description?: unknown; parameters?: unknown }>,
+): Array<{ name?: unknown; description?: unknown; parameters?: unknown }> {
+  if (!global || global.length === 0) return scoped
+  const seen = new Set<string>()
+  for (const schema of scoped) seen.add(String(schema?.name ?? ''))
+  const out = scoped.slice()
+  for (const schema of global) {
+    const name = String(schema?.name ?? '')
+    if (name.length === 0 || seen.has(name)) continue
+    seen.add(name)
+    out.push(schema)
+  }
+  return out
 }
 
 function computeAggregate(schemas: Array<{ name?: string; parameters?: unknown }>): McpAggregate {
@@ -190,6 +276,8 @@ function getMcpAggregate(
   let schemas: Array<{ name?: unknown; description?: unknown; parameters?: unknown }> = []
   try {
     schemas = getSchemasView(ctx, caches, scopeKey, DOMAIN_TTL_MS)
+    // 合并全局视图（profile patch 层 server 注册在全局 realm，不在 agent scope）
+    if (scopeKey) schemas = mergeSchemas(schemas, getSchemasView(ctx, caches, undefined, DOMAIN_TTL_MS))
   } catch (error) {
     errors.push(`tools.schemas: ${messageOf(error)}`)
   }
@@ -213,13 +301,15 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
   const { ctx } = deps
   const errors: string[] = []
   const agent = resolveAgent(ctx, sessionId)
-  const scopeKey = agent ? scopeOf(agent.ctx) : undefined
+  const scopeKey = await resolveCollectScopeKey(ctx, sessionId)
   const cwd = agent?.session?.header?.cwd ?? undefined
 
   // MCP：loader 行 × schema 聚合（聚合结果版本化复用）
   const { byServer, mcpToolsTotal, mcpTokensTotal } = getMcpAggregate(ctx, deps.caches, scopeKey, errors)
   // 共享 schemas 缓存（路径 A/B 同源）：构建 per-server 工具列表（面板工具级禁用用）。
-  const schemas = getSchemasView(ctx, deps.caches, scopeKey, DOMAIN_TTL_MS)
+  // 同样合并全局视图：patch 层 server（filesystem 等）的工具列表需要出现在面板。
+  let schemas = getSchemasView(ctx, deps.caches, scopeKey, DOMAIN_TTL_MS)
+  if (scopeKey) schemas = mergeSchemas(schemas, getSchemasView(ctx, deps.caches, undefined, DOMAIN_TTL_MS))
   const toolsByServer = new Map<string, Array<{ name: string; description: string }>>()
   for (const schema of schemas) {
     const name = String(schema?.name ?? '')
@@ -261,17 +351,17 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
       const displayTools = liveTools > 0 ? liveTools : catalogInfo?.tools.length ?? 0
       const displayTokens =
         liveTools > 0 ? (agg?.tokens ?? 0) : catalogTokens(deps.catalogRuntime, serverName, catalogInfo)
-      const status: McpRow['status'] = disabled
-        ? 'disabled'
-        : running
-          ? liveTools > 0
-            ? 'active'
-            : 'idle'
-          : 'failed'
+      const status = computeStatus(disabled, running, liveTools)
       const transportRaw = mcpEntryConfig(entry)?.transport
       // 项目行查所属工作区的项目禁用表；全局行查全局表（disabledToolsOf 内部按 owner 分派）
       const toolDisabled = disabledToolsOf(serverName, projectWorkspace)
-      const toolList = toolsByServer.get(serverName)
+      let toolList = toolsByServer.get(serverName)
+      if (!toolList && catalogInfo) {
+        // 兜底：schemas 视图缺失该 server（scope 解析异常等）时用 catalog 快照
+        // 构建工具列表（CatalogEntry.name 是全名 mcp__<server>__<tool>，
+        // 与聚合产物和禁用表完全同构）。保证工具级禁用 UI 始终可用。
+        toolList = catalogInfo.tools.map((tool) => ({ name: String(tool.name ?? ''), description: String(tool.description ?? '') }))
+      }
       mcp.push({
         entryId: entry.id,
         rowId: entry.options.id,

@@ -12,7 +12,7 @@ import { homedir } from 'node:os'
 import { readState, writeState, stateApplyMode, type ApplyMode } from './state'
 import { setSkillFlag, rowDisabledState, isValidSkillName, buildSkillMd } from './preset'
 import { pendingMcp, applyPendingMcp } from './pending'
-import { resolveAgent, collectMcp, collectSkills, confirmedSkills, pruneExpired, DOMAIN_TTL_MS, SKILL_TOGGLE_POLL_MS, type DomainCaches, type Deps } from './collect'
+import { resolveAgent, resolveCollectScopeKey, scopeKeySource, getSchemasView, mergeSchemas, collectMcp, collectSkills, confirmedSkills, pruneExpired, DOMAIN_TTL_MS, SKILL_TOGGLE_POLL_MS, type DomainCaches, type Deps } from './collect'
 import { isMcpEntry, serverNameOf } from './mcp-entry'
 import { parseMcpServersJson, serversToPatchYaml, serversToRows, type McpServers, type McpRowConfig } from './mcp-convert'
 import { remountWorkspace, projectServerOwner, getActiveWorkspace } from './project-mcp'
@@ -111,6 +111,9 @@ function handle(method: 'GET' | 'POST', run: (req: Req) => Promise<object>, guar
 /**
  * 同 path 多 method 路由：webServer 的 exact 路由按 path 唯一（同 path 重复注册
  * 会中断后续注册），因此 GET+POST 共存的端点必须合并为单个 handler 内部分发。
+ * guardPosts=true 时仅 POST 需要 x-panel-token（GET 只读端点始终开放，
+ * 与 0.4.7+「读端点开放、写操作鉴权」的设计一致；2026-08-27 修复：此前
+ * guardPosts 对 GET 也生效，/config 读取被锁 → 面板生效时机恒显示默认值）。
  */
 function handleAny(entries: Array<{ method: 'GET' | 'POST'; run: (req: Req) => Promise<object> }>, guardPosts = false): (req: Req, res: Res) => void {
   return (req, res) => {
@@ -119,7 +122,7 @@ function handleAny(entries: Array<{ method: 'GET' | 'POST'; run: (req: Req) => P
       json(res, 405, { ok: false, error: 'method-not-allowed' })
       return
     }
-    handle(entry.method, entry.run, guardPosts)(req, res)
+    handle(entry.method, entry.run, guardPosts && entry.method === 'POST')(req, res)
   }
 }
 
@@ -662,7 +665,32 @@ export function makeRoutes(
         for (const [server, info] of Object.entries(catalogRuntime.catalog)) {
           catalog[server] = { tools: info.tools.length, fetchedAt: info.fetchedAt, source: info.source }
         }
-        return { diag: catalogRuntime.diag, catalog }
+        // HTTP 路径 scope 诊断（2026-08-27 filesystem「无工具」取证）：
+        // 复现 collectMcp 的 scope 解析 + schemas 视图，确认 key 是否命中 standing 层链。
+        const scopeDiag: Record<string, unknown> = { error: null }
+        try {
+          const scopeKey = await resolveCollectScopeKey(ctx, undefined)
+          const scoped = scopeKey ? getSchemasView(ctx, caches, scopeKey, DOMAIN_TTL_MS) : []
+          const globalView = getSchemasView(ctx, caches, undefined, DOMAIN_TTL_MS)
+          const merged = scopeKey ? mergeSchemas(scoped, globalView) : scoped
+          const mcpNames = merged
+            .map((s) => String(s?.name ?? ''))
+            .filter((name) => name.startsWith('mcp__'))
+          const scopedMcp = scoped.map((s) => String(s?.name ?? '')).filter((name) => name.startsWith('mcp__'))
+          const globalMcp = globalView.map((s) => String(s?.name ?? '')).filter((name) => name.startsWith('mcp__'))
+          scopeDiag.scopeKeyType = scopeKey ? typeof scopeKey : null
+          scopeDiag.scopeKeySource = scopeKeySource()
+          scopeDiag.scopedTotal = scoped.length
+          scopeDiag.scopedMcpTools = scopedMcp.length
+          scopeDiag.globalTotal = globalView.length
+          scopeDiag.globalMcpTools = globalMcp.length
+          scopeDiag.mergedMcpTools = mcpNames.length
+          scopeDiag.scopedMcpSample = scopedMcp.slice(0, 20)
+          scopeDiag.globalMcpSample = globalMcp.slice(0, 20)
+        } catch (error) {
+          scopeDiag.error = messageOf(error)
+        }
+        return { diag: catalogRuntime.diag, catalog, scopeDiag }
       }),
     },
     {
