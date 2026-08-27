@@ -10,6 +10,11 @@ import type { Context } from '@deepseek-ai/cordis';
 /**
  * 在组合文件中对 `- id: <rowId>` 行做 `  <key>: <value>` 标记的插入/移除。
  * 逐行文本编辑，保留注释与 !!js 表达式原样（loader 的 yaml.dump 会丢注释，故不用）。
+ *
+ * 语义（2026-08-27 修复）：value=true 保证标记存在且为 true（已有 false 时反转）；
+ * value=false 移除标记。此前 value=true 遇到已存在的 `disabled: false` 会原样返回
+ * （只支持插入/删除不支持反转），导致物化失败后 lastApplied 与文件脱节，
+ * 下次启动被误判「外部修改」而删掉 state 条目（obsidian 设置丢失事故）。
  */
 export declare function setRowFlag(text: string, rowId: string, key: string, value: boolean): string;
 /** SKILL.md frontmatter 的 disable-model-invocation 键注入/移除（kebab-case 是唯一合法形式）。 */
