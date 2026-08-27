@@ -164,6 +164,8 @@ export function installToolDisableFilter(ctx: Context): () => void {
         next: () => Promise<PromptAssembly>,
       ): Promise<PromptAssembly> => {
         if (assembly && Array.isArray(assembly.tools)) {
+          // 快速通道：禁用表全空时零开销放行（默认场景，无 per-tool 解析）
+          if (disabledTools.size === 0 && projectDisabledTools.size === 0) return next()
           const cwd = (context as { agent?: { session?: { header?: { cwd?: unknown } } } } | undefined)?.agent?.session?.header?.cwd
           const workspace = typeof cwd === 'string' ? cwd : undefined
           assembly.tools = assembly.tools.filter((tool) => {
