@@ -22,6 +22,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import type { Catalog, SearchHit } from './catalog'
 import { searchCatalog, listServer } from './catalog'
+import { isToolDisabled } from './tool-disable'
 
 /** 空闲回收器扫描周期（ms）。 */
 const REAPER_INTERVAL_MS = 10_000
@@ -385,6 +386,12 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
     async call(serverName, toolName, args, agent, signal, explicitTimeoutMs) {
       const bareTool = normalizeToolName(serverName, toolName)
       const name = `mcp__${serverName}__${bareTool}`
+      // 工具级禁用（面板指定关闭）：拒绝调用并给出明确提示（可经面板重新开启）。
+      // 项目 MCP 按会话工作区判定（A 区禁用不影响 B 区）；全局 MCP 无条件生效。
+      const workspace = typeof agent?.session?.header?.cwd === 'string' ? agent.session.header.cwd : undefined
+      if (isToolDisabled(name, workspace)) {
+        return `MCP 工具 ${serverName}.${bareTool} 已被禁用（请在 MCP 管理面板打开该工具后再调用）`
+      }
       const entry = caches.resolveEntry(serverName)
       if (!entry) return `未知 MCP server：${serverName}（不在 loader 中）`
       const entryId = entry.id
@@ -499,15 +506,18 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx): () => void
       schema: { type: 'json' },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
     },
-    execute: async (args) => {
+    execute: async (args, exec) => {
       const catalog = control.getCatalog()
       const query = typeof args.query === 'string' ? args.query.trim() : ''
       const server = typeof args.server === 'string' ? args.server.trim() : ''
       const limit = clampLimit(typeof args.limit === 'number' ? args.limit : undefined, control.searchLimitDefault, control.searchLimitMax)
+      // 按当前会话工作区过滤项目级禁用（全局禁用无条件生效）
+      const workspace = typeof exec?.agent?.session?.header?.cwd === 'string' ? exec.agent.session.header.cwd : undefined
+      const keep = (name: string): boolean => !isToolDisabled(name, workspace)
 
       if (server) {
         const result = listServer(catalog, server)
-        const tools = result ?? []
+        const tools = (result ?? []).filter((tool) => keep(tool.name))
         return toJson({
           ok: true,
           kind: 'list',
@@ -519,7 +529,7 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx): () => void
       }
 
       if (query) {
-        const hits: SearchHit[] = searchCatalog(catalog, query, limit)
+        const hits: SearchHit[] = searchCatalog(catalog, query, limit).filter((hit) => keep(hit.tool.name))
         return toJson({ ok: true, kind: 'search', query, count: hits.length, limit, hits })
       }
 

@@ -64,6 +64,25 @@ export function setSkillFlag(text: string, value: boolean): string {
   return text
 }
 
+/** dsh-skill-filesystem 的 skill 名约束：kebab-case（非合法名会被发现层丢弃）。 */
+const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+
+/** skill 名是否合法（kebab-case，前端预校验与后端落盘共用）。 */
+export function isValidSkillName(name: string): boolean {
+  return SKILL_NAME_PATTERN.test(name)
+}
+
+/**
+ * 生成 SKILL.md 文本：frontmatter（name/description）+ 正文。
+ * description 用 JSON 双引号标量（合法 YAML，冒号/换行安全）；正文原样保留。
+ */
+export function buildSkillMd(name: string, description: string, body: string): string {
+  const nl = '\n'
+  const desc = JSON.stringify(description)
+  const trimmedBody = body.replace(/\s+$/, '')
+  return `---${nl}name: ${name}${nl}description: ${desc}${nl}---${nl}${nl}${trimmedBody}${nl}`
+}
+
 /** 读取某行当前是否带 disabled: true（true/false/null=无标记）。 */
 export function rowDisabledState(text: string, rowId: string): boolean | null {
   const lines = text.split(/\r?\n/)

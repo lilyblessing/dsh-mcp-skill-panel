@@ -46,15 +46,23 @@ import { makeRoutes } from './routes'
 import { readState, writeState, setStateAiOwner, clearStateAiOwner } from './state'
 import { syncPresetFiles } from './preset'
 import { applyPendingMcp } from './pending'
+import { installProjectMcp, rebuildOwnersFromState } from './project-mcp'
+import { loadDisabledTools, installToolDisableFilter } from './tool-disable'
 import { messageOf } from './util'
 
 export type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
 export type { DomainCaches } from './collect'
 // 预设文件文本操作（selftest 回归护栏 + 潜在外部复用）
-export { setRowFlag, setSkillFlag, rowDisabledState, syncPresetFiles } from './preset'
+export { setRowFlag, setSkillFlag, rowDisabledState, syncPresetFiles, isValidSkillName, buildSkillMd } from './preset'
+// 项目 MCP 扫描（selftest 回归护栏：根目录先读、子目录覆盖的去重规则）
+export { scanWorkspaceMcp } from './project-mcp'
+// 项目 MCP 运行时装配（外部复用/端到端验证：手动安装、按工作空间重扫、owner 查询）
+export { installProjectMcp, remountWorkspace, projectServerOwner, projectServerName } from './project-mcp'
 export { readState, writeState } from './state'
 // P1 会话边界：待生效队列与边界应用入口（selftest 直接测构建产物行为）
 export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending'
+// 工具级禁用作用域（selftest 回归护栏：全局 vs 项目工作区隔离）
+export { loadDisabledTools, setToolDisabled, isToolDisabled, disabledToolsOf } from './tool-disable'
 
 export const name = 'runtime-inventory'
 
@@ -330,6 +338,19 @@ function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config, 
 /* ── 插件主体 ──────────────────────────────────────────────────────────── */
 
 export function apply(ctx: Context, config: Config = {}): void {
+  // 启动早期加载 MCP 工具级禁用集合（memory Map，装配过滤同步读）。
+  // 注意：加载是异步的，首个装配回合前禁用表可能未就绪（毫秒级窗口）；
+  // 失败必须留日志（否则用户以为已禁用、实际全放行）。
+  void loadDisabledTools().catch((error: unknown) => {
+    ctx.logger.warn(`mcp-skill-panel: 加载工具级禁用表失败: ${messageOf(error)}`)
+  })
+
+  // HMR/热重载兜底：从 state.json 反向重建项目 MCP owner 映射（防项目工具
+  // 在下次 session-start 前短暂按全局展示/禁用作用域错判）。
+  void rebuildOwnersFromState(ctx).catch((error: unknown) => {
+    ctx.logger.warn(`mcp-skill-panel: 重建项目 MCP owner 映射失败: ${messageOf(error)}`)
+  })
+
   // 启动早期物化 MCP 启停意图（仅当无会话在跑时；有会话则下次重启再物化）。
   // 不阻塞 apply；失败只记日志，不拖累插件挂载。
   void syncPresetFiles(ctx).then(
@@ -422,6 +443,21 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   // 初始快照（可能还没有 agent，mcp__* 会在后续增量补全）。
   void snapshotEnabled(ctx, catalogRuntime, caches).catch(() => {})
+
+  // ── 项目级（工作空间）MCP：.dsh/mcps/**/mcp.json → 惰性挂载 + 常开可见性过滤 ──
+  // 仅该项目会话可见（过滤按会话 cwd），独立于 autoManage；插件卸载时整体释放。
+  const disposeProjectMcp = installProjectMcp(ctx)
+  ctx.effect(
+    () => () => disposeProjectMcp(),
+    'mcp-skill-panel: project mcp teardown',
+  )
+
+  // ── 工具级禁用过滤（常开）：用户禁用的 MCP 工具从模型目录剔除 ──
+  const disposeToolFilter = installToolDisableFilter(ctx)
+  ctx.effect(
+    () => () => disposeToolFilter(),
+    'mcp-skill-panel: tool disable teardown',
+  )
 
   // ── 形态 2（中间层代理）：动态开关 ──────────────────────────────────────
   // 控制层（catalog/loader/state 的 IO 封装）常驻构建，零副作用；过滤 + 工具 +

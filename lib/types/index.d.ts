@@ -33,9 +33,12 @@ export { normalizeToolName, normalizeArguments, msgOf } from './mcpcall';
 import type { McpView, SkillsView } from './shared-types';
 export type { McpView, SkillsView, McpRow, SkillRow } from './shared-types';
 export type { DomainCaches } from './collect';
-export { setRowFlag, setSkillFlag, rowDisabledState, syncPresetFiles } from './preset';
+export { setRowFlag, setSkillFlag, rowDisabledState, syncPresetFiles, isValidSkillName, buildSkillMd } from './preset';
+export { scanWorkspaceMcp } from './project-mcp';
+export { installProjectMcp, remountWorkspace, projectServerOwner, projectServerName } from './project-mcp';
 export { readState, writeState } from './state';
 export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending';
+export { loadDisabledTools, setToolDisabled, isToolDisabled, disabledToolsOf } from './tool-disable';
 export declare const name = "runtime-inventory";
 export declare const inject: string[];
 export interface Config {
