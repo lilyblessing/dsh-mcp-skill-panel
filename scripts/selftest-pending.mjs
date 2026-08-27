@@ -94,7 +94,9 @@ await checkAsync('残留兜底：desired 不一致的行被应用；外部修改
   assert.equal(h.entries.find((e) => e.id === 'sqlite').disabled, true)
   assert.equal(h.markUser.length, 0, '停用方向不标记 markUserEnabled')
   const base = await readStateFile()
-  assert.equal(base.mcp[h.file].chrome, undefined, '外部修改行的残留应从 state 清除（徽标不再悬挂）')
+  // 2026-08-27 语义修复：外部修改不再删除条目 —— desired 保留（用户意图不丢），
+  // lastApplied 对齐现实（cur=true），面板可重新 toggle 接管
+  assert.deepEqual(base.mcp[h.file].chrome, { desired: false, lastApplied: true }, '外部修改行保留条目且 lastApplied 对齐')
   assert.ok(base.mcp[h.file].sqlite, 'sqlite 行保留')
 })
 
@@ -154,15 +156,15 @@ await checkAsync('syncPresetFiles 物化后 lastApplied 同步，二次启动不
 
 /* ── 场景 5：外部修改在物化链路中被放弃且不残留 ─────────────────────── */
 
-await checkAsync('外部修改行在物化链路中被放弃，文件保持用户原样', async () => {
+await checkAsync('外部修改行在物化链路中不被覆盖，条目保留且 lastApplied 对齐', async () => {
   const h = await makeHarness({ rows: [{ id: 'chrome', disabled: true }] })
   await writeState({
     mcp: { [h.file]: { chrome: { desired: false, lastApplied: null } } },
   })
-  // 物化：cur(true) !== lastApplied(null) → 放弃该行 → 残留清除
+  // 物化：cur(true) !== lastApplied(null) → 外部修改判定 → 不写文件、条目保留、lastApplied 对齐
   await syncPresetFiles(h.ctx)
   const base = await readStateFile()
-  assert.equal(base.mcp[h.file].chrome, undefined, '放弃行的残留应从 state 清除')
+  assert.deepEqual(base.mcp[h.file].chrome, { desired: false, lastApplied: true }, '条目保留（不丢用户意图）且 lastApplied 对齐 cur')
   const text = await readFile(h.file, 'utf8')
   assert.match(text, /disabled: true/, '外部修改不被物化覆盖')
 })

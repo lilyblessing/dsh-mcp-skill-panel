@@ -109,11 +109,12 @@ async function applyStateResidue(deps: PendingDeps, state: StateFile | undefined
     for (const { entry, rowState } of entries) {
       const cur = rowDisabledState(text, entry.options.id)
       if (cur !== rowState.lastApplied) {
-        // 预设文件被外部/其他途径改过：尊重现状，放弃对该行的管理并清除残留
-        delete mcp[file][entry.options.id]
-        if (Object.keys(mcp[file]).length === 0) delete mcp[file]
+        // 预设文件被外部/其他途径改过：尊重现状（不动 live）。
+        // 2026-08-27 修复：此前直接删除残留条目 → 物化链路误判时用户设置永久丢失；
+        // 改为保留 desired、lastApplied 对齐现实，面板仍显示意图，可重新接管。
+        rowState.lastApplied = cur
         fileCleared = true
-        ctx.logger.info?.(`mcp-skill-panel: state-residue ${entry.id}: preset file externally modified, dropping row`)
+        ctx.logger.info?.(`mcp-skill-panel: state-residue ${entry.id}: preset file externally modified, aligning lastApplied`)
         continue
       }
       try {

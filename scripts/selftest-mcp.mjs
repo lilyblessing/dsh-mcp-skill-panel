@@ -206,6 +206,22 @@ check('setRowFlag 行为不变', () => {
   assert.throws(() => index.setRowFlag(text, 'zzz', 'disabled', true))
 })
 
+check('setRowFlag：已有 disabled: false 时置 true 必须反转（2026-08-27 obsidian 设置丢失事故回归）', () => {
+  // preset 原文 obsidian 行自带 disabled: false，用户面板关闭（desired=true）
+  const text = '- id: mcp-obsidian\n  disabled: false\n'
+  const out = index.setRowFlag(text, 'mcp-obsidian', 'disabled', true)
+  assert.notEqual(out, text, 'must not be a no-op')
+  assert.ok(out.includes('  disabled: true'), out)
+  assert.ok(!out.includes('disabled: false'), out)
+  assert.equal(index.rowDisabledState(out, 'mcp-obsidian'), true)
+  // 幂等：已是 true 再置 true 不变
+  assert.equal(index.setRowFlag(out, 'mcp-obsidian', 'disabled', true), out)
+  // 反转后再移除 → 回到无标记
+  const removed = index.setRowFlag(out, 'mcp-obsidian', 'disabled', false)
+  assert.ok(!removed.includes('disabled: true'))
+  assert.equal(index.rowDisabledState(removed, 'mcp-obsidian'), null)
+})
+
 // setSkillFlag / rowDisabledState（可维护性批次 P1-1 拆出 preset.ts 后的回归护栏）
 check('setSkillFlag 注入/移除 + rowDisabledState 读取', () => {
   const text = '---\ntags:\n  - a\n---\n# title\n'
