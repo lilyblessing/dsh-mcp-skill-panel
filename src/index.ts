@@ -52,6 +52,8 @@ import { messageOf } from './util'
 
 export type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
 export type { DomainCaches } from './collect'
+// schemas 视图合并（agent scope ∪ 全局视图；selftest 回归护栏）
+export { mergeSchemas } from './collect'
 // 预设文件文本操作（selftest 回归护栏 + 潜在外部复用）
 export { setRowFlag, setSkillFlag, rowDisabledState, syncPresetFiles, isValidSkillName, buildSkillMd } from './preset'
 // 项目 MCP 扫描（selftest 回归护栏：根目录先读、子目录覆盖的去重规则）

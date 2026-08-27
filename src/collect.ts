@@ -154,6 +154,31 @@ export interface McpAggregate {
   mcpTokensTotal: number
 }
 
+/**
+ * 按 name 去重合并两个 schemas 视图（scoped 优先）。
+ * 面板聚合需要「agent scope + 全局视图」并集：
+ * profile patch 层（cordis.patch.yml）与根树直接创建的 server（如 filesystem、
+ * web-fetch-http）工具注册在全局 realm，不在 agent scope 的 schemas 内，
+ * 只查 scoped 会漏掉这些 server（面板显示无工具、无工具级禁用列表）。
+ * 纯函数，selftest 可覆盖。
+ */
+export function mergeSchemas(
+  scoped: Array<{ name?: unknown; description?: unknown; parameters?: unknown }>,
+  global: Array<{ name?: unknown; description?: unknown; parameters?: unknown }>,
+): Array<{ name?: unknown; description?: unknown; parameters?: unknown }> {
+  if (!global || global.length === 0) return scoped
+  const seen = new Set<string>()
+  for (const schema of scoped) seen.add(String(schema?.name ?? ''))
+  const out = scoped.slice()
+  for (const schema of global) {
+    const name = String(schema?.name ?? '')
+    if (name.length === 0 || seen.has(name)) continue
+    seen.add(name)
+    out.push(schema)
+  }
+  return out
+}
+
 function computeAggregate(schemas: Array<{ name?: string; parameters?: unknown }>): McpAggregate {
   const byServer = new Map<string, { tools: number; tokens: number }>()
   let mcpToolsTotal = 0
@@ -190,6 +215,8 @@ function getMcpAggregate(
   let schemas: Array<{ name?: unknown; description?: unknown; parameters?: unknown }> = []
   try {
     schemas = getSchemasView(ctx, caches, scopeKey, DOMAIN_TTL_MS)
+    // 合并全局视图（profile patch 层 server 注册在全局 realm，不在 agent scope）
+    if (scopeKey) schemas = mergeSchemas(schemas, getSchemasView(ctx, caches, undefined, DOMAIN_TTL_MS))
   } catch (error) {
     errors.push(`tools.schemas: ${messageOf(error)}`)
   }
@@ -219,7 +246,9 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
   // MCP：loader 行 × schema 聚合（聚合结果版本化复用）
   const { byServer, mcpToolsTotal, mcpTokensTotal } = getMcpAggregate(ctx, deps.caches, scopeKey, errors)
   // 共享 schemas 缓存（路径 A/B 同源）：构建 per-server 工具列表（面板工具级禁用用）。
-  const schemas = getSchemasView(ctx, deps.caches, scopeKey, DOMAIN_TTL_MS)
+  // 同样合并全局视图：patch 层 server（filesystem 等）的工具列表需要出现在面板。
+  let schemas = getSchemasView(ctx, deps.caches, scopeKey, DOMAIN_TTL_MS)
+  if (scopeKey) schemas = mergeSchemas(schemas, getSchemasView(ctx, deps.caches, undefined, DOMAIN_TTL_MS))
   const toolsByServer = new Map<string, Array<{ name: string; description: string }>>()
   for (const schema of schemas) {
     const name = String(schema?.name ?? '')

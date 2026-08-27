@@ -111,6 +111,9 @@ function handle(method: 'GET' | 'POST', run: (req: Req) => Promise<object>, guar
 /**
  * 同 path 多 method 路由：webServer 的 exact 路由按 path 唯一（同 path 重复注册
  * 会中断后续注册），因此 GET+POST 共存的端点必须合并为单个 handler 内部分发。
+ * guardPosts=true 时仅 POST 需要 x-panel-token（GET 只读端点始终开放，
+ * 与 0.4.7+「读端点开放、写操作鉴权」的设计一致；2026-08-27 修复：此前
+ * guardPosts 对 GET 也生效，/config 读取被锁 → 面板生效时机恒显示默认值）。
  */
 function handleAny(entries: Array<{ method: 'GET' | 'POST'; run: (req: Req) => Promise<object> }>, guardPosts = false): (req: Req, res: Res) => void {
   return (req, res) => {
@@ -119,7 +122,7 @@ function handleAny(entries: Array<{ method: 'GET' | 'POST'; run: (req: Req) => P
       json(res, 405, { ok: false, error: 'method-not-allowed' })
       return
     }
-    handle(entry.method, entry.run, guardPosts)(req, res)
+    handle(entry.method, entry.run, guardPosts && entry.method === 'POST')(req, res)
   }
 }
 
