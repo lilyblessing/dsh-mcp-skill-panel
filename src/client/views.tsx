@@ -787,6 +787,18 @@ function ApplyTimingCard(props: {
   )
 }
 
+/** 进程级随机令牌的模块级缓存（工具级禁用端点用；令牌全程不变，复用免重复请求）。 */
+let toolTokenPromise: Promise<string | null> | null = null
+export function ensureToolToken(): Promise<string | null> {
+  if (!toolTokenPromise) {
+    toolTokenPromise = fetch('/api/mcp-skill-panel/token')
+      .then((r) => r.json())
+      .then((b) => (b && typeof b.token === 'string' ? b.token : null))
+      .catch(() => null)
+  }
+  return toolTokenPromise
+}
+
 function McpPanel(props: {
   state: McpView
   t: Props['t']
@@ -807,7 +819,8 @@ function McpPanel(props: {
     const key = `${row.entryId}:${tool.name}`
     setToolBusy((prev) => ({ ...prev, [key]: true }))
     setToolErr(null)
-    const token = await (await fetch('/api/mcp-skill-panel/token')).json().then((b) => b.token).catch(() => null)
+    // 复用模块级 token 缓存（进程级随机令牌不变；避免每次点击多一次往返）
+    const token = await ensureToolToken()
     const headers: Record<string, string> = { 'content-type': 'application/json' }
     if (token) headers['x-panel-token'] = token
     fetch('/api/mcp-skill-panel/mcp/toolToggle', {
