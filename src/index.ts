@@ -41,7 +41,7 @@ import { createMcpCallController, installMcpControlTools } from './mcpcall'
 export { normalizeToolName, normalizeArguments, msgOf } from './mcpcall'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
 import type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
-import { createDomainCaches, getSchemasView, type DomainCaches } from './collect'
+import { createDomainCaches, getSchemasView, resolveCollectScopeKey, type DomainCaches } from './collect'
 import { makeRoutes } from './routes'
 import { readState, writeState, setStateAiOwner, clearStateAiOwner } from './state'
 import { syncPresetFiles } from './preset'
@@ -201,38 +201,17 @@ async function persistCatalog(next: () => Context, runtime: CatalogRuntime): Pro
 /**
  * 解析 scope 并取 schema 视图（preset 层共享，任一 standing 即可）。
  *
- * 关键坑（v0.4.1 实测）：apply ctx（bundle 插件行挂载 ctx）下 `ctx.agents` 解析到
- * 空实例（realm 隔离，roots/list 均为 0）——从 apply ctx 直接 resolveAgent 永远拿不到
- * agent，catalog 采集恒为空并可能空写盘覆盖 last-good。因此 agent 不可得时
- * fallback 到 `agentPresets.standingKeyFor()`（注册表查询，不依赖 agent 实例）。
+ * 关键坑（v0.4.1 + 2026-08-27）：HTTP/apply ctx 下 agents/standingKeyFor 视图
+ * 受限（roots/list 空或服务不可解析）。统一走 collect.resolveCollectScopeKey 的
+ * 进程级缓存：apply 早期预热一次，快照与面板路径共用同一 standing scope key。
  */
 async function resolveScopeSchemas(
   ctx: Context,
   caches: DomainCaches,
 ): Promise<Array<{ name?: unknown; description?: unknown; parameters?: unknown }>> {
-  let scopeKey: unknown
-  try {
-    const agent = resolveAgentLocal(ctx)
-    scopeKey = agent ? scopeOf(agent.ctx) : undefined
-  } catch {
-    scopeKey = undefined
-  }
-  if (scopeKey === undefined) {
-    try {
-      scopeKey = await ctx.agentPresets.standingKeyFor()
-    } catch {
-      scopeKey = undefined
-    }
-  }
+  const scopeKey = await resolveCollectScopeKey(ctx, undefined)
   if (scopeKey === undefined) return []
-  return getSchemasView(ctx, caches, scopeKey as object | undefined, 500)
-}
-
-/** 本地 resolveAgent：避免 collect.ts 的依赖方向（本文件已 import collect）。 */
-function resolveAgentLocal(ctx: Context) {
-  const roots = ctx.agents.roots()
-  if (roots.length > 0) return roots[0]
-  return ctx.agents.list()[0]
+  return getSchemasView(ctx, caches, scopeKey, 500)
 }
 
 /** 对所有当前 enabled 的 mcp server 重新快照。 */

@@ -134,27 +134,41 @@ export function resolveAgent(ctx: Context, sessionId: string | undefined) {
 }
 
 /**
- * 解析面板数据收集的 scope key：agent 作用域优先，不可得时 fallback
- * `agentPresets.standingKeyFor()`（注册表查询，不依赖 agent 实例）。
+ * 进程级共享的 scope key（standing 层）。
  *
- * 关键坑（2026-08-27 实测）：HTTP 请求路径（routes 的 httpCtx）下
- * `agents.roots()/list()` 解析不到/解析到错误的 agent → scopeKey=undefined →
- * getSchemasView 落到全局视图，而全部 mcp 工具注册在 agent scope 的 schemas
- * 内 → 面板聚合恒为 0（工具数/工具列表/toolList 全缺，仅 catalog 回填文字仍在）。
- * 与 index.resolveScopeSchemas（快照路径）保持同一解析策略。
+ * 关键坑（2026-08-27 实测）：HTTP 请求路径（routes 的 httpCtx）下既解析不到
+ * agent（roots/list 空或非目标）也拿不到 agentPresets.standingKeyFor()（该服务
+ * 视图受限）→ scope key 恒 undefined → schemas 落入空视图，面板聚合全 0
+ * （filesystem 等「无工具」）。而 apply 早期 ctx 下 standingKeyFor() 可解析
+ * （快照路径一直正常，lastMcpTools=17）。
+ * 解法：scope key 在 apply 早期解析一次并缓存（进程级单例），所有路径复用。
  */
+let sharedScopeKey: object | undefined
+
 export async function resolveCollectScopeKey(ctx: Context, sessionId: string | undefined): Promise<object | undefined> {
+  if (sharedScopeKey !== undefined) return sharedScopeKey
   try {
     const agent = resolveAgent(ctx, sessionId)
-    if (agent) return scopeOf(agent.ctx)
+    if (agent) {
+      const key = scopeOf(agent.ctx)
+      if (key !== undefined) {
+        sharedScopeKey = key
+        return key
+      }
+    }
   } catch {
     /* fall through */
   }
   try {
-    return await ctx.agentPresets.standingKeyFor()
+    const key = await ctx.agentPresets.standingKeyFor()
+    if (key !== undefined) {
+      sharedScopeKey = key as object
+      return key as object
+    }
   } catch {
-    return undefined
+    /* ignore */
   }
+  return sharedScopeKey
 }
 
 function baseView(
@@ -317,7 +331,7 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
       const status: McpRow['status'] = disabled
         ? 'disabled'
         : running
-          ? liveTools > 0
+          ? displayTools > 0
             ? 'active'
             : 'idle'
           : 'failed'

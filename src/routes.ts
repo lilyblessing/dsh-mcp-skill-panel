@@ -12,7 +12,7 @@ import { homedir } from 'node:os'
 import { readState, writeState, stateApplyMode, type ApplyMode } from './state'
 import { setSkillFlag, rowDisabledState, isValidSkillName, buildSkillMd } from './preset'
 import { pendingMcp, applyPendingMcp } from './pending'
-import { resolveAgent, collectMcp, collectSkills, confirmedSkills, pruneExpired, DOMAIN_TTL_MS, SKILL_TOGGLE_POLL_MS, type DomainCaches, type Deps } from './collect'
+import { resolveAgent, resolveCollectScopeKey, getSchemasView, mergeSchemas, collectMcp, collectSkills, confirmedSkills, pruneExpired, DOMAIN_TTL_MS, SKILL_TOGGLE_POLL_MS, type DomainCaches, type Deps } from './collect'
 import { isMcpEntry, serverNameOf } from './mcp-entry'
 import { parseMcpServersJson, serversToPatchYaml, serversToRows, type McpServers, type McpRowConfig } from './mcp-convert'
 import { remountWorkspace, projectServerOwner, getActiveWorkspace } from './project-mcp'
@@ -665,7 +665,31 @@ export function makeRoutes(
         for (const [server, info] of Object.entries(catalogRuntime.catalog)) {
           catalog[server] = { tools: info.tools.length, fetchedAt: info.fetchedAt, source: info.source }
         }
-        return { diag: catalogRuntime.diag, catalog }
+        // HTTP 路径 scope 诊断（2026-08-27 filesystem「无工具」取证）：
+        // 复现 collectMcp 的 scope 解析 + schemas 视图，确认 key 是否命中 standing 层链。
+        const scopeDiag: Record<string, unknown> = { error: null }
+        try {
+          const scopeKey = await resolveCollectScopeKey(ctx, undefined)
+          const scoped = scopeKey ? getSchemasView(ctx, caches, scopeKey, DOMAIN_TTL_MS) : []
+          const globalView = getSchemasView(ctx, caches, undefined, DOMAIN_TTL_MS)
+          const merged = scopeKey ? mergeSchemas(scoped, globalView) : scoped
+          const mcpNames = merged
+            .map((s) => String(s?.name ?? ''))
+            .filter((name) => name.startsWith('mcp__'))
+          const scopedMcp = scoped.map((s) => String(s?.name ?? '')).filter((name) => name.startsWith('mcp__'))
+          const globalMcp = globalView.map((s) => String(s?.name ?? '')).filter((name) => name.startsWith('mcp__'))
+          scopeDiag.scopeKeyType = scopeKey ? typeof scopeKey : null
+          scopeDiag.scopedTotal = scoped.length
+          scopeDiag.scopedMcpTools = scopedMcp.length
+          scopeDiag.globalTotal = globalView.length
+          scopeDiag.globalMcpTools = globalMcp.length
+          scopeDiag.mergedMcpTools = mcpNames.length
+          scopeDiag.scopedMcpSample = scopedMcp.slice(0, 20)
+          scopeDiag.globalMcpSample = globalMcp.slice(0, 20)
+        } catch (error) {
+          scopeDiag.error = messageOf(error)
+        }
+        return { diag: catalogRuntime.diag, catalog, scopeDiag }
       }),
     },
     {
