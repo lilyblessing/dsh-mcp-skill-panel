@@ -7,6 +7,11 @@ import { defineConfig } from 'tsdown'
  *
  * 输出命名：tsdown 默认 entryFileNames '[name].js'，两个入口 basename 都是
  * index 会竞争写同一文件 → 必须用 outputOptions 显式命名。
+ *
+ * dts: false（三个 node 配置）：类型声明由 tsc -p tsconfig.dts.json 生成到
+ * lib/types/*.d.ts（package.json types 指向它）。tsdown 0.22 起自带 dts 管线
+ * 会把声明以 .ts 扩展名（惰性绑定表格式）落到 lib/*.ts，与 tsc 产物重复且
+ * 污染产物目录 —— 显式关闭。
  */
 export default defineConfig([
   {
@@ -16,6 +21,7 @@ export default defineConfig([
     target: 'node22',
     platform: 'node',
     external: [/^@deepseek-ai\//, /^node:/],
+    dts: false,
     clean: true,
     sourcemap: false,
     outputOptions: {
@@ -30,6 +36,7 @@ export default defineConfig([
     target: 'node22',
     platform: 'node',
     external: [/^@deepseek-ai\//, /^node:/],
+    dts: false,
     clean: false,
     sourcemap: false,
     outputOptions: {
@@ -45,6 +52,7 @@ export default defineConfig([
     target: 'node22',
     platform: 'node',
     external: [/^@deepseek-ai\//, /^node:/],
+    dts: false,
     clean: false,
     sourcemap: false,
     outputOptions: {
