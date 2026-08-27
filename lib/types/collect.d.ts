@@ -5,7 +5,7 @@
  * 分域缓存句柄。依赖方向：本模块只被 routes.ts / index.ts 消费。
  */
 import type { Context } from '@deepseek-ai/cordis';
-import type { McpView, SkillsView } from './shared-types';
+import type { McpRow, McpView, SkillsView } from './shared-types';
 import type { McpCallController } from './mcpcall';
 import type { CatalogRuntime } from './index';
 /** 分域缓存 TTL：事件驱动失效为主，TTL 只是兜底（事件丢失场景） */
@@ -82,6 +82,16 @@ export declare function getSchemasView(ctx: Context, caches: DomainCaches, scope
     parameters?: unknown;
 }>;
 export declare function resolveAgent(ctx: Context, sessionId: string | undefined): import("@deepseek-ai/dsh-agent").Agent;
+export declare function resolveCollectScopeKey(ctx: Context, sessionId: string | undefined): Promise<object | undefined>;
+/** scope key 解析来源（/debug scopeDiag 展示用）。 */
+export declare function scopeKeySource(): 'agent' | 'standing' | null;
+/** 行状态徽标判定（纯函数，selftest 表驱动回归）。
+ * 语义（2026-08-27 发布前独立审查修正）：active/idle 以 **liveTools**（真实注册）
+ * 为准——displayTools 含 catalog 快照兜底，用它判定 active 会掩盖「scope 解析
+ * 失败但 catalog 有旧快照」的故障现场（面板显示健康而实际工具未注册）。
+ * displayTools 仅用于 tools/tokens 数值展示与停用态回填。
+ */
+export declare function computeStatus(disabled: boolean, running: boolean, liveTools: number): McpRow['status'];
 /** MCP 工具聚合结果：per-server 工具数 + token 估算。tools/change 间隙复用，跳过 schemas 深克隆。 */
 export interface McpAggregate {
     byServer: Map<string, {
@@ -91,6 +101,29 @@ export interface McpAggregate {
     mcpToolsTotal: number;
     mcpTokensTotal: number;
 }
+/**
+ * 按 name 去重合并两个 schemas 视图（scoped 优先）。
+ *
+ * ⚠️ 2026-08-27 实测结论：`tools.schemas()`（无参全局视图）**不含任何 mcp__ 工具**
+ * （全部 mcp 工具注册在 scope 层）→ 本合并当前环境恒为 no-op，属**防御性合并**：
+ * 若未来出现联邦/全局作用域注册的 mcp 工具，此路径才生效。filesystem 等 patch 层
+ * server 此前「无工具」的真正根因是 HTTP 路径 scope key 解析失败（3872206 共享缓存
+ * 修复），与全局视图无关——维护时勿按旧注释误判为「全局 realm 有工具」。
+ * 同名条目 scoped 优先（占位条目会压过全局完整 schema，当前两视图同源不触发）。
+ */
+export declare function mergeSchemas(scoped: Array<{
+    name?: unknown;
+    description?: unknown;
+    parameters?: unknown;
+}>, global: Array<{
+    name?: unknown;
+    description?: unknown;
+    parameters?: unknown;
+}>): Array<{
+    name?: unknown;
+    description?: unknown;
+    parameters?: unknown;
+}>;
 declare function collectMcp(deps: Deps, sessionId: string | undefined): Promise<McpView>;
 declare function collectSkills(deps: Deps, sessionId: string | undefined): Promise<SkillsView>;
 export { collectMcp, collectSkills };
