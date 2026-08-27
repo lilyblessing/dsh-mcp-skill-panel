@@ -23,6 +23,20 @@ export default defineConfig([
     },
   },
   {
+    // mcpServers JSON → dsh-mcp-client 行 的纯转换（独立产物，供 selftest 覆盖）。
+    entry: ['src/mcp-convert.ts'],
+    format: ['esm'],
+    outDir: 'lib',
+    target: 'node22',
+    platform: 'node',
+    external: [/^@deepseek-ai\//, /^node:/],
+    clean: false,
+    sourcemap: false,
+    outputOptions: {
+      entryFileNames: 'mcp-convert.js',
+    },
+  },
+  {
     // 私有 catalog（纯逻辑）单独产物，供 scripts/selftest-mcp.mjs 用临时目录自测；
     // external 与外置铁律一致，不内联任何 @deepseek-ai 运行时。
     entry: ['src/catalog.ts'],

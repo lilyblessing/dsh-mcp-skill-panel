@@ -8,6 +8,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import type { McpRow, McpView, SkillsView } from './shared-types'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
+import { projectServerOwner, getActiveWorkspace } from './project-mcp'
+import { disabledToolsOf } from './tool-disable'
 import type { CatalogServer } from './catalog'
 import { serverOfMcp } from './catalog'
 import type { McpCallController } from './mcpcall'
@@ -216,6 +218,22 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
 
   // MCP：loader 行 × schema 聚合（聚合结果版本化复用）
   const { byServer, mcpToolsTotal, mcpTokensTotal } = getMcpAggregate(ctx, deps.caches, scopeKey, errors)
+  // 共享 schemas 缓存（路径 A/B 同源）：构建 per-server 工具列表（面板工具级禁用用）。
+  const schemas = getSchemasView(ctx, deps.caches, scopeKey, DOMAIN_TTL_MS)
+  const toolsByServer = new Map<string, Array<{ name: string; description: string }>>()
+  for (const schema of schemas) {
+    const name = String(schema?.name ?? '')
+    if (!name.startsWith('mcp__')) continue
+    const server = serverOfMcp(name)
+    if (server === null) continue
+    let list = toolsByServer.get(server)
+    if (!list) {
+      list = []
+      toolsByServer.set(server, list)
+    }
+    list.push({ name, description: String(schema?.description ?? '') })
+  }
+  for (const list of toolsByServer.values()) list.sort((a, b) => a.name.localeCompare(b.name))
 
   const mcp: McpRow[] = []
   // P1 会话边界：读一次 state.json 的 desired 意图（延迟生效模式下与 live disabled 不同，
@@ -225,6 +243,9 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
     for (const entry of ctx.loader.entries()) {
       if (!isMcpEntry(entry)) continue
       const serverName = serverNameOf(entry)
+      // 项目级 MCP：面板始终展示（可开关、标注工作区）；模型可见性由
+      // project-mcp 的 system-prompt/assemble 过滤按会话工作空间严格把控。
+      const projectWorkspace = projectServerOwner(serverName)
       const agg = byServer.get(serverName)
       const liveTools = agg?.tools ?? 0
       const running = entry.fiber !== undefined
@@ -248,6 +269,9 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
             : 'idle'
           : 'failed'
       const transportRaw = mcpEntryConfig(entry)?.transport
+      // 项目行查所属工作区的项目禁用表；全局行查全局表（disabledToolsOf 内部按 owner 分派）
+      const toolDisabled = disabledToolsOf(serverName, projectWorkspace)
+      const toolList = toolsByServer.get(serverName)
       mcp.push({
         entryId: entry.id,
         rowId: entry.options.id,
@@ -257,12 +281,14 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
         running,
         tools: displayTools,
         tokens: displayTokens,
+        toolList: toolList?.map((tool) => ({ name: tool.name, description: tool.description, disabled: toolDisabled.has(tool.name) })) ?? null,
         status,
         modelVisible:
           !disabled &&
           !(deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(serverName) ?? false)),
         desired: rowDesired,
         pending: rowDesired !== undefined ? rowDesired !== disabled : false,
+        workspace: projectWorkspace,
       })
     }
   } catch (error) {
@@ -278,6 +304,7 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
     mcpToolsTotal,
     mcpTokensTotal,
     autoManage: deps.catalogRuntime.autoManage,
+    activeWorkspace: getActiveWorkspace(),
     errors,
   }
 }

@@ -25,12 +25,18 @@ export interface McpRow {
   desired?: boolean
   /** true = 已记录意图但尚未在运行时生效（待下次会话/重启）。 */
   pending?: boolean
+  /** 项目级 MCP 行：所属工作空间根（<workspace>/.dsh/mcps 所在目录）；缺省 = 全局行。 */
+  workspace?: string
+  /** 该 server 的工具列表（面板工具级禁用用；null = 该 server 暂无工具目录）。 */
+  toolList?: Array<{ name: string; description: string; disabled: boolean }> | null
 }
 
 export interface McpView {
   sessionId: string | null
   preset: string | null
   cwd: string | null
+  /** 最近一次会话进入的工作空间（随会话切换更新；添加项目 MCP 的默认目标）。 */
+  activeWorkspace: string | null
   mcp: McpRow[]
   mcpTotal: number
   mcpDisabled: number

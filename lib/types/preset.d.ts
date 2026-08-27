@@ -14,6 +14,13 @@ import type { Context } from '@deepseek-ai/cordis';
 export declare function setRowFlag(text: string, rowId: string, key: string, value: boolean): string;
 /** SKILL.md frontmatter 的 disable-model-invocation 键注入/移除（kebab-case 是唯一合法形式）。 */
 export declare function setSkillFlag(text: string, value: boolean): string;
+/** skill 名是否合法（kebab-case，前端预校验与后端落盘共用）。 */
+export declare function isValidSkillName(name: string): boolean;
+/**
+ * 生成 SKILL.md 文本：frontmatter（name/description）+ 正文。
+ * description 用 JSON 双引号标量（合法 YAML，冒号/换行安全）；正文原样保留。
+ */
+export declare function buildSkillMd(name: string, description: string, body: string): string;
 /** 读取某行当前是否带 disabled: true（true/false/null=无标记）。 */
 export declare function rowDisabledState(text: string, rowId: string): boolean | null;
 /**
