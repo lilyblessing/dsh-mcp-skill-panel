@@ -16,8 +16,9 @@
  *   因此挂载到 loader 根树（对面板枚举/启停/catalog 完全复用），「仅项目会话可见」
  *   由本模块的常开过滤（system-prompt/assemble 按会话 cwd）实现。
  * - 根树 backing 文件 cordis.yml 每次启动被重置为 []，create 触发的 tree.write 无害。
- * - 已知限制：插件 HMR 重载后 projectOwners 内存表清空（挂载的 projmcp-* 行仍在
- *   根树），在下次会话进入该工作空间前项目行会短暂按全局展示；生产中无 HMR 无此现象。
+ * - 已知限制（dev 场景）：插件 HMR 重载后 projectOwners 内存表清空（挂载的 projmcp-* 行仍在
+ *   根树）。apply 早期调用 rebuildOwnersFromState 从 state.json 反向重建 owner 映射，
+ *   消除「下次会话进入前按全局展示/工具禁用作用域错判」的泄漏窗口。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
@@ -27,6 +28,7 @@ import { join } from 'node:path'
 import type { McpServers, McpRowConfig } from './mcp-convert'
 import { parseMcpServersJson, resolveServersEnv, serversToRows } from './mcp-convert'
 import { serverOfMcp } from './catalog'
+import { isMcpEntry, serverNameOf } from './mcp-entry'
 import { readState } from './state'
 import { messageOf } from './util'
 
@@ -61,6 +63,10 @@ interface WorkspaceState {
   /** serverName → loader entryId。 */
   entries: Map<string, string>
   watcher: FSWatcher | undefined
+  /** watch 事件去抖定时器（合并编辑器保存时的连续 change 事件）。 */
+  refreshTimer: NodeJS.Timeout | undefined
+  /** 重扫进行中标志（防止并发 refresh 对同一 state 竞态）。 */
+  refreshing: boolean
 }
 
 const workspaces = new Map<string, WorkspaceState>()
@@ -118,6 +124,7 @@ export async function scanWorkspaceMcp(root: string, warn?: (message: string) =>
     }
     const parsed = parseMcpServersJson(text)
     for (const error of parsed.errors) warn?.(`${file}: ${error}`)
+    for (const warning of parsed.warnings) warn?.(`${file}: ${warning}`)
     // 后写覆盖先写（根目录文件先被收集，子目录在后 → 子目录覆盖根目录）
     for (const [name, server] of Object.entries(parsed.servers)) servers[name] = server
   }
@@ -203,14 +210,9 @@ async function syncRows(ctx: Context, state: WorkspaceState, rows: McpRowConfig[
       }
       continue
     }
-    // serverName 全进程唯一：其他工作空间已占 → 跳过并告警（框架硬约束）
-    const otherOwner = projectOwners.get(serverName)
-    if (otherOwner !== undefined && otherOwner !== state.root) {
-      ctx.logger.warn?.(
-        `mcp-skill-panel: 项目 MCP "${serverName}"（${state.root}）与工作空间 ${otherOwner} 重名，已跳过（serverName 全进程唯一）`,
-      )
-      continue
-    }
+    // serverName 已带路径哈希后缀（projectServerName）：不同工作空间同名 server
+    // 天然拆成不同 serverName，无需再手动查重；loader 全局唯一冲突（哈希碰撞等
+    // 极端情况）由下方 loader.create 抛错 → catch 记录告警兜底。
     try {
       await ctx.loader.create({ ...row, disabled: intentOf(serverName) })
       state.entries.set(serverName, row.id)
@@ -226,6 +228,7 @@ async function disposeWorkspace(ctx: Context, root: string): Promise<void> {
   const state = workspaces.get(root)
   if (!state) return
   workspaces.delete(root)
+  if (state.refreshTimer) clearTimeout(state.refreshTimer)
   state.watcher?.close()
   for (const [serverName, entryId] of [...state.entries]) {
     try {
@@ -251,14 +254,22 @@ async function ensureWorkspace(ctx: Context, root: string): Promise<void> {
   const rows = buildRows(root, servers)
   let state = workspaces.get(root)
   if (!state) {
-    state = { root, entries: new Map(), watcher: undefined }
+    state = { root, entries: new Map(), watcher: undefined, refreshTimer: undefined, refreshing: false }
     workspaces.set(root, state)
   }
   await syncRows(ctx, state, rows)
   if (!state.watcher) {
     try {
+      // 去抖合并连续 change（编辑器保存一个文件常触发 2-3 次事件），
+      // 避免并发 refresh 对同一 state 竞态（loader.create 同 id 并发会抛错）。
       state.watcher = watch(join(root, MCPS_DIR), { recursive: true }, () => {
-        void refresh(ctx, root, state!)
+        if (state.refreshTimer) clearTimeout(state.refreshTimer)
+        state.refreshTimer = setTimeout(() => {
+          state.refreshTimer = undefined
+          void refresh(ctx, root, state!).catch((error) => {
+            ctx.logger.warn?.(`mcp-skill-panel: 项目 MCP 热更新失败（${root}）: ${messageOf(error)}`)
+          })
+        }, RESCAN_DEBOUNCE_MS)
       })
     } catch (error) {
       ctx.logger.warn?.(`mcp-skill-panel: 无法监视 ${join(root, MCPS_DIR)}: ${messageOf(error)}`)
@@ -268,12 +279,18 @@ async function ensureWorkspace(ctx: Context, root: string): Promise<void> {
 
 /** watcher 触发的重扫：配置/目录变化后按新集合同步（热更新）。 */
 async function refresh(ctx: Context, root: string, state: WorkspaceState): Promise<void> {
-  if (!(await isDirectory(join(root, MCPS_DIR)))) {
-    await disposeWorkspace(ctx, root)
-    return
+  if (state.refreshing) return
+  state.refreshing = true
+  try {
+    if (!(await isDirectory(join(root, MCPS_DIR)))) {
+      await disposeWorkspace(ctx, root)
+      return
+    }
+    const servers = await scanWorkspaceMcp(root, (msg) => ctx.logger.warn?.(`mcp-skill-panel: ${msg}`))
+    await syncRows(ctx, state, buildRows(root, servers))
+  } finally {
+    state.refreshing = false
   }
-  const servers = await scanWorkspaceMcp(root, (msg) => ctx.logger.warn?.(`mcp-skill-panel: ${msg}`))
-  await syncRows(ctx, state, buildRows(root, servers))
 }
 
 /* ── 可见性过滤（常开，独立于 autoManage） ────────────────────────────── */
@@ -339,4 +356,30 @@ export function installProjectMcp(ctx: Context): () => void {
 /** 面板添加/外部修改项目 MCP 文件后，强制重扫该工作空间并同步挂载（幂等）。 */
 export async function remountWorkspace(ctx: Context, root: string): Promise<void> {
   await ensureWorkspace(ctx, root)
+}
+
+/**
+ * HMR/热重载后从 state.json 反向重建 projectOwners 映射（幂等，已有数据时跳过）。
+ *
+ * 背景：projectOwners 是模块级内存表，插件 HMR 重载即清空，而 loader 根树上的
+ * projmcp-* 行仍然存在 → 期间项目工具短暂按全局展示、项目级禁用作用域错判。
+ * state.projectMcp（工作空间 → serverName → 禁用意图）保存了 owner 关系，
+ * 以 loader 存活行交叉验证后重建；watcher/entries 由下次 session-start 的
+ * ensureWorkspace 完整恢复。
+ */
+export async function rebuildOwnersFromState(ctx: Context): Promise<void> {
+  if (projectOwners.size > 0) return
+  const stateFile = await readState().catch(() => undefined)
+  const map = stateFile?.projectMcp
+  if (!map) return
+  const live = new Set<string>()
+  for (const entry of ctx.loader.entries()) {
+    if (isMcpEntry(entry)) live.add(serverNameOf(entry))
+  }
+  for (const [workspace, servers] of Object.entries(map)) {
+    if (!servers || typeof servers !== 'object') continue
+    for (const serverName of Object.keys(servers)) {
+      if (live.has(serverName)) projectOwners.set(serverName, workspace)
+    }
+  }
 }
