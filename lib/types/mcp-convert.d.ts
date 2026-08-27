@@ -32,10 +32,11 @@ export interface McpRowConfig {
     name: string;
     config: Record<string, unknown>;
 }
-/** 解析结果：合法 server + 逐条错误。 */
+/** 解析结果：合法 server + 逐条错误 + 非致命警告（如非字符串值被强制转换）。 */
 export interface ParseResult {
     servers: McpServers;
     errors: string[];
+    warnings: string[];
 }
 /** dsh-mcp-client 的插件包名。 */
 export declare const MCP_CLIENT_NAME = "@deepseek-ai/dsh-mcp-client";
