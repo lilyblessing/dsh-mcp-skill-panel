@@ -12,6 +12,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 const catalog = await import(pathToFileURL(join(root, 'lib', 'catalog.js')).href)
 const index = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+const convert = await import(pathToFileURL(join(root, 'lib', 'mcp-convert.js')).href)
 
 let failed = false
 const check = (label, fn) => {
@@ -225,6 +226,215 @@ check('index.Config schema 存在（schemastery Schema）且 inject 含 systemPr
   assert.ok(index.Config) // schemastery Schema 是函数形式
   assert.ok(index.inject.includes('systemPrompt'))
   assert.ok(index.inject.includes('timer'))
+})
+
+// ── mcp-convert：mcpServers JSON → dsh-mcp-client 行（快速迁移转换器） ──────────
+check('parseMcpServersJson：stdio（command+args）', () => {
+  const { servers, errors } = convert.parseMcpServersJson(JSON.stringify({
+    mcpServers: { codegraph: { command: 'codegraph', args: ['serve', '--mcp'] } },
+  }))
+  assert.equal(errors.length, 0)
+  const s = servers.codegraph
+  assert.equal(s.transport, 'stdio')
+  assert.equal(s.command, 'codegraph')
+  assert.deepEqual(s.args, ['serve', '--mcp'])
+})
+
+check('parseMcpServersJson：http（url+headers 含 ${VAR}）', () => {
+  const { servers, errors } = convert.parseMcpServersJson(JSON.stringify({
+    mcpServers: { anysearch: { url: 'https://api.anysearch.com/mcp', headers: { Authorization: 'Bearer ${ANYSEARCH_API_KEY}' } } },
+  }))
+  assert.equal(errors.length, 0)
+  const s = servers.anysearch
+  assert.equal(s.transport, 'streamable-http')
+  assert.equal(s.url, 'https://api.anysearch.com/mcp')
+  assert.equal(s.headers.Authorization, 'Bearer ${ANYSEARCH_API_KEY}')
+})
+
+check('parseMcpServersJson：兼容 type/transport 显式声明', () => {
+  const a = convert.parseMcpServersJson(JSON.stringify({ mcpServers: { x: { type: 'stdio', command: 'a' } } })).servers.x
+  assert.equal(a.transport, 'stdio')
+  const b = convert.parseMcpServersJson(JSON.stringify({ mcpServers: { y: { transport: 'http', url: 'u' } } })).servers.y
+  assert.equal(b.transport, 'streamable-http')
+})
+
+check('parseMcpServersJson：接受裸 mcpServers 映射（无外层包裹）', () => {
+  const { servers, errors } = convert.parseMcpServersJson(JSON.stringify({ github: { command: 'gh' } }))
+  assert.equal(errors.length, 0)
+  assert.equal(servers.github.transport, 'stdio')
+})
+
+check('parseMcpServersJson：坏 JSON / 非法 serverName / 无法推断传输 → 报错不崩溃', () => {
+  assert.ok(convert.parseMcpServersJson('{bad').errors.length > 0)
+  const badName = convert.parseMcpServersJson(JSON.stringify({ 'my server!': { command: 'x' } }))
+  assert.ok(badName.errors.length > 0)
+  assert.equal(badName.servers['my server!'], undefined)
+  const noTransport = convert.parseMcpServersJson(JSON.stringify({ z: { port: 123 } }))
+  assert.ok(noTransport.errors.length > 0)
+})
+
+check('hasEnvRef / toJsTemplate / resolveEnvRefs', () => {
+  assert.ok(convert.hasEnvRef('Bearer ${ANYSEARCH_API_KEY}'))
+  assert.ok(!convert.hasEnvRef('plain text'))
+  assert.equal(convert.toJsTemplate('Bearer ${ANYSEARCH_API_KEY}'), '`Bearer ${process.env.ANYSEARCH_API_KEY}`')
+  process.env.__DSH_TEST_TOKEN = 'tok-123'
+  assert.equal(convert.resolveEnvRefs('Bearer ${__DSH_TEST_TOKEN}'), 'Bearer tok-123')
+  delete process.env.__DSH_TEST_TOKEN
+  // 缺失的保留占位符原样
+  assert.equal(convert.resolveEnvRefs('Bearer ${NOPE_NOPE}'), 'Bearer ${NOPE_NOPE}')
+})
+
+check('serversToRows：id 前缀 + dsh-mcp-client 名称 + config 形状', () => {
+  const rows = convert.serversToRows({
+    codegraph: { serverName: 'codegraph', transport: 'stdio', command: 'codegraph', args: ['a'], env: { K: 'v' } },
+    anysearch: { serverName: 'anysearch', transport: 'streamable-http', url: 'u', headers: { Authorization: 'Bearer ${X}' } },
+  })
+  assert.equal(rows.length, 2)
+  const cg = rows.find((r) => r.id === 'mcp-codegraph')
+  assert.equal(cg.name, '@deepseek-ai/dsh-mcp-client')
+  assert.equal(cg.config.transport, 'stdio')
+  assert.equal(cg.config.command, 'codegraph')
+  assert.deepEqual(cg.config.args, ['a'])
+  const as = rows.find((r) => r.id === 'mcp-anysearch')
+  assert.equal(as.config.transport, 'streamable-http')
+  assert.equal(as.config.url, 'u')
+  // 自定义前缀
+  assert.equal(convert.serversToRows({ c: { serverName: 'c', transport: 'stdio', command: 'x' } }, 'projmcp-abc')[0].id, 'projmcp-abc-c')
+})
+
+check('serversToPatchYaml：生成 - insert: 块且 ${VAR} → !!js 表达式', () => {
+  const yaml = convert.serversToPatchYaml({
+    anysearch: { serverName: 'anysearch', transport: 'streamable-http', url: 'https://api.anysearch.com/mcp', headers: { Authorization: 'Bearer ${ANYSEARCH_API_KEY}' } },
+    plain: { serverName: 'plain', transport: 'stdio', command: 'echo', args: ['hi'] },
+  })
+  assert.ok(yaml.includes('- insert:'))
+  assert.ok(yaml.includes("id: mcp-anysearch"))
+  assert.ok(yaml.includes("name: '@deepseek-ai/dsh-mcp-client'"))
+  // 环境变量插值 → !!js 模板表达式（loader 加载时求值）
+  assert.ok(yaml.includes("!!js '`Bearer ${process.env.ANYSEARCH_API_KEY}`'"))
+  // 无插值的普通字符串保持 JSON 引号形式
+  assert.ok(yaml.includes('command: "echo"'))
+  assert.ok(yaml.includes('  - "hi"'))
+  // 每段 - insert: 块结构完整（两个 server 两段）
+  assert.equal(yaml.split('- insert:').length - 1, 2)
+})
+
+// ── project-mcp：工作空间 .dsh/mcps 扫描（根目录先读、子目录覆盖去重） ──────────
+await checkAsync('scanWorkspaceMcp：根目录 + 子目录都读，子目录覆盖根目录同名 server', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-scan-'))
+  try {
+    const mk = await import('node:fs/promises')
+    // 根目录 mcp.json：codegraph（根）+ anysearch
+    await mk.mkdir(join(dir, '.dsh', 'mcps'), { recursive: true })
+    await mk.writeFile(
+      join(dir, '.dsh', 'mcps', 'mcp.json'),
+      JSON.stringify({ mcpServers: { codegraph: { command: 'codegraph-root' }, anysearch: { url: 'http://root' } } }),
+    )
+    // 子目录 a：覆盖 codegraph（command 变 codegraph-sub）+ 新增 github
+    await mk.mkdir(join(dir, '.dsh', 'mcps', 'a'), { recursive: true })
+    await mk.writeFile(
+      join(dir, '.dsh', 'mcps', 'a', 'mcp.json'),
+      JSON.stringify({ mcpServers: { codegraph: { command: 'codegraph-sub' }, github: { command: 'gh' } } }),
+    )
+    // 子目录 b：新增 exa
+    await mk.mkdir(join(dir, '.dsh', 'mcps', 'b'), { recursive: true })
+    await mk.writeFile(join(dir, '.dsh', 'mcps', 'b', 'mcp.json'), JSON.stringify({ mcpServers: { exa: { url: 'http://exa' } } }))
+
+    const warnings = []
+    const servers = await index.scanWorkspaceMcp(dir, (msg) => warnings.push(msg))
+    // 三个来源的 server 都在（根 2 + 子 a 2 + 子 b 1 = 4 个去重后）
+    assert.deepEqual(Object.keys(servers).sort(), ['anysearch', 'codegraph', 'exa', 'github'])
+    // 子目录覆盖根目录：codegraph 用子目录 a 的 command
+    assert.equal(servers.codegraph.command, 'codegraph-sub')
+    assert.equal(servers.codegraph.transport, 'stdio')
+    // 根目录保留未被覆盖的
+    assert.equal(servers.anysearch.url, 'http://root')
+    assert.equal(warnings.length, 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await checkAsync('scanWorkspaceMcp：无 .dsh/mcps 目录 → 空；坏 JSON 跳过并告警', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-scan-'))
+  try {
+    // 无目录 → 空
+    assert.deepEqual(await index.scanWorkspaceMcp(dir), {})
+    // 坏 JSON → 跳过 + warn
+    const mk = await import('node:fs/promises')
+    await mk.mkdir(join(dir, '.dsh', 'mcps'), { recursive: true })
+    await mk.writeFile(join(dir, '.dsh', 'mcps', 'mcp.json'), '{bad json')
+    const warnings = []
+    const servers = await index.scanWorkspaceMcp(dir, (msg) => warnings.push(msg))
+    assert.deepEqual(servers, {})
+    assert.ok(warnings.length > 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ── add-skill：buildSkillMd / isValidSkillName（创建技能的纯逻辑） ───────────────
+check('isValidSkillName：kebab-case 合法/非法', () => {
+  assert.ok(index.isValidSkillName('codemap'))
+  assert.ok(index.isValidSkillName('my-skill-2'))
+  assert.ok(!index.isValidSkillName('MySkill'))
+  assert.ok(!index.isValidSkillName('my skill'))
+  assert.ok(!index.isValidSkillName('-lead'))
+  assert.ok(!index.isValidSkillName('trail-'))
+  assert.ok(!index.isValidSkillName(''))
+})
+
+check('buildSkillMd：frontmatter + 正文；description 含冒号/引号安全；setSkillFlag 可再注入', () => {
+  const md = index.buildSkillMd('codemap', '当用户询问 "项目结构" 或 file: 关系时', '# codemap\n## Commands\n正文')
+  assert.ok(md.startsWith('---\nname: codemap\n'))
+  assert.ok(md.includes('description: "当用户询问 \\"项目结构\\" 或 file: 关系时"'))
+  assert.ok(md.includes('## Commands'))
+  assert.ok(md.endsWith('正文\n'))
+  // 与既有 setSkillFlag 组合：停用标记可注入/移除且往返一致
+  const disabled = index.setSkillFlag(md, true)
+  assert.ok(disabled.includes('disable-model-invocation: true'))
+  assert.equal(index.setSkillFlag(disabled, false), md)
+})
+
+// ── 工具级禁用作用域：全局（跨工作区） vs 项目（仅所属工作区，需 owner 注册） ─────────
+await checkAsync('setToolDisabled / isToolDisabled：全局禁用无条件生效（persist=false 只动内存）', async () => {
+  await index.loadDisabledTools()
+  await index.setToolDisabled('globalsrv', 'mcp__globalsrv__ping', true, false)
+  assert.ok(index.isToolDisabled('mcp__globalsrv__ping', 'C:\\ws-a'))
+  assert.ok(index.isToolDisabled('mcp__globalsrv__ping', 'C:\\ws-b'))
+  assert.ok(index.isToolDisabled('mcp__globalsrv__ping'))
+  assert.ok(index.disabledToolsOf('globalsrv').has('mcp__globalsrv__ping'))
+  // 恢复：不影响后续用例
+  await index.setToolDisabled('globalsrv', 'mcp__globalsrv__ping', false, false)
+  assert.ok(!index.isToolDisabled('mcp__globalsrv__ping'))
+})
+
+await checkAsync('setToolDisabled：未注册 owner 的 server 视为全局（查询走全局表）', async () => {
+  await index.loadDisabledTools()
+  await index.setToolDisabled('projsrv', 'mcp__projsrv__x', true, false)
+  assert.ok(index.isToolDisabled('mcp__projsrv__x', 'C:\\ws-a'))
+  await index.setToolDisabled('projsrv', 'mcp__projsrv__x', false, false)
+  assert.ok(!index.isToolDisabled('mcp__projsrv__x'))
+})
+
+// ── projectServerName：项目 MCP 的 serverName 加路径哈希前缀（同名不同路径拆成独立服务） ──
+check('projectServerName：不同工作区同名 server 得到不同 serverName（哈希后缀隔离）', () => {
+  const a = index.projectServerName('C:\\ws-a', 'codegraph')
+  const b = index.projectServerName('C:\\ws-b', 'codegraph')
+  // 后缀不同 → 不再是同一 server → 各自独立实例，路径参数互不干扰
+  assert.notEqual(a, b)
+  // 合法 serverName：原名 + '-' + 8 位 hex 后缀，长度 ≤32、字符集合法
+  for (const name of [a, b]) {
+    assert.ok(/^[A-Za-z0-9_-]{1,23}-[0-9a-f]{8}$/.test(name), `invalid: ${name}`)
+    assert.ok(name.length <= 32)
+  }
+  // 原名前置更可读
+  assert.ok(a.startsWith('codegraph-'), `expected name-first form: ${a}`)
+  // 确定性：同一工作区恒等
+  assert.equal(index.projectServerName('C:\\ws-a', 'codegraph'), a)
+  // 长度约束：超长原名的 serverName 截断到 ≤32
+  const long = index.projectServerName('C:\\ws-a', 'this-is-a-very-very-very-long-server-name-abcdef')
+  assert.ok(long.length <= 32)
 })
 
 if (failed) {

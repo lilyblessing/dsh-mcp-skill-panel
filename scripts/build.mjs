@@ -13,6 +13,6 @@ const run = (args) => {
   execFileSync(node, args, { cwd: root, stdio: 'inherit' })
 }
 
-run([join('node_modules', 'tsdown', 'bin', 'tsdown.js'), '-c', 'tsdown.config.ts'])
+run([join('node_modules', 'tsdown', 'dist', 'run.mjs'), '-c', 'tsdown.config.ts'])
 run([join('node_modules', 'typescript', 'bin', 'tsc'), '-p', 'tsconfig.dts.json'])
 console.log('build done')

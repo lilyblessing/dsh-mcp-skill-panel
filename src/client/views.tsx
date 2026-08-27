@@ -5,6 +5,8 @@
  */
 import React, { useCallback, useEffect, useState } from 'react'
 import type { McpRow, McpView, SkillRow, SkillsView } from '../shared-types'
+import { AddMcpModal } from './add-mcp'
+import { AddSkillModal } from './add-skill'
 
 interface Props {
   /** 由 locale 插槽注入：NS 字典的翻译函数 */
@@ -204,6 +206,57 @@ const C = {
     fontSize: 12,
     whiteSpace: 'nowrap' as const,
   },
+  // 工具级控制：折叠开关 / 工具行 / 工具禁用开关
+  toolToggleBtn: {
+    font: 'inherit',
+    cursor: 'pointer',
+    border: 0,
+    background: 'transparent',
+    color: 'var(--dsw-alias-label-tertiary)',
+    padding: '2px 2px',
+    fontSize: 12,
+    alignSelf: 'flex-start' as const,
+  },
+  toolList: {
+    marginTop: 4,
+    borderTop: '1px solid var(--dsw-alias-border-l2)',
+    paddingTop: 6,
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: 4,
+    maxHeight: 220,
+    overflowY: 'auto' as const,
+  },
+  toolRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    fontSize: 12,
+  },
+  toolName: {
+    flex: '0 0 auto',
+    color: 'var(--dsw-alias-label-primary)',
+    fontWeight: 500,
+  },
+  toolDesc: {
+    flex: 1,
+    color: 'var(--dsw-alias-label-tertiary)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
+  },
+  toolSwitch: (disabled: boolean): React.CSSProperties => ({
+    font: 'inherit',
+    cursor: 'pointer',
+    border: 0,
+    borderRadius: 5,
+    padding: '2px 10px',
+    fontSize: 11,
+    flex: '0 0 auto',
+    color: 'var(--dsw-alias-label-inverse, #fff)',
+    background: disabled ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)',
+    whiteSpace: 'nowrap' as const,
+  }),
 }
 
 function formatK(n: number): string {
@@ -241,6 +294,10 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
 
   // 生效时机：immediate（默认）/ next-session
   const [applyMode, setApplyMode] = useState<'immediate' | 'next-session'>('immediate')
+  // 添加 MCP 弹窗可见性
+  const [showAdd, setShowAdd] = useState(false)
+  // 创建技能弹窗可见性
+  const [showAddSkill, setShowAddSkill] = useState(false)
 
   // 分域加载：MCP tab 只拉 MCP 数据（不触发 skill 目录发现），切 tab 时按需刷新。
   // 乱序防护：自增序号，过期响应直接丢弃（快速连点多个开关时慢响应不会覆盖新状态）。
@@ -488,18 +545,30 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
             {view ? `${t('ri.preset')}: ${view.preset ?? '—'} · ${t('ri.session')}: ${view.sessionId ?? '—'}` : ''}
           </p>
         </div>
-        <button
-          type="button"
-          style={C.refresh}
-          onClick={() => {
-            // 手动刷新前先 flush 积压的批量 toggle，避免读到申请前状态
-            void flushMcpBatch()
-            if (tab === 'mcp') loadMcp()
-            else loadSkills()
-          }}
-        >
-          {t('ri.refresh')}
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {tab === 'mcp' && (
+            <button type="button" style={C.refresh} onClick={() => setShowAdd(true)}>
+              {t('ri.addMcp')}
+            </button>
+          )}
+          {tab === 'skill' && (
+            <button type="button" style={C.refresh} onClick={() => setShowAddSkill(true)}>
+              {t('ri.addSkill')}
+            </button>
+          )}
+          <button
+            type="button"
+            style={C.refresh}
+            onClick={() => {
+              // 手动刷新前先 flush 积压的批量 toggle，避免读到申请前状态
+              void flushMcpBatch()
+              if (tab === 'mcp') loadMcp()
+              else loadSkills()
+            }}
+          >
+            {t('ri.refresh')}
+          </button>
+        </div>
       </div>
 
       <div style={C.tabs} role="tablist">
@@ -546,11 +615,29 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
             showWarn={showWarn}
             setBusy={setBusy}
           />
-          <McpPanel state={view as McpView} t={t} busy={busy} onToggle={toggleMcp} statusOf={mcpStatus} applyMode={applyMode} />
+          <McpPanel state={view as McpView} t={t} busy={busy} onToggle={toggleMcp} statusOf={mcpStatus} applyMode={applyMode} loadMcp={loadMcp} />
         </>
       )}
 
       {view && tab === 'skill' && <SkillPanel state={view as SkillsView} t={t} busy={busy} onToggle={toggleSkill} />}
+
+      {showAdd && (
+        <AddMcpModal
+          t={t}
+          workspace={mcp?.activeWorkspace ?? mcp?.cwd ?? null}
+          onClose={() => setShowAdd(false)}
+          onAdded={loadMcp}
+        />
+      )}
+
+      {showAddSkill && (
+        <AddSkillModal
+          t={t}
+          workspace={skills?.cwd ?? null}
+          onClose={() => setShowAddSkill(false)}
+          onAdded={loadSkills}
+        />
+      )}
     </div>
   )
 }
@@ -707,8 +794,39 @@ function McpPanel(props: {
   onToggle: (row: McpRow) => void
   statusOf: (row: McpRow) => { label: string; color: string; bg: string }
   applyMode: 'immediate' | 'next-session'
+  loadMcp: () => void
 }): React.ReactElement {
-  const { state, t, busy, onToggle, statusOf, applyMode } = props
+  const { state, t, busy, onToggle, statusOf, applyMode, loadMcp } = props
+  // 工具级禁用精简：每个 server 展开的工具下拉（已折叠/展开）
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  // 工具行禁用开关临时态（立即生效后由 loadMcp 校准）
+  const [toolBusy, setToolBusy] = useState<Record<string, boolean>>({})
+  const [toolErr, setToolErr] = useState<string | null>(null)
+
+  const toolToggle = useCallback(async (row: McpRow, tool: NonNullable<McpRow['toolList']>[number]) => {
+    const key = `${row.entryId}:${tool.name}`
+    setToolBusy((prev) => ({ ...prev, [key]: true }))
+    setToolErr(null)
+    const token = await (await fetch('/api/mcp-skill-panel/token')).json().then((b) => b.token).catch(() => null)
+    const headers: Record<string, string> = { 'content-type': 'application/json' }
+    if (token) headers['x-panel-token'] = token
+    fetch('/api/mcp-skill-panel/mcp/toolToggle', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ serverName: row.serverName, toolName: tool.name, disabled: !tool.disabled }),
+    })
+      .then((res) => res.json() as Promise<{ ok: boolean; error?: string }>)
+      .then((body) => {
+        if (!body.ok) throw new Error(body.error ?? 'tool toggle failed')
+        loadMcp()
+      })
+      .catch((err: unknown) => {
+        setToolErr(err instanceof Error ? err.message : String(err))
+        loadMcp()
+      })
+      .finally(() => setToolBusy((prev) => ({ ...prev, [key]: false })))
+  }, [])
+
   return (
     <>
       <div style={C.stats}>
@@ -729,6 +847,7 @@ function McpPanel(props: {
           <span style={C.statLabel}>{t('ri.statMcpTokens', { n: formatK(state.mcpTokensTotal) })}</span>
         </div>
       </div>
+      {toolErr && <div style={C.error}>{toolErr}</div>}
       {state.mcp.length === 0 && <div style={C.empty}>{t('ri.empty')}</div>}
       {state.mcp.map((row) => {
         const st = statusOf(row)
@@ -736,6 +855,8 @@ function McpPanel(props: {
         // 有效状态：next-session 且有待生效意图时按意图显示/动作（按钮=翻转意图，可撤销）；
         // immediate 或无 pending 时 = live disabled（原行为）。
         const effDisabled = applyMode === 'next-session' && row.pending ? (row.desired ?? row.disabled) : row.disabled
+        const isOpen = Boolean(expanded[row.entryId])
+        const toolList = row.toolList ?? []
         return (
           <div key={row.entryId} style={C.card}>
             <div style={C.cardTop}>
@@ -773,6 +894,7 @@ function McpPanel(props: {
             <div style={C.cardMeta}>
               {t('ri.toolsCount', { n: row.tools })} · {t('ri.tokensCount', { n: formatK(row.tokens) })}
               {row.transport ? ` · ${t('ri.transport')}: ${row.transport}` : ''}
+              {row.workspace ? ` · ${t('ri.projectBadge')}: ${row.workspace}` : ''}
             </div>
             <p style={C.hint}>
               {row.pending
@@ -782,6 +904,34 @@ function McpPanel(props: {
                   : t('ri.toggleOffHint')
               }
             </p>
+            {toolList.length > 0 && (
+              <>
+                <button type="button" style={C.toolToggleBtn} onClick={() => setExpanded((prev) => ({ ...prev, [row.entryId]: !prev[row.entryId] }))}>
+                  {isOpen ? `▾ ${t('ri.toolListHide')} (${toolList.length})` : `▸ ${t('ri.toolListShow')} (${toolList.length})`}
+                </button>
+                {isOpen && (
+                  <div style={C.toolList}>
+                    {toolList.map((tool) => {
+                      const tBusy = toolBusy[`${row.entryId}:${tool.name}`]
+                      return (
+                        <div key={tool.name} style={C.toolRow}>
+                          <button
+                            type="button"
+                            style={{ ...C.toolSwitch(tool.disabled), ...(tBusy ? C.toggleDisabled : {}) }}
+                            disabled={tBusy}
+                            onClick={() => void toolToggle(row, tool)}
+                          >
+                            {tBusy ? t('ri.pending') : tool.disabled ? t('ri.enable') : t('ri.disable')}
+                          </button>
+                          <span style={C.toolName}>{tool.name.replace(/^mcp__[^_]+__/, '')}</span>
+                          <span style={C.toolDesc}>{tool.description || '—'}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )
       })}
