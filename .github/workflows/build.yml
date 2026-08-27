@@ -105,6 +105,10 @@ jobs:
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add lib/
             git commit -m "chore: rebuild lib artifacts via CI [skip ci]"
+            # actions/checkout 会把 GITHUB_TOKEN 以 http.extraheader 注入 origin，
+            # 优先级高于 URL 内凭据 → push 身份仍是 github-actions[bot]（ruleset 无
+            # bypass 权限，实测 GH013 拒绝）。先摘除 extraheader，再以 App token push。
+            git config --unset-all "http.https://github.com/.extraheader"
             git remote set-url origin "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
             git push
             echo "lib/ artifacts rebuilt and committed"
