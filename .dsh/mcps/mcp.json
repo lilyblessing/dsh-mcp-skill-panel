@@ -1,6 +1,8 @@
 {
   "mcpServers": {
     "anysearch": {
+      "serverName": "anysearch",
+      "transport": "streamable-http",
       "url": "https://api.anysearch.com/mcp",
       "headers": {
         "Authorization": "Bearer ${ANYSEARCH_API_KEY}"

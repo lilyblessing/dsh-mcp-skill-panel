@@ -24,18 +24,20 @@
 
 ## 🎯 核心能力
 
-| 能力 | 说明 |
-| --- | --- |
-| 🟢 **MCP 实时启停** | 停用 → loader entry 卸载（断开连接 + 注销该服务器全部 `mcp__<server>__*` 工具），工具从模型目录**立即消失**，schema token 即时释放；启用 → 重新连接 + 恢复工具，**无需重启** |
-| 🧠 **Skill 启停** | 往 SKILL.md frontmatter 注入/移除 `disable-model-invocation: true`，模型 catalog 实时失效 |
-| 📊 **停用态回填** | 停用的 MCP 卡片仍显示「目录中有多少工具、约多少 token」（来自私有 catalog 的 last-good 快照），决策是否启用更有依据 |
+| 能力                         | 说明                                                                                                                                                                                                                                                                              |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 🟢 **MCP 实时启停**          | 停用 → loader entry 卸载（断开连接 + 注销该服务器全部 `mcp__<server>__*` 工具），工具从模型目录**立即消失**，schema token 即时释放；启用 → 重新连接 + 恢复工具，**无需重启**                                                                                                      |
+| 🧠 **Skill 启停**            | 往 SKILL.md frontmatter 注入/移除 `disable-model-invocation: true`，模型 catalog 实时失效                                                                                                                                                                                         |
+| 📊 **停用态回填**            | 停用的 MCP 卡片仍显示「目录中有多少工具、约多少 token」（来自私有 catalog 的 last-good 快照），决策是否启用更有依据                                                                                                                                                               |
 | 🤖 **AI 中间层（可选开关）** | `autoManage` 开启后：**停用的 MCP 对模型隐藏**，模型经 `mcp_search`（目录检索 top-K 精确 schema）与 `mcp_call`（保活启用 → 插件内执行 → 空闲 30s 自动回收）按需使用；**用户打开的 MCP 保持模型可见**（memory 高灵敏召回、filesystem 直接读写）；AI 临时启用的 server 不污染上下文 |
-| 🔒 **用户启停不被模型干预** | 回收器只回收「AI 从停用态临时启用」的 server；用户手动打开的 server 永不被自动关闭（toggle 时自动清除 AI 标记） |
-| 💾 **重启保持** | MCP 状态经插件状态文件（`~/.dsh/dsh-mcp-skill-panel/state.json`）物化进预设组合文件；catalog 快照持久化（`catalog.json`）重启后仍可回填 |
-| ⚡ **响应快** | 开关点击即翻转（乐观更新 + 服务端确认），分域缓存 + 事件驱动失效（`tools/change` / `skills/change`），MCP 页不触发 skill 目录扫描 |
-| 🌐 **双语界面** | 全部文案 zh/en 双语，跟随 DSH 界面语言；明暗主题适配 |
-| 🪶 **零上下文占用** | 插件自身不注册任何模型工具，不消耗模型注入面（开关关闭时与未安装无异） |
-| ⏱️ **生效时机选项** | 手动开关可选「立即生效」或「下次会话生效」，后者零缓存失效、零额外费用；AI 中间层按需调用始终不触发缓存 miss |
+| 🔒 **用户启停不被模型干预**  | 回收器只回收「AI 从停用态临时启用」的 server；用户手动打开的 server 永不被自动关闭（toggle 时自动清除 AI 标记）                                                                                                                                                                   |
+| 💾 **重启保持**              | MCP 状态经插件状态文件（`~/.dsh/dsh-mcp-skill-panel/state.json`）物化进预设组合文件；catalog 快照持久化（`catalog.json`）重启后仍可回填                                                                                                                                           |
+| ⚡ **响应快**                | 开关点击即翻转（乐观更新 + 服务端确认），分域缓存 + 事件驱动失效（`tools/change` / `skills/change`），MCP 页不触发 skill 目录扫描                                                                                                                                                 |
+| 🌐 **双语界面**              | 全部文案 zh/en 双语，跟随 DSH 界面语言；明暗主题适配                                                                                                                                                                                                                              |
+| 🪶 **零上下文占用**          | 插件自身不注册任何模型工具，不消耗模型注入面（开关关闭时与未安装无异）                                                                                                                                                                                                            |
+| ⏱️ **生效时机选项**          | 手动开关可选「立即生效」或「下次会话生效」，后者零缓存失效、零额外费用；AI 中间层按需调用始终不触发缓存 miss                                                                                                                                                                      |
+| ➕ **快速迁移添加**          | 面板粘贴其它 harness 的 `mcpServers` JSON（Claude Code / Codex 等）→ 转换预览 → 一键添加为全局（写入 profile patch）或项目（`.dsh/mcps/mcp.json`）；`type/transport` 自动推断、`${VAR}` 环境变量自动插值                                                                          |
+| 📁 **项目级 MCP**            | 读取 `<工作空间>/.dsh/mcps/**/mcp.json`（根目录文件先读、子目录按 serverName 覆盖），**仅该项目工作空间的会话可见**（模型层按会话 cwd 过滤）；文件改动热更新，面板同样支持「创建技能」（全局/项目，可上传 SKILL.md 预填）                                                         |
 
 ## 🏗️ 两种形态（面板上的「AI 中间层」开关）
 
@@ -95,12 +97,12 @@ flowchart TD
 
 ### 默认值与生效边界
 
-| 项目 | 说明 |
-| --- | --- |
-| 默认值 | `immediate`（维持历史行为） |
-| 选择 `next-session` | 需在面板显式切换 |
-| 生效边界 | 新会话首次请求前 + DSH 重启 |
-| 当前会话 | 已开会话的后续轮次不受影响 |
+| 项目                | 说明                        |
+| ------------------- | --------------------------- |
+| 默认值              | `immediate`（维持历史行为） |
+| 选择 `next-session` | 需在面板显式切换            |
+| 生效边界            | 新会话首次请求前 + DSH 重启 |
+| 当前会话            | 已开会话的后续轮次不受影响  |
 
 ### 一句话结论
 
@@ -124,22 +126,23 @@ dsh plugin --profile web add "github:lilyblessing/dsh-mcp-skill-panel#main"
 2. **MCP 服务器** 标签页：每张卡片显示服务器名、状态徽标（运行中 / 已停用 / 无工具 / 异常）、**模型可见徽标**（中间层模式下用户打开=可见，停用/AI 临时=隐藏）、工具数与 token 占用估算；点右上角开关启停
 3. **技能** 标签页：每张卡片显示技能名、来源、描述、模型可见徽标；点右上角开关启停
 4. **AI 中间层开关**：开启后停用的 MCP 由模型按需调用（见上节形态说明）；关闭回到经典模式
-5. **手动管理**（可选）：直接编辑预设组合文件（`disabled: true` 行）或 SKILL.md frontmatter（`disable-model-invocation: true`），下次重启/变更即生效
+5. **添加 MCP / 创建技能**：MCP 页右上「添加 MCP」粘贴 `mcpServers` JSON 后可选全局/项目；技能页右上「创建技能」填名称/描述/指令（可上传 SKILL.md 自动预填）
+6. **手动管理**（可选）：直接编辑预设组合文件（`disabled: true` 行）或 SKILL.md frontmatter（`disable-model-invocation: true`），下次重启/变更即生效
 
 > 状态徽标含义：🟢 运行中（有工具）/ ⚪ 已停用 / 🟡 无工具（进程在跑但工具列表为空，多为 server 启动失败或空实现）/ 🔴 异常（未在运行也未停用）。
 
 ## 🔌 HTTP API
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| GET | `/api/mcp-skill-panel/state?session=<id>&part=<mcp\|skills\|all>` | 清单快照；`part` 分域拉取（前端按 tab 懒加载），缺省 all；session 省略时取首个根 agent |
-| POST | `/api/mcp-skill-panel/mcp/toggle` | `{ entryId, disabled }` |
-| POST | `/api/mcp-skill-panel/skill/toggle` | `{ name, disabled }` |
-| GET | `/api/mcp-skill-panel/config` | 读取 AI 中间层开关状态 |
-| POST | `/api/mcp-skill-panel/config` | `{ autoManage: boolean }` 切换 AI 中间层（持久化到 state.json） |
-| GET | `/api/mcp-skill-panel/debug` | catalog 采集诊断（事件计数/快照现场/内存目录摘要），运维排障用 |
-| POST | `/api/mcp-skill-panel/debug/collect` | 手动触发一次 catalog 采集 |
-| GET | `/api/mcp-skill-panel/token` | 取本进程随机令牌（面板 POST 前自动获取并携带 `x-panel-token` 头） |
+| 方法 | 路径                                                              | 说明                                                                                   |
+| ---- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| GET  | `/api/mcp-skill-panel/state?session=<id>&part=<mcp\|skills\|all>` | 清单快照；`part` 分域拉取（前端按 tab 懒加载），缺省 all；session 省略时取首个根 agent |
+| POST | `/api/mcp-skill-panel/mcp/toggle`                                 | `{ entryId, disabled }`                                                                |
+| POST | `/api/mcp-skill-panel/skill/toggle`                               | `{ name, disabled }`                                                                   |
+| GET  | `/api/mcp-skill-panel/config`                                     | 读取 AI 中间层开关状态                                                                 |
+| POST | `/api/mcp-skill-panel/config`                                     | `{ autoManage: boolean }` 切换 AI 中间层（持久化到 state.json）                        |
+| GET  | `/api/mcp-skill-panel/debug`                                      | catalog 采集诊断（事件计数/快照现场/内存目录摘要），运维排障用                         |
+| POST | `/api/mcp-skill-panel/debug/collect`                              | 手动触发一次 catalog 采集                                                              |
+| GET  | `/api/mcp-skill-panel/token`                                      | 取本进程随机令牌（面板 POST 前自动获取并携带 `x-panel-token` 头）                      |
 
 > **写操作鉴权（0.4.7+）**：全部 POST（mcp/skill toggle、config、debug/collect）要求 `x-panel-token` 头与本进程随机令牌一致，否则 401 —— 阻断跨源 / DNS-rebinding 对本地控制端点的盲写；GET 只读端点（state/config/debug/token）保持开放。令牌由客户端在 `/token` 获取并自动携带。
 > 旧前缀 `/api/runtime-inventory/*`（≤0.3.1）仍兼容注册。分域缓存（60s TTL 兜底）由事件驱动精确失效：`tools/change` / `loader/partial-dispose` → MCP 域；`skills/change` → Skill 域。
@@ -195,16 +198,16 @@ sequenceDiagram
 
 ## ✅ 验证清单
 
-| 检查项 | 操作 | 预期 |
-| --- | --- | --- |
-| 面板入口 | 重启后打开设置页 | 出现「MCP 与技能管理面板」，MCP/技能双标签，zh/en 跟随界面语言 |
-| MCP 停用 | 关掉一个服务器开关 | 卡片变「已停用」，新会话工具列表不再含 `mcp__<server>__*`；停用态仍显示目录工具数 |
-| MCP 启用 | 再打开开关 | 工具恢复，**无需重启** |
-| 持久化 | 停用后重启 dsh | 该服务器仍处于停用状态 |
-| Skill 启停 | 点技能开关 | 卡片立即翻转且不回跳；模型目录同步移除/恢复 |
-| 外部变化 | 会话 A 停用某 MCP，会话 B 打开面板 | 无需点刷新即为最新状态 |
-| AI 中间层 | 面板开 autoManage | 停用 server 对模型隐藏、`mcp_search`/`mcp_call` 可用；用户打开的 server 带「模型可见」徽标 |
-| 回收保护 | 模型 mcp_call 后空闲 30s | AI 临时启用的 server 自动停用；用户手动启用的不被回收 |
+| 检查项     | 操作                               | 预期                                                                                       |
+| ---------- | ---------------------------------- | ------------------------------------------------------------------------------------------ |
+| 面板入口   | 重启后打开设置页                   | 出现「MCP 与技能管理面板」，MCP/技能双标签，zh/en 跟随界面语言                             |
+| MCP 停用   | 关掉一个服务器开关                 | 卡片变「已停用」，新会话工具列表不再含 `mcp__<server>__*`；停用态仍显示目录工具数          |
+| MCP 启用   | 再打开开关                         | 工具恢复，**无需重启**                                                                     |
+| 持久化     | 停用后重启 dsh                     | 该服务器仍处于停用状态                                                                     |
+| Skill 启停 | 点技能开关                         | 卡片立即翻转且不回跳；模型目录同步移除/恢复                                                |
+| 外部变化   | 会话 A 停用某 MCP，会话 B 打开面板 | 无需点刷新即为最新状态                                                                     |
+| AI 中间层  | 面板开 autoManage                  | 停用 server 对模型隐藏、`mcp_search`/`mcp_call` 可用；用户打开的 server 带「模型可见」徽标 |
+| 回收保护   | 模型 mcp_call 后空闲 30s           | AI 临时启用的 server 自动停用；用户手动启用的不被回收                                      |
 
 ## ⚠️ 已知限制
 
@@ -240,28 +243,28 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 
 ## 📋 变更日志
 
-| 版本 | 内容 |
-| --- | --- |
+| 版本  | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 0.5.2 | 审计修复（2026-08-24）：reaper×call 竞态（空闲回收 await 后二次检查引用计数，杜绝在途 mcp_call 被误清归属）；mcp_call 参数双编码归一化（normalizeArguments，模型直连把 arguments 填成 JSON 字符串/双编码时循环安全解析）与错误呈现（msgOf JSON 化，杜绝 [object Object]）；scope 钥匙改用 agent 对象（修复重启后 mcp_call 全量「未在超时内注册」，session-boundary 注册层可见）；双缓存统一（getSchemasView 共享 raw schemas，快照/面板两路径 TTL 语义各自保留）；toggleSkill 确认改指数退避；applyStateResidue 按文件分组读盘；preset 原子写；serverOfMcp 收敛；cacheTtlMs 废弃字段移除；/config 鉴权回归修复（独立审查拦截） |
-| 0.5.1 | mcp_call 工具名前缀防御（PR #4）：tool 参数误传注册全名/双重前缀自动归一化（新增 normalizeToolName，循环剥离 mcp__<server>__ 前缀）；其他 server 注册全名立即快速失败并提示裸名（不再白等 toolCallTimeoutMs 60s/300s）；mcp_call schema 描述注明裸名；selftest 新增 4 条回归断言；宿主端到端验证通过 |
-| 0.5.0 | Prompt Cache 优化（P0+P1，issue #1）：中途开关必现 miss 警示条（大包红色 severe 变体、12s 自动消失）；生效时机选项 immediate / next-session（后者记意图待生效队列，新会话 `agent/session-start` 或重启物化时统一应用，当前会话零 miss）；开关 400ms 合并为单次 toggleBatch（单次 invalidateMcp）；applyPendingMcp 增加 state.json 残留兜底（重启/热重载后 desired 与 live 不一致的行自动补齐，外部修改行尊重并清除残留）+ 新增 selftest-pending 链路自测（CI 纳入）；toggleBatch 单项失败不阻断整批；UI 封面更新 |
-| 0.4.9 | 依赖对齐 DSH rc.8 系（rc.8 全链路实测通过）：devDeps 中 10 个 `@deepseek-ai/*` 由 0.1.0-rc.6 → 0.1.0-rc.8，peers 收紧（cordis ^4.0.1 稳定版 / schemastery ^3.18.1 / dsh-scope ^0.1.0-rc.8）；已发布至 npm（0.4.8 首次上架，repository 指回本仓库）+ 新增 Trusted Publishing 自动发布流水线（publish.yml，OIDC 免 token）|
-| 0.4.8 | 构建工程自包含 + CI：14 个 `@deepseek-ai/*` 并入 devDependencies（pin 到 rc.6 系，纯 registry 安装即可 typecheck/build/selftest，无需本机 DSH 闭包）；新增 GitHub Actions 流水线（typecheck→build→verify→selftest；main push 自动重建并 `[skip ci]` 回写 lib 产物）|
-| 0.4.7 | 安全与健壮性加固：toggle 端点校验目标行必须是 MCP 行（防停用任意 loader 行）；全部写端点加进程级 token 鉴权（`x-panel-token`，阻断跨源/DNS-rebinding 盲写）；readBody 限长 64KB；waitRegistered 绑定上下文销毁/AbortSignal（卸载不再挂起 mcp_call）；移除硬编码 DEFAULT_SUMMARY（能力摘要只列真实 server）；client 统一新 API 前缀并自动携带 token；build 顺序修复使 lib/types 产物入库（types 声明不再悬空）；空 package-lock.json 修复 |
-| 0.4.6 | 修复 0.4.5 引入的 catalog 清空事故：prune 增加「loader 视图为空跳过」保护（组合未挂载时序不再删 last-good）；空采集一律不写盘（prev 丢失后空快照不再续写污染） |
-| 0.4.5 | catalog 失效清理：移除 MCP 行 / serverName 重命名后，残留快照从 catalog 与 mcp_search 能力表中自动清除（停用的 server 保留供面板回填） |
-| 0.4.4 | 可维护性重构：index.ts 拆分（state.ts/preset.ts/collect.ts/routes.ts/util.ts/mcp-entry.ts/shared-types.ts）；MCP entry 判定 4 处重复收敛；前后端视图类型单一来源；HTTP 端点样板收敛（defineHandler/ok）；client 平台类型声明替换 any；setSkillFlag 移除残留空行修复；peerDependencies 补全 |
-| 0.4.3 | 性能优化：修复 restore 竞态（用户中途手动打开后 mcp_call 失败不再误关）；装配过滤回合内可见性 Map 缓存（560 次比较→O(1) 查表）；schemas 500ms 窗口复用；catalog 写盘 300ms 防抖合并；state.json 内存态 + 写队列合并；摘要表截断 80 字符；停用态 token 估算缓存；缓存 Map 主动 TTL 清理；snapshotServer 死代码清理 |
-| 0.4.2 | 装配过滤按 server 状态：用户打开的 MCP 工具进模型上下文（memory 高灵敏召回），停用的对模型隐藏、经 mcp_search/mcp_call 按需调用；AI 临时启用不污染上下文；用户手动打开清除 AI 标记（防回收器误关）；面板新增 autoManage 开关 + 模型可见徽标 |
-| 0.4.1 | 修复 catalog 采集链路：apply ctx 下 `agents` 为空导致自动采集恒空（fallback `standingKeyFor` 解析 scope）、last-good 守卫失效、启动早期空快照写盘、写盘竞态；新增 debug 诊断端点；案例复测通过（chrome→mimo 跨 server、calcmcp 连击零重复 spawn + 30s 回收） |
-| 0.4.0 | AI 中间层（`autoManage`）：`mcp_search`/`mcp_call` 按需使用 MCP（保活启用 + 空闲回收 + 装配过滤）；私有 catalog 持久化 + 面板停用态回填目录工具数 |
-| 0.3.2 | API 前缀对齐包名（旧前缀兼容）；本地目录改名 |
-| 0.3.1 | MCP 聚合版本化复用；前端 fetch 乱序防护 |
-| 0.3.0 | 分域端点 + 分域缓存 + 事件驱动失效（tab 懒加载） |
-| 0.2.1 | skill 启停 UI 30s 滞后根因修复（已确认值覆盖陈旧 catalog） |
-| 0.2.0 | 改名「MCP 与技能管理面板」+ GitHub 库 `dsh-mcp-skill-panel` |
-| 0.1.1 | MCP 持久化重构（状态文件 + 启动早期物化），修复运行期写预设文件导致的会话创建失败 |
-| 0.1.0 | 初版：MCP/Skill 清单 + 启停 |
+| 0.5.1 | mcp_call 工具名前缀防御（PR #4）：tool 参数误传注册全名/双重前缀自动归一化（新增 normalizeToolName，循环剥离 mcp**<server>** 前缀）；其他 server 注册全名立即快速失败并提示裸名（不再白等 toolCallTimeoutMs 60s/300s）；mcp_call schema 描述注明裸名；selftest 新增 4 条回归断言；宿主端到端验证通过                                                                                                                                                                                                                                                                                                                           |
+| 0.5.0 | Prompt Cache 优化（P0+P1，issue #1）：中途开关必现 miss 警示条（大包红色 severe 变体、12s 自动消失）；生效时机选项 immediate / next-session（后者记意图待生效队列，新会话 `agent/session-start` 或重启物化时统一应用，当前会话零 miss）；开关 400ms 合并为单次 toggleBatch（单次 invalidateMcp）；applyPendingMcp 增加 state.json 残留兜底（重启/热重载后 desired 与 live 不一致的行自动补齐，外部修改行尊重并清除残留）+ 新增 selftest-pending 链路自测（CI 纳入）；toggleBatch 单项失败不阻断整批；UI 封面更新                                                                                                               |
+| 0.4.9 | 依赖对齐 DSH rc.8 系（rc.8 全链路实测通过）：devDeps 中 10 个 `@deepseek-ai/*` 由 0.1.0-rc.6 → 0.1.0-rc.8，peers 收紧（cordis ^4.0.1 稳定版 / schemastery ^3.18.1 / dsh-scope ^0.1.0-rc.8）；已发布至 npm（0.4.8 首次上架，repository 指回本仓库）+ 新增 Trusted Publishing 自动发布流水线（publish.yml，OIDC 免 token）                                                                                                                                                                                                                                                                                                       |
+| 0.4.8 | 构建工程自包含 + CI：14 个 `@deepseek-ai/*` 并入 devDependencies（pin 到 rc.6 系，纯 registry 安装即可 typecheck/build/selftest，无需本机 DSH 闭包）；新增 GitHub Actions 流水线（typecheck→build→verify→selftest；main push 自动重建并 `[skip ci]` 回写 lib 产物）                                                                                                                                                                                                                                                                                                                                                            |
+| 0.4.7 | 安全与健壮性加固：toggle 端点校验目标行必须是 MCP 行（防停用任意 loader 行）；全部写端点加进程级 token 鉴权（`x-panel-token`，阻断跨源/DNS-rebinding 盲写）；readBody 限长 64KB；waitRegistered 绑定上下文销毁/AbortSignal（卸载不再挂起 mcp_call）；移除硬编码 DEFAULT_SUMMARY（能力摘要只列真实 server）；client 统一新 API 前缀并自动携带 token；build 顺序修复使 lib/types 产物入库（types 声明不再悬空）；空 package-lock.json 修复                                                                                                                                                                                       |
+| 0.4.6 | 修复 0.4.5 引入的 catalog 清空事故：prune 增加「loader 视图为空跳过」保护（组合未挂载时序不再删 last-good）；空采集一律不写盘（prev 丢失后空快照不再续写污染）                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 0.4.5 | catalog 失效清理：移除 MCP 行 / serverName 重命名后，残留快照从 catalog 与 mcp_search 能力表中自动清除（停用的 server 保留供面板回填）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 0.4.4 | 可维护性重构：index.ts 拆分（state.ts/preset.ts/collect.ts/routes.ts/util.ts/mcp-entry.ts/shared-types.ts）；MCP entry 判定 4 处重复收敛；前后端视图类型单一来源；HTTP 端点样板收敛（defineHandler/ok）；client 平台类型声明替换 any；setSkillFlag 移除残留空行修复；peerDependencies 补全                                                                                                                                                                                                                                                                                                                                     |
+| 0.4.3 | 性能优化：修复 restore 竞态（用户中途手动打开后 mcp_call 失败不再误关）；装配过滤回合内可见性 Map 缓存（560 次比较→O(1) 查表）；schemas 500ms 窗口复用；catalog 写盘 300ms 防抖合并；state.json 内存态 + 写队列合并；摘要表截断 80 字符；停用态 token 估算缓存；缓存 Map 主动 TTL 清理；snapshotServer 死代码清理                                                                                                                                                                                                                                                                                                              |
+| 0.4.2 | 装配过滤按 server 状态：用户打开的 MCP 工具进模型上下文（memory 高灵敏召回），停用的对模型隐藏、经 mcp_search/mcp_call 按需调用；AI 临时启用不污染上下文；用户手动打开清除 AI 标记（防回收器误关）；面板新增 autoManage 开关 + 模型可见徽标                                                                                                                                                                                                                                                                                                                                                                                    |
+| 0.4.1 | 修复 catalog 采集链路：apply ctx 下 `agents` 为空导致自动采集恒空（fallback `standingKeyFor` 解析 scope）、last-good 守卫失效、启动早期空快照写盘、写盘竞态；新增 debug 诊断端点；案例复测通过（chrome→mimo 跨 server、calcmcp 连击零重复 spawn + 30s 回收）                                                                                                                                                                                                                                                                                                                                                                   |
+| 0.4.0 | AI 中间层（`autoManage`）：`mcp_search`/`mcp_call` 按需使用 MCP（保活启用 + 空闲回收 + 装配过滤）；私有 catalog 持久化 + 面板停用态回填目录工具数                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 0.3.2 | API 前缀对齐包名（旧前缀兼容）；本地目录改名                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| 0.3.1 | MCP 聚合版本化复用；前端 fetch 乱序防护                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 0.3.0 | 分域端点 + 分域缓存 + 事件驱动失效（tab 懒加载）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 0.2.1 | skill 启停 UI 30s 滞后根因修复（已确认值覆盖陈旧 catalog）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 0.2.0 | 改名「MCP 与技能管理面板」+ GitHub 库 `dsh-mcp-skill-panel`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| 0.1.1 | MCP 持久化重构（状态文件 + 启动早期物化），修复运行期写预设文件导致的会话创建失败                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 0.1.0 | 初版：MCP/Skill 清单 + 启停                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 ## 📄 License
 
