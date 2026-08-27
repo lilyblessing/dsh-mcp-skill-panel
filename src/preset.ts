@@ -24,6 +24,11 @@ function lineSep(text: string): string {
 /**
  * 在组合文件中对 `- id: <rowId>` 行做 `  <key>: <value>` 标记的插入/移除。
  * 逐行文本编辑，保留注释与 !!js 表达式原样（loader 的 yaml.dump 会丢注释，故不用）。
+ *
+ * 语义（2026-08-27 修复）：value=true 保证标记存在且为 true（已有 false 时反转）；
+ * value=false 移除标记。此前 value=true 遇到已存在的 `disabled: false` 会原样返回
+ * （只支持插入/删除不支持反转），导致物化失败后 lastApplied 与文件脱节，
+ * 下次启动被误判「外部修改」而删掉 state 条目（obsidian 设置丢失事故）。
  */
 export function setRowFlag(text: string, rowId: string, key: string, value: boolean): string {
   const nl = lineSep(text)
@@ -36,13 +41,21 @@ export function setRowFlag(text: string, rowId: string, key: string, value: bool
   const block = lines.slice(idx, end)
   const flagRe = new RegExp(`^\\s*${escapeRegExp(key)}:\\s*(true|false)\\s*$`)
   const flagAt = block.findIndex((line) => flagRe.test(line))
-  if (value && flagAt < 0) {
-    lines.splice(idx + 1, 0, `  ${key}: true`)
+  if (flagAt >= 0) {
+    if (value) {
+      // 已有标记但为 false → 替换为 true（反转）；已有 true → 文本不变（幂等）
+      if (/:\s*false\s*$/.test(block[flagAt])) {
+        lines.splice(idx + flagAt, 1, `  ${key}: true`)
+        return lines.join(nl)
+      }
+      return text
+    }
+    // 移除现有标记行（flagAt 是行块内偏移 → 全局偏移为 idx + flagAt）
+    lines.splice(idx + flagAt, 1)
     return lines.join(nl)
   }
-  if (!value && flagAt >= 0) {
-    // flagAt 是行块（block = lines.slice(idx, end)）内的偏移 → 全局偏移为 idx + flagAt
-    lines.splice(idx + flagAt, 1)
+  if (value) {
+    lines.splice(idx + 1, 0, `  ${key}: true`)
     return lines.join(nl)
   }
   return text
@@ -120,7 +133,13 @@ export async function syncPresetFiles(ctx: Context): Promise<number> {
     for (const [rowId, entry] of Object.entries(rows)) {
       const cur = rowDisabledState(text, rowId)
       if (cur !== entry.lastApplied) {
-        // 文件被外部（用户）修改过：尊重现状，放弃对该行的管理
+        // 文件被外部（用户）修改过：尊重现状，不写文件。
+        // 2026-08-27 修复：此前直接跳过（行不进入 next → 条目被永久删除）。
+        // 物化链路 setRowFlag 无法反转 disabled:false 时 lastApplied 与文件脱节，
+        // 会被误判外部修改而把用户设置从 state.json 抹掉（obsidian 事故）。
+        // 改为保留条目：lastApplied 对齐现实（cur），desired 保留（面板仍显示
+        // 意图徽标，可重新 toggle 接管）；desired 与现状一致时自动恢复管理闭环。
+        next[rowId] = { desired: entry.desired, lastApplied: cur }
         continue
       }
       const curBool = cur === true
