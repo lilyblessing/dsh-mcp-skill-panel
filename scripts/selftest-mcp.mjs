@@ -319,6 +319,34 @@ check('serversToPatchYaml：生成 - insert: 块且 ${VAR} → !!js 表达式', 
   assert.equal(yaml.split('- insert:').length - 1, 2)
 })
 
+check('parseMcpServersJson：非字符串 env/headers 值 → 字符串转换 + warnings（不再静默丢弃）', () => {
+  const { servers, errors, warnings } = convert.parseMcpServersJson(
+    JSON.stringify({
+      mcpServers: {
+        demo: { command: 'demo', args: [1, 'ok'], env: { PORT: 3000, TOKEN: { bad: 1 }, OK: 'yes' } },
+      },
+    }),
+  )
+  assert.equal(errors.length, 0)
+  assert.equal(servers.demo.env.PORT, '3000')
+  assert.equal(servers.demo.env.OK, 'yes')
+  assert.deepEqual(servers.demo.args, ['1', 'ok'])
+  assert.ok(warnings.length >= 2, `expected >=2 warnings, got ${warnings.length}`)
+  assert.ok(warnings.some((w) => w.includes('PORT')))
+  assert.ok(warnings.some((w) => w.includes('TOKEN')))
+})
+
+check('toJsTemplate：单引号转义 \\\'，经 YAML 单引号标量翻倍后往返还原（不丢/多引号）', () => {
+  // toJsTemplate 输出 JS 转义 \'  → YAML !!js '...' 包装时 '' 翻倍 → YAML 解析回 \' → JS 求值还原 '
+  const template = convert.toJsTemplate("a'b ${VAR}")
+  assert.ok(template.includes("a\\'b ${process.env.VAR}"), template)
+  const yaml = convert.serversToPatchYaml({
+    q: { serverName: 'q', transport: 'stdio', command: 'echo', env: { K: "a'b ${VAR}" } },
+  })
+  // YAML 单引号标量中 '' 是字面 ' 的转义；\ 保持原样 → 最终 JS 表达式含 \'（合法转义）
+  assert.ok(yaml.includes("!!js '`a\\''b ${process.env.VAR}`'"), 'yaml scalar keeps escaped quote')
+})
+
 // ── project-mcp：工作空间 .dsh/mcps 扫描（根目录先读、子目录覆盖去重） ──────────
 await checkAsync('scanWorkspaceMcp：根目录 + 子目录都读，子目录覆盖根目录同名 server', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-scan-'))

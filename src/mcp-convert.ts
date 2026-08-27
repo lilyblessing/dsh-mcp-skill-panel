@@ -36,10 +36,11 @@ export interface McpRowConfig {
   config: Record<string, unknown>
 }
 
-/** 解析结果：合法 server + 逐条错误。 */
+/** 解析结果：合法 server + 逐条错误 + 非致命警告（如非字符串值被强制转换）。 */
 export interface ParseResult {
   servers: McpServers
   errors: string[]
+  warnings: string[]
 }
 
 /** dsh-mcp-client 的 serverName 约束（存活实例全局唯一 + 命名长度）。 */
@@ -57,21 +58,46 @@ function str(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
-function strArray(value: unknown): string[] | undefined {
-  return Array.isArray(value) && value.every((item) => typeof item === 'string') ? (value as string[]) : undefined
+/**
+ * 字符串数组：number/boolean 项强制转字符串（同行 harness 常见，如 args: [3000]），
+ * 其余非标量项跳过并记警告——不再静默清空整个数组。
+ */
+function strArray(value: unknown, warnings: string[], label: string): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const out: string[] = []
+  for (const item of value) {
+    if (typeof item === 'string') out.push(item)
+    else if (typeof item === 'number' || typeof item === 'boolean') {
+      out.push(String(item))
+      warnings.push(`${label}: ${typeof item} 项已转为字符串 "${String(item)}"`)
+    } else {
+      warnings.push(`${label}: 忽略非标量项（${Array.isArray(item) ? 'array' : typeof item}）`)
+    }
+  }
+  return out
 }
 
-function strDict(value: unknown): Record<string, string> | undefined {
+/**
+ * 字符串字典：number/boolean 值强制转字符串（如 env: { PORT: 3000 }），
+ * 其余非标量值跳过并记警告——不再静默清空整个字段。
+ */
+function strDict(value: unknown, warnings: string[], label: string): Record<string, string> | undefined {
   if (!isPlainObject(value)) return undefined
   const out: Record<string, string> = {}
   for (const [key, item] of Object.entries(value)) {
     if (typeof item === 'string') out[key] = item
+    else if (typeof item === 'number' || typeof item === 'boolean') {
+      out[key] = String(item)
+      warnings.push(`${label}.${key}: ${typeof item} 值已转为字符串 "${String(item)}"`)
+    } else {
+      warnings.push(`${label}.${key}: 忽略非标量值（${Array.isArray(item) ? 'array' : typeof item}）`)
+    }
   }
   return out
 }
 
 /** 解析单个 server 配置；失败返回错误文案。 */
-function parseServer(name: string, value: unknown): McpServerConfig | { error: string } {
+function parseServer(name: string, value: unknown, warnings: string[]): McpServerConfig | { error: string } {
   if (!SERVER_NAME_PATTERN.test(name)) {
     return { error: `server "${name}": serverName 需匹配 [A-Za-z0-9_-]{1,32}` }
   }
@@ -94,12 +120,13 @@ function parseServer(name: string, value: unknown): McpServerConfig | { error: s
   const toolCallTimeoutMs = typeof cfg.toolCallTimeoutMs === 'number' && Number.isFinite(cfg.toolCallTimeoutMs) ? cfg.toolCallTimeoutMs : undefined
   if (transport === 'stdio') {
     if (command === undefined) return { error: `server "${name}": stdio 需要 command` }
+    const label = `server "${name}"`
     return {
       serverName: name,
       transport,
       command,
-      args: strArray(cfg.args) ?? [],
-      env: strDict(cfg.env) ?? {},
+      args: strArray(cfg.args, warnings, `${label}.args`) ?? [],
+      env: strDict(cfg.env, warnings, `${label}.env`) ?? {},
       cwd: str(cfg.cwd),
       toolCallTimeoutMs,
     }
@@ -109,7 +136,7 @@ function parseServer(name: string, value: unknown): McpServerConfig | { error: s
     serverName: name,
     transport,
     url,
-    headers: strDict(cfg.headers) ?? {},
+    headers: strDict(cfg.headers, warnings, `server "${name}".headers`) ?? {},
     toolCallTimeoutMs,
   }
 }
@@ -123,23 +150,24 @@ export function parseMcpServersJson(text: string): ParseResult {
   try {
     raw = JSON.parse(text)
   } catch (error) {
-    return { servers: {}, errors: [`JSON 解析失败: ${error instanceof Error ? error.message : String(error)}`] }
+    return { servers: {}, errors: [`JSON 解析失败: ${error instanceof Error ? error.message : String(error)}`], warnings: [] }
   }
   if (!isPlainObject(raw)) {
-    return { servers: {}, errors: ['期望 JSON 对象（mcpServers 映射）'] }
+    return { servers: {}, errors: ['期望 JSON 对象（mcpServers 映射）'], warnings: [] }
   }
   const map = isPlainObject(raw.mcpServers) ? raw.mcpServers : (raw as Record<string, unknown>)
   const servers: McpServers = {}
   const errors: string[] = []
+  const warnings: string[] = []
   for (const [name, value] of Object.entries(map)) {
-    const parsed = parseServer(name, value)
+    const parsed = parseServer(name, value, warnings)
     if ('error' in parsed) {
       errors.push(parsed.error)
       continue
     }
     servers[name] = parsed
   }
-  return { servers, errors }
+  return { servers, errors, warnings }
 }
 
 /** 字符串是否含 `${VAR}` 环境变量占位。 */
@@ -150,7 +178,9 @@ export function hasEnvRef(value: string): boolean {
 
 /** 把含 `${VAR}` 的字符串转成 JS 模板字面量文本（`!!js` 表达式体）。 */
 export function toJsTemplate(value: string): string {
-  const escaped = value.replace(/\\/g, '\\\\').replace(/`/g, '\\`')
+  // ' 转义为 \'：外层 yamlScalar 用 YAML 单引号标量包装（'' 翻倍），
+  // YAML 解析后 JS 收到 \'（合法转义）→ 求值还原为 '，避免多出引号字符。
+  const escaped = value.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/'/g, "\\'")
   const withEnv = escaped.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, '${process.env.$1}')
   return `\`${withEnv}\``
 }
