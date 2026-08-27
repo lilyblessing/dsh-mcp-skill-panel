@@ -133,6 +133,30 @@ export function resolveAgent(ctx: Context, sessionId: string | undefined) {
   return ctx.agents.list()[0]
 }
 
+/**
+ * 解析面板数据收集的 scope key：agent 作用域优先，不可得时 fallback
+ * `agentPresets.standingKeyFor()`（注册表查询，不依赖 agent 实例）。
+ *
+ * 关键坑（2026-08-27 实测）：HTTP 请求路径（routes 的 httpCtx）下
+ * `agents.roots()/list()` 解析不到/解析到错误的 agent → scopeKey=undefined →
+ * getSchemasView 落到全局视图，而全部 mcp 工具注册在 agent scope 的 schemas
+ * 内 → 面板聚合恒为 0（工具数/工具列表/toolList 全缺，仅 catalog 回填文字仍在）。
+ * 与 index.resolveScopeSchemas（快照路径）保持同一解析策略。
+ */
+export async function resolveCollectScopeKey(ctx: Context, sessionId: string | undefined): Promise<object | undefined> {
+  try {
+    const agent = resolveAgent(ctx, sessionId)
+    if (agent) return scopeOf(agent.ctx)
+  } catch {
+    /* fall through */
+  }
+  try {
+    return await ctx.agentPresets.standingKeyFor()
+  } catch {
+    return undefined
+  }
+}
+
 function baseView(
   ctx: Context,
   agent: ReturnType<typeof resolveAgent>,
@@ -240,7 +264,7 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
   const { ctx } = deps
   const errors: string[] = []
   const agent = resolveAgent(ctx, sessionId)
-  const scopeKey = agent ? scopeOf(agent.ctx) : undefined
+  const scopeKey = await resolveCollectScopeKey(ctx, sessionId)
   const cwd = agent?.session?.header?.cwd ?? undefined
 
   // MCP：loader 行 × schema 聚合（聚合结果版本化复用）
@@ -300,7 +324,13 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
       const transportRaw = mcpEntryConfig(entry)?.transport
       // 项目行查所属工作区的项目禁用表；全局行查全局表（disabledToolsOf 内部按 owner 分派）
       const toolDisabled = disabledToolsOf(serverName, projectWorkspace)
-      const toolList = toolsByServer.get(serverName)
+      let toolList = toolsByServer.get(serverName)
+      if (!toolList && catalogInfo) {
+        // 兜底：schemas 视图缺失该 server（scope 解析异常等）时用 catalog 快照
+        // 构建工具列表（CatalogEntry.name 是全名 mcp__<server>__<tool>，
+        // 与聚合产物和禁用表完全同构）。保证工具级禁用 UI 始终可用。
+        toolList = catalogInfo.tools.map((tool) => ({ name: String(tool.name ?? ''), description: String(tool.description ?? '') }))
+      }
       mcp.push({
         entryId: entry.id,
         rowId: entry.options.id,
