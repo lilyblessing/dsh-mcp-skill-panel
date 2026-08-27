@@ -22,15 +22,10 @@ on:
       - 'tsconfig*.json'
       - 'tsdown.config.ts'
       - 'cordis.patch.yml'
+  # PR 一律触发（不设 paths 过滤）：protect-main ruleset 将 build 列为 required status check，
+  # 若因 paths 过滤被跳过，check 会停在 "Expected" 永久阻塞合并（GitHub 官方确认行为）。
+  # push 保留 paths 过滤：main 上的 lib 回写提交（仅 lib/**）不触发本工作流，避免自循环。
   pull_request:
-    paths:
-      - 'src/**'
-      - 'scripts/**'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'tsconfig*.json'
-      - 'tsdown.config.ts'
-      - 'cordis.patch.yml'
   workflow_dispatch:
 
 concurrency:
@@ -81,17 +76,36 @@ jobs:
             lib/index.js
             lib/catalog.js
             lib/client.js
+            lib/mcp-convert.js
             lib/types
           if-no-files-found: error
 
-      - name: Auto-commit rebuilt lib/ artifacts (main push only)
+      - name: Create GitHub App token (for protected main push)
+        # protect-main ruleset 要求 PR + status checks：默认 GITHUB_TOKEN 无法直推 main。
+        # 以 dsh-ci-bot App token 推送（ruleset bypass list 已授权该 App 整规则集绕过）。
+        # 仅 main push 事件执行此步骤：PR 事件（含 fork PR）不触达 secrets 与本步骤。
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+
+      - name: Auto-commit rebuilt lib/ artifacts (main push only)
+        # 回写只改 lib/**，不在 push paths 内 → 不会重新触发本工作流；
+        # actor 守卫（App bot 自身回写不再执行本步骤）为双保险。
+        if: >-
+          github.ref == 'refs/heads/main' && github.event_name == 'push'
+          && github.actor != 'dsh-ci-bot[bot]'
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           if [ -n "$(git status --porcelain -- lib/)" ]; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add lib/
             git commit -m "chore: rebuild lib artifacts via CI [skip ci]"
+            git remote set-url origin "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
             git push
             echo "lib/ artifacts rebuilt and committed"
           else
