@@ -16,8 +16,9 @@
  *   因此挂载到 loader 根树（对面板枚举/启停/catalog 完全复用），「仅项目会话可见」
  *   由本模块的常开过滤（system-prompt/assemble 按会话 cwd）实现。
  * - 根树 backing 文件 cordis.yml 每次启动被重置为 []，create 触发的 tree.write 无害。
- * - 已知限制：插件 HMR 重载后 projectOwners 内存表清空（挂载的 projmcp-* 行仍在
- *   根树），在下次会话进入该工作空间前项目行会短暂按全局展示；生产中无 HMR 无此现象。
+ * - 已知限制（dev 场景）：插件 HMR 重载后 projectOwners 内存表清空（挂载的 projmcp-* 行仍在
+ *   根树）。apply 早期调用 rebuildOwnersFromState 从 state.json 反向重建 owner 映射，
+ *   消除「下次会话进入前按全局展示/工具禁用作用域错判」的泄漏窗口。
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { McpServers } from './mcp-convert';
@@ -48,3 +49,13 @@ export declare function projectServerName(root: string, name: string): string;
 export declare function installProjectMcp(ctx: Context): () => void;
 /** 面板添加/外部修改项目 MCP 文件后，强制重扫该工作空间并同步挂载（幂等）。 */
 export declare function remountWorkspace(ctx: Context, root: string): Promise<void>;
+/**
+ * HMR/热重载后从 state.json 反向重建 projectOwners 映射（幂等，已有数据时跳过）。
+ *
+ * 背景：projectOwners 是模块级内存表，插件 HMR 重载即清空，而 loader 根树上的
+ * projmcp-* 行仍然存在 → 期间项目工具短暂按全局展示、项目级禁用作用域错判。
+ * state.projectMcp（工作空间 → serverName → 禁用意图）保存了 owner 关系，
+ * 以 loader 存活行交叉验证后重建；watcher/entries 由下次 session-start 的
+ * ensureWorkspace 完整恢复。
+ */
+export declare function rebuildOwnersFromState(ctx: Context): Promise<void>;
