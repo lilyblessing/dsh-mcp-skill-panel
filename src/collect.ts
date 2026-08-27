@@ -144,6 +144,8 @@ export function resolveAgent(ctx: Context, sessionId: string | undefined) {
  * 解法：scope key 在 apply 早期解析一次并缓存（进程级单例），所有路径复用。
  */
 let sharedScopeKey: object | undefined
+/** scope key 解析来源（NIT-1：scopeDiag 现场取证用）：'agent' | 'standing' | null。 */
+let sharedScopeKeySource: 'agent' | 'standing' | null = null
 
 export async function resolveCollectScopeKey(ctx: Context, sessionId: string | undefined): Promise<object | undefined> {
   if (sharedScopeKey !== undefined) return sharedScopeKey
@@ -153,6 +155,7 @@ export async function resolveCollectScopeKey(ctx: Context, sessionId: string | u
       const key = scopeOf(agent.ctx)
       if (key !== undefined) {
         sharedScopeKey = key
+        sharedScopeKeySource = 'agent'
         return key
       }
     }
@@ -163,12 +166,30 @@ export async function resolveCollectScopeKey(ctx: Context, sessionId: string | u
     const key = await ctx.agentPresets.standingKeyFor()
     if (key !== undefined) {
       sharedScopeKey = key as object
+      sharedScopeKeySource = 'standing'
       return key as object
     }
   } catch {
     /* ignore */
   }
   return sharedScopeKey
+}
+
+/** scope key 解析来源（/debug scopeDiag 展示用）。 */
+export function scopeKeySource(): 'agent' | 'standing' | null {
+  return sharedScopeKeySource
+}
+
+/** 行状态徽标判定（纯函数，selftest 表驱动回归）。
+ * 语义（2026-08-27 发布前独立审查修正）：active/idle 以 **liveTools**（真实注册）
+ * 为准——displayTools 含 catalog 快照兜底，用它判定 active 会掩盖「scope 解析
+ * 失败但 catalog 有旧快照」的故障现场（面板显示健康而实际工具未注册）。
+ * displayTools 仅用于 tools/tokens 数值展示与停用态回填。
+ */
+export function computeStatus(disabled: boolean, running: boolean, liveTools: number): McpRow['status'] {
+  if (disabled) return 'disabled'
+  if (!running) return 'failed'
+  return liveTools > 0 ? 'active' : 'idle'
 }
 
 function baseView(
@@ -194,11 +215,13 @@ export interface McpAggregate {
 
 /**
  * 按 name 去重合并两个 schemas 视图（scoped 优先）。
- * 面板聚合需要「agent scope + 全局视图」并集：
- * profile patch 层（cordis.patch.yml）与根树直接创建的 server（如 filesystem、
- * web-fetch-http）工具注册在全局 realm，不在 agent scope 的 schemas 内，
- * 只查 scoped 会漏掉这些 server（面板显示无工具、无工具级禁用列表）。
- * 纯函数，selftest 可覆盖。
+ *
+ * ⚠️ 2026-08-27 实测结论：`tools.schemas()`（无参全局视图）**不含任何 mcp__ 工具**
+ * （全部 mcp 工具注册在 scope 层）→ 本合并当前环境恒为 no-op，属**防御性合并**：
+ * 若未来出现联邦/全局作用域注册的 mcp 工具，此路径才生效。filesystem 等 patch 层
+ * server 此前「无工具」的真正根因是 HTTP 路径 scope key 解析失败（3872206 共享缓存
+ * 修复），与全局视图无关——维护时勿按旧注释误判为「全局 realm 有工具」。
+ * 同名条目 scoped 优先（占位条目会压过全局完整 schema，当前两视图同源不触发）。
  */
 export function mergeSchemas(
   scoped: Array<{ name?: unknown; description?: unknown; parameters?: unknown }>,
@@ -328,13 +351,7 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
       const displayTools = liveTools > 0 ? liveTools : catalogInfo?.tools.length ?? 0
       const displayTokens =
         liveTools > 0 ? (agg?.tokens ?? 0) : catalogTokens(deps.catalogRuntime, serverName, catalogInfo)
-      const status: McpRow['status'] = disabled
-        ? 'disabled'
-        : running
-          ? displayTools > 0
-            ? 'active'
-            : 'idle'
-          : 'failed'
+      const status = computeStatus(disabled, running, liveTools)
       const transportRaw = mcpEntryConfig(entry)?.transport
       // 项目行查所属工作区的项目禁用表；全局行查全局表（disabledToolsOf 内部按 owner 分派）
       const toolDisabled = disabledToolsOf(serverName, projectWorkspace)

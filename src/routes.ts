@@ -12,7 +12,7 @@ import { homedir } from 'node:os'
 import { readState, writeState, stateApplyMode, type ApplyMode } from './state'
 import { setSkillFlag, rowDisabledState, isValidSkillName, buildSkillMd } from './preset'
 import { pendingMcp, applyPendingMcp } from './pending'
-import { resolveAgent, resolveCollectScopeKey, getSchemasView, mergeSchemas, collectMcp, collectSkills, confirmedSkills, pruneExpired, DOMAIN_TTL_MS, SKILL_TOGGLE_POLL_MS, type DomainCaches, type Deps } from './collect'
+import { resolveAgent, resolveCollectScopeKey, scopeKeySource, getSchemasView, mergeSchemas, collectMcp, collectSkills, confirmedSkills, pruneExpired, DOMAIN_TTL_MS, SKILL_TOGGLE_POLL_MS, type DomainCaches, type Deps } from './collect'
 import { isMcpEntry, serverNameOf } from './mcp-entry'
 import { parseMcpServersJson, serversToPatchYaml, serversToRows, type McpServers, type McpRowConfig } from './mcp-convert'
 import { remountWorkspace, projectServerOwner, getActiveWorkspace } from './project-mcp'
@@ -679,6 +679,7 @@ export function makeRoutes(
           const scopedMcp = scoped.map((s) => String(s?.name ?? '')).filter((name) => name.startsWith('mcp__'))
           const globalMcp = globalView.map((s) => String(s?.name ?? '')).filter((name) => name.startsWith('mcp__'))
           scopeDiag.scopeKeyType = scopeKey ? typeof scopeKey : null
+          scopeDiag.scopeKeySource = scopeKeySource()
           scopeDiag.scopedTotal = scoped.length
           scopeDiag.scopedMcpTools = scopedMcp.length
           scopeDiag.globalTotal = globalView.length
