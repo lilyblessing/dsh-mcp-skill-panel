@@ -46,7 +46,7 @@ import { makeRoutes } from './routes'
 import { readState, writeState, setStateAiOwner, clearStateAiOwner } from './state'
 import { syncPresetFiles } from './preset'
 import { applyPendingMcp } from './pending'
-import { installProjectMcp } from './project-mcp'
+import { installProjectMcp, rebuildOwnersFromState } from './project-mcp'
 import { loadDisabledTools, installToolDisableFilter } from './tool-disable'
 import { messageOf } from './util'
 
@@ -339,7 +339,17 @@ function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config, 
 
 export function apply(ctx: Context, config: Config = {}): void {
   // 启动早期加载 MCP 工具级禁用集合（memory Map，装配过滤同步读）。
-  void loadDisabledTools().catch(() => {})
+  // 注意：加载是异步的，首个装配回合前禁用表可能未就绪（毫秒级窗口）；
+  // 失败必须留日志（否则用户以为已禁用、实际全放行）。
+  void loadDisabledTools().catch((error: unknown) => {
+    ctx.logger.warn(`mcp-skill-panel: 加载工具级禁用表失败: ${messageOf(error)}`)
+  })
+
+  // HMR/热重载兜底：从 state.json 反向重建项目 MCP owner 映射（防项目工具
+  // 在下次 session-start 前短暂按全局展示/禁用作用域错判）。
+  void rebuildOwnersFromState(ctx).catch((error: unknown) => {
+    ctx.logger.warn(`mcp-skill-panel: 重建项目 MCP owner 映射失败: ${messageOf(error)}`)
+  })
 
   // 启动早期物化 MCP 启停意图（仅当无会话在跑时；有会话则下次重启再物化）。
   // 不阻塞 apply；失败只记日志，不拖累插件挂载。

@@ -249,6 +249,13 @@ async function toggleSkill(deps: Deps, skillName: string, disabled: boolean, ses
 /* ── 添加 MCP（快速迁移）：mcpServers JSON → 全局 profile patch / 项目 .dsh/mcps ── */
 
 /**
+ * 路由写文件队列：串行化 appendGlobalPatch / writeProjectMcp 的「读-改-写」。
+ * 并发 POST（或多会话同时添加）若各自以旧内容为基底写盘，
+ * 先写者的内容会被后写者整体覆盖丢失 → 全部走同一 Promise 链。
+ */
+let fileWriteChain: Promise<unknown> = Promise.resolve()
+
+/**
  * 定位 profile 的用户 patch 层（<profile>/cordis.patch.yml）。
  * 根树 backing 文件是 <profile>/cordis.yml（每次启动重置为 []），
  * patch 与其同目录；从任一 root 树 entry 的 tree.filename 反推。
@@ -259,7 +266,7 @@ function profilePatchPath(ctx: Context): string {
     const file = tree?.filename
     if (typeof file === 'string' && basename(file) === 'cordis.yml') return join(dirname(file), 'cordis.patch.yml')
   }
-  throw new Error('无法定位 profile 的 cordis.patch.yml（根树未挂文件）')
+  throw new Error('无法定位 profile 补丁文件 cordis.patch.yml（未找到 cordis.yml 根树；请确认 profile 已正常挂载后重试）')
 }
 
 /** 已存在检查：loader 存活行或 patch 文本里已有同 id。 */
@@ -276,39 +283,50 @@ function existingRowIds(ctx: Context, patchText: string): Set<string> {
   return ids
 }
 
-/** 追加 `- insert:` patch 块到 profile cordis.patch.yml（原子写，跟随原换行风格）。 */
-async function appendGlobalPatch(ctx: Context, yamlBlock: string): Promise<{ file: string }> {
-  const file = profilePatchPath(ctx)
-  const existing = await readFile(file, 'utf8').catch(() => '')
-  const sep = existing.includes('\r\n') ? '\r\n' : '\n'
-  const text = existing.length > 0 && !existing.endsWith('\n') ? existing + sep : existing
-  const next = text + yamlBlock.replace(/\r?\n/g, sep)
-  await writeFile(`${file}.tmp`, next, 'utf8')
-  await rename(`${file}.tmp`, file)
-  return { file }
+/** 追加 `- insert:` patch 块到 profile cordis.patch.yml（串行排队 + 原子写 + 跟随原换行风格）。 */
+function appendGlobalPatch(ctx: Context, yamlBlock: string): Promise<{ file: string }> {
+  // 读-改-写整体进入全局写队列：并发请求下后到者基于先到者的写盘结果继续。
+  const run = fileWriteChain.then(async () => {
+    const file = profilePatchPath(ctx)
+    const existing = await readFile(file, 'utf8').catch(() => '')
+    const sep = existing.includes('\r\n') ? '\r\n' : '\n'
+    const text = existing.length > 0 && !existing.endsWith('\n') ? existing + sep : existing
+    const next = text + yamlBlock.replace(/\r?\n/g, sep)
+    await writeFile(`${file}.tmp`, next, 'utf8')
+    await rename(`${file}.tmp`, file)
+    return { file }
+  })
+  // 链尾兜底：单次失败不阻塞后续排队请求
+  fileWriteChain = run.catch(() => undefined)
+  return run
 }
 
-/** 把 servers 合并写入 <workspace>/.dsh/mcps/mcp.json（新建 server 覆盖同名旧值）。 */
-async function writeProjectMcp(workspace: string, servers: McpServers): Promise<{ file: string }> {
-  const mcpsDir = join(workspace, '.dsh', 'mcps')
-  const file = join(mcpsDir, 'mcp.json')
-  await mkdir(mcpsDir, { recursive: true })
-  let existing: Record<string, unknown> = {}
-  try {
-    const parsed = JSON.parse(await readFile(file, 'utf8')) as unknown
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>
-  } catch {
-    // 文件不存在或损坏：从空对象重建
-  }
-  let map: Record<string, unknown> = {}
-  if (existing.mcpServers && typeof existing.mcpServers === 'object' && !Array.isArray(existing.mcpServers)) {
-    map = existing.mcpServers as Record<string, unknown>
-  }
-  for (const [name, server] of Object.entries(servers)) map[name] = server
-  const payload = { ...existing, mcpServers: map }
-  await writeFile(`${file}.tmp`, JSON.stringify(payload, null, 2), 'utf8')
-  await rename(`${file}.tmp`, file)
-  return { file }
+/** 把 servers 合并写入 <workspace>/.dsh/mcps/mcp.json（新建 server 覆盖同名旧值；读-改-写串行化）。 */
+function writeProjectMcp(workspace: string, servers: McpServers): Promise<{ file: string }> {
+  // 同一工作区并发 add 的场景（多会话）：排队保证 merge 基底是最新内容，不丢更新。
+  const run = fileWriteChain.then(async () => {
+    const mcpsDir = join(workspace, '.dsh', 'mcps')
+    const file = join(mcpsDir, 'mcp.json')
+    await mkdir(mcpsDir, { recursive: true })
+    let existing: Record<string, unknown> = {}
+    try {
+      const parsed = JSON.parse(await readFile(file, 'utf8')) as unknown
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>
+    } catch {
+      // 文件不存在或损坏：从空对象重建
+    }
+    let map: Record<string, unknown> = {}
+    if (existing.mcpServers && typeof existing.mcpServers === 'object' && !Array.isArray(existing.mcpServers)) {
+      map = existing.mcpServers as Record<string, unknown>
+    }
+    for (const [name, server] of Object.entries(servers)) map[name] = server
+    const payload = { ...existing, mcpServers: map }
+    await writeFile(`${file}.tmp`, JSON.stringify(payload, null, 2), 'utf8')
+    await rename(`${file}.tmp`, file)
+    return { file }
+  })
+  fileWriteChain = run.catch(() => undefined)
+  return run
 }
 
 /** 全局添加：写入 profile patch + 立即挂载到 loader（粘贴即用，重启由 patch 承接）。 */
@@ -416,8 +434,14 @@ async function addSkill(
   if (await pathExists(dir)) throw new Error(`技能已存在：${dir}`)
   await mkdir(dir, { recursive: true })
   const file = join(dir, 'SKILL.md')
-  await writeFile(`${file}.tmp`, buildSkillMd(name, description, body), 'utf8')
-  await rename(`${file}.tmp`, file)
+  try {
+    // 'wx'：目标不存在才创建 → 并发同名创建时后到者抛 EEXIST（不再互相覆盖）。
+    // 单文件小内容直接独占写，原子性由 wx 语义保证。
+    await writeFile(file, buildSkillMd(name, description, body), { encoding: 'utf8', flag: 'wx' })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`技能已存在：${dir}`)
+    throw error
+  }
   return { path: file }
 }
 
@@ -674,10 +698,10 @@ export function makeRoutes(
         // 快速迁移预览：粘贴的 mcpServers JSON → 解析 + 转 dsh-mcp-client YAML patch
         const parsed = JSON.parse((await readBody(req)) || '{}') as { json?: string }
         if (typeof parsed.json !== 'string' || parsed.json.trim().length === 0) throw new Error('json is required')
-        const { servers, errors } = parseMcpServersJson(parsed.json)
+        const { servers, errors, warnings } = parseMcpServersJson(parsed.json)
         if (errors.length > 0) throw new Error(errors.join('；'))
         if (Object.keys(servers).length === 0) throw new Error('未解析出任何 MCP server')
-        return { names: Object.keys(servers), yaml: serversToPatchYaml(servers) }
+        return { names: Object.keys(servers), yaml: serversToPatchYaml(servers), warnings }
       }, true),
     },
     {
@@ -692,7 +716,7 @@ export function makeRoutes(
         }
         if (typeof parsed.json !== 'string' || parsed.json.trim().length === 0) throw new Error('json is required')
         const target = parsed.target === 'project' ? 'project' : 'global'
-        const { servers, errors } = parseMcpServersJson(parsed.json)
+        const { servers, errors, warnings } = parseMcpServersJson(parsed.json)
         if (errors.length > 0) throw new Error(`转换失败：${errors.join('；')}`)
         if (Object.keys(servers).length === 0) throw new Error('没有可添加的 MCP server')
         if (target === 'global') {
@@ -701,7 +725,7 @@ export function makeRoutes(
             throw new Error(`全部跳过（已存在或挂载失败）：${result.skipped.join('、') || '未知原因'}`)
           }
           invalidateMcp()
-          return { target, ...result }
+          return { target, ...result, warnings }
         }
         // project：写入 <workspace>/.dsh/mcps/mcp.json 并重扫挂载（立即生效）
         // 目标工作区：显式传参 > 最近进入会话的工作区（随切换更新）> resolveAgent 兜底
@@ -713,7 +737,7 @@ export function makeRoutes(
         const written = await writeProjectMcp(workspace, servers)
         await remountWorkspace(ctx, workspace)
         invalidateMcp()
-        return { target: 'project', ...written, workspace, added: Object.keys(servers).length }
+        return { target: 'project', ...written, workspace, added: Object.keys(servers).length, warnings }
       }, true),
     },
   ]
