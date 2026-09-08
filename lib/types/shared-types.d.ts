@@ -25,6 +25,13 @@ export interface McpRow {
     pending?: boolean;
     /** 项目级 MCP 行：所属工作空间根（<workspace>/.dsh/mcps 所在目录）；缺省 = 全局行。 */
     workspace?: string;
+    /**
+     * 行来源（rc.1 standing 组合兜底新增）：
+     * - 'live' = ctx.loader.entries() 真实行（可 toggle/entry.update）
+     * - 'preset' = compositionInventory standing 快照行（rc.1 preset 行不在 loader.entries，
+     *   开关走 state.json desired 意图 + 下次启动物化，面板置 pending）
+     */
+    source?: 'live' | 'preset';
     /** 该 server 的工具列表（面板工具级禁用用；null = 该 server 暂无工具目录）。 */
     toolList?: Array<{
         name: string;

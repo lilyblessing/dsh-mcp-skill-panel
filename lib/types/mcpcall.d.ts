@@ -44,6 +44,14 @@ export interface McpControlCtx {
     resolveEntry(serverName: string): Entry | undefined;
     /** server 自己的注册/调用超时（读 entry config 的 toolCallTimeoutMs，缺省回退）。 */
     serverTimeoutMs(serverName: string): number;
+    /**
+     * rc.1 standing 组合兜底超时（窄场景）：loader 有行但缺 toolCallTimeoutMs 时，
+     * 从 preset 快照补读。loader 无行（mcp_call 预设行）仍走「不在 loader 中」返回，
+     * 预设行直通调用是后续修复，本 PR 定为仅面板修复（见 toggleMcp 预设分支注释）。
+     * 返回 undefined = preset 也无该 server，调用方回退默认超时。
+     * 调用方应做 TTL 缓存（inventory+resolve+read 较重），见 index.ts 闭包。
+     */
+    presetTimeoutMs?(serverName: string): Promise<number | undefined>;
     /** AI-owner 标记：上次自动开启该 entry 的时间戳。 */
     setAiOwner(entryId: string, at: number): Promise<void>;
     clearAiOwner(entryId: string): Promise<void>;

@@ -12,6 +12,7 @@ import { homedir } from 'node:os'
 import { readState, writeState, stateApplyMode, type ApplyMode } from './state'
 import { setSkillFlag, rowDisabledState, isValidSkillName, buildSkillMd } from './preset'
 import { pendingMcp, applyPendingMcp } from './pending'
+import { findPresetRowByEntryId } from './preset-mcp'
 import { resolveAgent, resolveCollectScopeKey, scopeKeySource, getSchemasView, mergeSchemas, collectMcp, collectSkills, confirmedSkills, pruneExpired, DOMAIN_TTL_MS, SKILL_TOGGLE_POLL_MS, type DomainCaches, type Deps } from './collect'
 import { isMcpEntry, serverNameOf } from './mcp-entry'
 import { parseMcpServersJson, serversToPatchYaml, serversToRows, type McpServers, type McpRowConfig } from './mcp-convert'
@@ -131,7 +132,57 @@ function handleAny(entries: Array<{ method: 'GET' | 'POST'; run: (req: Req) => P
 async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMode?: ApplyMode) {
   const { ctx } = deps
   const mode = applyMode ?? stateApplyMode(await readState())
-  const entry = ctx.loader.resolve(entryId)
+  let entry: Awaited<ReturnType<Context['loader']['resolve']>> | undefined
+  try {
+    entry = ctx.loader.resolve(entryId)
+  } catch {
+    entry = undefined
+  }
+  // rc.1 standing 组合兜底：preset 行不在 loader.entries/resolve 里（resolve 抛
+  // "cannot resolve entry"）。行以 source:'preset' 进面板，开关走 state.json
+  // desired 意图（恒 pending），由 syncPresetFiles/applyStateResidue 物化/补齐。
+  if (!entry) {
+    const found = await findPresetRowByEntryId(ctx, entryId)
+    if (found) {
+      const state = await readState()
+      state.mcp ??= {}
+      state.mcp[found.presetPath] ??= {}
+      // lastApplied 与 live 路径一致取文件实际状态（preset.ts:rowDisabledState），
+      // 读不到文件才回落 inventory 值（防 standing/文件漂移误判外部修改）。
+      let fileState: boolean | null = found.row.disabled
+      try {
+        const { rowDisabledState } = await import('./preset')
+        fileState = rowDisabledState(await readFile(found.presetPath, 'utf8'), found.row.rowId)
+      } catch {
+        fileState = found.row.disabled
+      }
+      state.mcp[found.presetPath][found.row.rowId] = { desired: disabled, lastApplied: fileState }
+      await writeState(state)
+      // 内存队列同样记录（pending 徽标 + 下次边界 applyPendingMcp 尝试 entry.update，
+      // 行仍不可 resolve 时保留队列，见 pending.ts:50-53 行失效语义——此处反向：
+      // 找不到才保留意图；若将来行回到 loader，边界可正常应用）。
+      pendingMcp.set(entryId, { entryId, file: found.presetPath, rowId: found.row.rowId, disabled })
+      if (!disabled && deps.controller) {
+        deps.controller.markUserEnabled(found.row.serverName)
+      }
+      return {
+        entryId,
+        rowId: found.row.rowId,
+        serverName: found.row.serverName,
+        disabled,
+        desired: disabled,
+        running: found.row.running,
+        persisted: true,
+        file: found.presetPath,
+        applied: false,
+        pending: true,
+        source: 'preset' as const,
+      }
+    }
+  }
+  if (!entry) {
+    throw new Error(`entry "${entryId}" is not an MCP row`)
+  }
   // 只允许启停 MCP 行：防止调用方传入任意 loader 行（含核心/其他插件行）被误停用。
   if (!isMcpEntry(entry)) {
     throw new Error(`entry "${entryId}" is not an MCP row`)

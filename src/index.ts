@@ -42,6 +42,7 @@ export { normalizeToolName, normalizeArguments, msgOf } from './mcpcall'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
 import type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
 import { createDomainCaches, getSchemasView, resolveCollectScopeKey, type DomainCaches } from './collect'
+import { listPresetMcpRows } from './preset-mcp'
 import { makeRoutes } from './routes'
 import { readState, writeState, setStateAiOwner, clearStateAiOwner } from './state'
 import { syncPresetFiles } from './preset'
@@ -65,6 +66,8 @@ export { readState, writeState } from './state'
 export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending'
 // 工具级禁用作用域（selftest 回归护栏：全局 vs 项目工作区隔离）
 export { loadDisabledTools, setToolDisabled, isToolDisabled, disabledToolsOf } from './tool-disable'
+// rc.1 standing 组合 preset 行解析（selftest 回归护栏：parsePresetMcpText 文本抽取 + mcp-anki 例外）
+export { parsePresetMcpText } from './preset-mcp'
 
 export const name = 'runtime-inventory'
 
@@ -298,6 +301,9 @@ async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime, caches: Do
 function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config, caches: DomainCaches): McpControlCtx {
   // 默认值与 Config schema 的 .default() 一致：schema 生效后 config 必有值，
   // ?? 是「config 未经 schema 直接传入」时的防御性兜底（P2-10 收敛说明）。
+  // preset 超时缓存（presetId+serverName → 超时/ms，有效 60s）：inventory+resolve+read
+  // 每次 mcp_call 都做太重，key 含 presetId（切 preset 即换 key，天然失效）。
+  const presetTimeoutCache = new Map<string, { at: number; timeout: number | undefined }>()
   return {
     keepAliveMs: config.keepAliveMs ?? 30_000,
     searchLimitDefault: config.searchLimitDefault ?? 5,
@@ -310,6 +316,24 @@ function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config, 
     persistCatalog: () => persistCatalog(() => ctx, runtime),
     resolveEntry: (serverName) => findMcpEntry(ctx, serverName),
     serverTimeoutMs: (serverName) => serverTimeoutMs(ctx, serverName),
+    presetTimeoutMs: async (serverName) => {
+      // rc.1 standing 组合兜底（窄场景）：仅 loader 有行但缺 toolCallTimeoutMs 时补读；
+      // loader 无行的 mcp_call 预设行仍返回「不在 loader 中」（预设行直通是后续修复）。
+      try {
+        const agent = ctx.agents.roots()[0] ?? ctx.agents.list()[0]
+        const presetId = agent ? (ctx.agentPresets.composedPreset(agent.ctx) ?? null) : null
+        if (!presetId) return undefined
+        const key = `${presetId}\0${serverName}`
+        const hit = presetTimeoutCache.get(key)
+        if (hit && Date.now() - hit.at < 60_000) return hit.timeout
+        const { rows } = await listPresetMcpRows(ctx, presetId)
+        const timeout = rows.find((r) => r.serverName === serverName)?.toolCallTimeoutMs
+        presetTimeoutCache.set(key, { at: Date.now(), timeout })
+        return timeout
+      } catch {
+        return undefined
+      }
+    },
     setAiOwner: (entryId, at) => setStateAiOwner(entryId, at),
     clearAiOwner: (entryId) => clearStateAiOwner(entryId),
     snapshotEnabled: () => snapshotEnabled(ctx, runtime, caches),

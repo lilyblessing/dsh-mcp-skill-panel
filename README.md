@@ -258,6 +258,12 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 
 ## 📋 变更日志
 
+### v0.5.5（2026-09-08）— rc.1 空面板修复（standing 组合兜底）
+
+- 🐛 **空面板修复**：rc.1 起 preset 行挂 standing 组合、不再进 `ctx.loader.entries()`（实证 loader 156 行零 MCP），面板 `mcp[]==0` 空列表。`mcp.length===0` 时以当前会话 preset 的 standing 快照行补行（`compositionInventory` + preset 文本解析 `serverName/transport/超时`）。
+- 🔧 **开关链路**：预设行开关走 `state.json desired` 意图（恒 pending 徽标），`syncPresetFiles`/`applyStateResidue` 负责物化；运行期不写 preset 文件（事故铁律不变）。
+- ⚠️ **范围**：仅面板显示修复；`mcp_call` 预设行直通是后续工作（仍报「不在 loader 中」，`presetTimeoutMs` 仅补超时窄场景 + 60s 缓存）。
+
 ### v0.5.4（2026-09-08）— rc.1 兼容（无业务变更）
 
 - 🔧 **rc.1 兼容**：`dsh.client.inject` 去残留 `@deepseek-ai/dsh-client-runtime` 一行；dsh 系 pin `0.1.0-rc.8`→`0.1.2-rc.1`（含 peer `dsh-scope`，新增 `dsh-util-values` 类型依赖）。

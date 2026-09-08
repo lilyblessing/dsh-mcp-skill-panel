@@ -16,6 +16,8 @@ import type { McpCallController } from './mcpcall'
 import type { CatalogRuntime } from './index'
 import { messageOf } from './util'
 import { readState } from './state'
+import { pendingMcp } from './pending'
+import { listPresetMcpRows } from './preset-mcp'
 
 /** 分域缓存 TTL：事件驱动失效为主，TTL 只是兜底（事件丢失场景） */
 export const DOMAIN_TTL_MS = 60_000
@@ -379,12 +381,70 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
         desired: rowDesired,
         pending: rowDesired !== undefined ? rowDesired !== disabled : false,
         workspace: projectWorkspace,
+        source: 'live',
       })
     }
   } catch (error) {
     errors.push(`loader.entries: ${messageOf(error)}`)
   }
   mcp.sort((a, b) => a.serverName.localeCompare(b.serverName))
+
+  // rc.1 standing 组合兜底（空面板修复A，2026-09-08）：preset 行挂 standing 组合，
+  // 不在 ctx.loader.entries() 里时 mcp[] 为空。此时以当前会话 preset 的 standing
+  // 快照行补行：开关走 state.json desired 意图（pending 徽标），pending.ts:state.json
+  // 残留补齐负责下次启动/会话边界物化（syncPresetFiles 写 preset 文件）。
+  // 仅当「loader 零行」时补行——loader 有行（旧版/未来版）时保持原行为不动。
+  if (mcp.length === 0) {
+    try {
+      // 当前会话 preset：缺 sessionId 时 roots[0]/list[0]（与 resolveAgent 同规则）
+      const presetId = agent ? (ctx.agentPresets.composedPreset(agent.ctx) ?? null) : null
+      if (presetId) {
+        const { rows: presetRows } = await listPresetMcpRows(ctx, presetId)
+        for (const pr of presetRows) {
+          const projectWorkspace = projectServerOwner(pr.serverName)
+          const agg = byServer.get(pr.serverName)
+          const liveTools = agg?.tools ?? 0
+          const rowDesired = state?.mcp?.[pr.file]?.[pr.rowId]?.desired
+          const pendingHit = pendingMcp.get(pr.entryId)
+          // 从未操作过的预设行：无 pending、无 desired → pending=false（首屏不挂徽标）；
+          // toggle 后（pendingHit 或 desired≠live）才挂 pending。
+          const pendingFlag = pendingHit ? pendingHit.disabled !== pr.disabled : rowDesired !== undefined ? rowDesired !== pr.disabled : false
+          const catalogInfo = deps.catalogRuntime.catalog[pr.serverName]
+          const displayTools = liveTools > 0 ? liveTools : catalogInfo?.tools.length ?? 0
+          const displayTokens =
+            liveTools > 0 ? (agg?.tokens ?? 0) : catalogTokens(deps.catalogRuntime, pr.serverName, catalogInfo)
+          const status = computeStatus(pr.disabled, pr.running, liveTools)
+          const toolDisabled = disabledToolsOf(pr.serverName, projectWorkspace)
+          let toolList = toolsByServer.get(pr.serverName)
+          if (!toolList && catalogInfo) {
+            toolList = catalogInfo.tools.map((tool) => ({ name: String(tool.name ?? ''), description: String(tool.description ?? '') }))
+          }
+          mcp.push({
+            entryId: pr.entryId,
+            rowId: pr.rowId,
+            serverName: pr.serverName,
+            transport: pr.transport,
+            disabled: pr.disabled,
+            running: pr.running,
+            tools: displayTools,
+            tokens: displayTokens,
+            toolList: toolList?.map((tool) => ({ name: tool.name, description: tool.description, disabled: toolDisabled.has(tool.name) })) ?? null,
+            status,
+            modelVisible:
+              !pr.disabled &&
+              !(deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(pr.serverName) ?? false)),
+            desired: rowDesired,
+            pending: pendingFlag,
+            workspace: projectWorkspace,
+            source: 'preset',
+          })
+        }
+        mcp.sort((a, b) => a.serverName.localeCompare(b.serverName))
+      }
+    } catch (error) {
+      errors.push(`preset-mcp: ${messageOf(error)}`)
+    }
+  }
 
   return {
     ...baseView(ctx, agent, cwd),
