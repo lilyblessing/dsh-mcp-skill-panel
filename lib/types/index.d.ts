@@ -40,7 +40,8 @@ export { installProjectMcp, remountWorkspace, projectServerOwner, projectServerN
 export { readState, writeState } from './state';
 export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending';
 export { loadDisabledTools, setToolDisabled, isToolDisabled, disabledToolsOf } from './tool-disable';
-export { parsePresetMcpText } from './preset-mcp';
+export { parsePresetMcpText, findPresetRowByServerName } from './preset-mcp';
+export type { PresetMcpRow } from './preset-mcp';
 export declare const name = "runtime-inventory";
 export declare const inject: string[];
 export interface Config {

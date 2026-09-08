@@ -564,6 +564,69 @@ check('parsePresetMcpText：引号值去引号 + transport 缺席为 null', () =
   assert.equal(parsed.get('mcp-notransport').transport, null)
 })
 
+// ── 0.5.6 预设直通：findPresetRowByServerName 薄封装（compositionInventory+resolve+read） ──
+await checkAsync('findPresetRowByServerName：按 serverName 定位 standing 行（含 mcp-anki 例外回落）', async () => {
+  const rows = [
+    { entryId: 'include:agent-presets:mcp-filesystem', moduleName: '@deepseek-ai/dsh-mcp-client', enabled: true, fiberState: 2 },
+    { entryId: 'include:agent-presets:mcp-exa', moduleName: '@deepseek-ai/dsh-mcp-client', enabled: false },
+    { entryId: 'include:agent-presets:mcp-anki', moduleName: '@deepseek-ai/dsh-mcp-client', enabled: false },
+    { entryId: 'include:agent-presets:persona', moduleName: '@deepseek-ai/dsh-persona', enabled: true },
+  ]
+  const text = [
+    '- id: mcp-filesystem',
+    "  name: '@deepseek-ai/dsh-mcp-client'",
+    '  config:',
+    '    serverName: filesystem',
+    '    transport: stdio',
+    '    toolCallTimeoutMs: 60000',
+    '- id: mcp-exa',
+    "  name: '@deepseek-ai/dsh-mcp-client'",
+    '  disabled: true',
+    '  config:',
+    '    serverName: exa',
+    '    transport: streamable-http',
+    '- id: mcp-anki',
+    "  name: '@deepseek-ai/dsh-mcp-client'",
+    '  disabled: true',
+    // 缺 serverName 键 → 回落 anki-mcp
+    '- id: persona',
+    "  name: '@deepseek-ai/dsh-persona'",
+  ].join('\n')
+  const ctx = {
+    agentPresets: {
+      compositionInventory: async () => [{ id: 'standard-mcp', rows }],
+      resolve: async () => ({ path: '/preset/agent.cordis.yml' }),
+      read: async () => text,
+    },
+  }
+  const fs = await index.findPresetRowByServerName(ctx, 'standard-mcp', 'filesystem')
+  assert.ok(fs)
+  assert.equal(fs.rowId, 'mcp-filesystem')
+  assert.equal(fs.serverName, 'filesystem')
+  assert.equal(fs.disabled, false)
+  assert.equal(fs.running, true)
+  assert.equal(fs.toolCallTimeoutMs, 60000)
+  assert.equal(fs.file, '/preset/agent.cordis.yml')
+  const exa = await index.findPresetRowByServerName(ctx, 'standard-mcp', 'exa')
+  assert.ok(exa)
+  assert.equal(exa.disabled, true)
+  assert.equal(exa.running, false)
+  const anki = await index.findPresetRowByServerName(ctx, 'standard-mcp', 'anki-mcp')
+  assert.ok(anki)
+  assert.equal(anki.rowId, 'mcp-anki')
+  // 超时缺席不断言遗漏补齐（WARN-5）：exa/anki 无 toolCallTimeoutMs 键
+  assert.equal(exa.toolCallTimeoutMs, undefined)
+  assert.equal(anki.toolCallTimeoutMs, undefined)
+  // 未知 server → undefined（调用方回退「不在 loader 中」）
+  assert.equal(await index.findPresetRowByServerName(ctx, 'standard-mcp', 'ghost'), undefined)
+  // 未知 preset → 抛错（调用方 .catch 包住回退 undefined，与 cachedPresetRow 同语义）
+  await assert.rejects(() => index.findPresetRowByServerName(ctx, 'nope', 'filesystem'))
+})
+
+check('findPresetRowByServerName 经构建产物导出（index 转出）', () => {
+  assert.equal(typeof index.findPresetRowByServerName, 'function')
+})
+
 if (failed) {
   console.log('\nselftest: FAILED')
   process.exit(1)

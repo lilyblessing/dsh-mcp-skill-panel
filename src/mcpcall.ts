@@ -23,6 +23,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { Catalog, SearchHit } from './catalog'
 import { searchCatalog, listServer } from './catalog'
 import { isToolDisabled } from './tool-disable'
+import type { PresetMcpRow } from './preset-mcp'
 
 /** 空闲回收器扫描周期（ms）。 */
 const REAPER_INTERVAL_MS = 10_000
@@ -90,6 +91,9 @@ export function normalizeArguments(raw: unknown): unknown {
   return value
 }
 
+/** 预设行直通用最小信息（= preset-mcp.ts PresetMcpRow，type-only import 零运行时依赖）。 */
+export type PresetMcpRowInfo = PresetMcpRow
+
 /**
  * 控制层依赖：由 src/index.ts 在 apply 里构建并注入。这些 helper 封闭了
  * 插件对 catalog 内存态、catalog.json 持久化、loader entry 反查、state.json
@@ -118,11 +122,21 @@ export interface McpControlCtx {
   serverTimeoutMs(serverName: string): number
 
   /**
-   * rc.1 standing 组合兜底超时（窄场景）：loader 有行但缺 toolCallTimeoutMs 时，
-   * 从 preset 快照补读。loader 无行（mcp_call 预设行）仍走「不在 loader 中」返回，
-   * 预设行直通调用是后续修复，本 PR 定为仅面板修复（见 toggleMcp 预设分支注释）。
-   * 返回 undefined = preset 也无该 server，调用方回退默认超时。
-   * 调用方应做 TTL 缓存（inventory+resolve+read 较重），见 index.ts 闭包。
+   * rc.1 standing 组合预设行定位（0.5.6 直通调用）：按 serverName 找当前会话
+   * preset 的 standing 行（compositionInventory+resolve+read，经 60s 缓存）。
+   * 返回 undefined = preset 也无该 server，调用方回退「不在 loader 中」。
+   * 调用方收到行后须自行判定 disabled/running（快照布尔，非 Entry 句柄，
+   * 无 entry.update 通道；禁用的预设行拒绝调用并提示走面板）。
+   * 与 presetTimeoutMs 共用同一行来源，见 index.ts 闭包。
+   */
+  resolvePresetRow?(serverName: string, agent: Agent | undefined): Promise<PresetMcpRowInfo | undefined>
+
+  /**
+   * rc.1 standing 组合兜底超时：loader 行缺 toolCallTimeoutMs 时从 preset 快照
+   * 补读（与 resolvePresetRow 共行来源）。注意（WARN-3）：本函数无 agent 参数，
+   * 恒用 roots[0]/list[0] 的 preset；多会话挂不同 preset 且同名 server 超时不
+   * 同时会取错——只影响等待时长。直通分支的超时由调用方经 presetRow 直取，
+   * 不走本函数，故不受影响。
    */
   presetTimeoutMs?(serverName: string): Promise<number | undefined>
 
@@ -292,6 +306,54 @@ async function waitRegistered(
   })
 }
 
+/**
+ * 预设行直通执行（0.5.6）：已启用 standing 行的工具已在 tools 注册表 scope 层
+ * （mcp-client 注册），无需 ensureEnabled。引用计数/lastUsed 照常记（回收器
+ * startIdleReaper 经 resolveEntry 找不到预设行 entry 时仅清内存态，不碰运行时，
+ * 见 mcpcall.ts:394-400 无 entry 分支）。失败不 restore（无 Entry 可恢复；
+ * 预设行开关走面板 state.json 意图，不由单次调用翻转）。
+ */
+async function callViaPresetViews(
+  ctx: Context,
+  control: McpControlCtx,
+  state: ControllerState,
+  serverName: string,
+  bareTool: string,
+  name: string,
+  args: unknown,
+  agent: Agent | undefined,
+  signal: AbortSignal,
+  explicitTimeoutMs: number | undefined,
+): Promise<string> {
+  const timeoutMs = explicitTimeoutMs ?? control.serverTimeoutMs(serverName)
+  state.refCounts.set(serverName, (state.refCounts.get(serverName) ?? 0) + 1)
+  state.lastUsed.set(serverName, Date.now())
+  try {
+    const views = collectToolViews(ctx, agent)
+    const view = await waitRegistered(ctx, name, views, timeoutMs, signal)
+    const execTools = view!.tools!
+    const result = (await execTools.execute({
+      callId: `mcp-call-${randomUUID()}` as import('@deepseek-ai/dsh-llm').ToolCallId,
+      name,
+      arguments: args,
+      agent,
+      signal,
+    })) as { isError?: boolean; error?: unknown; content?: unknown } | undefined
+    state.lastUsed.set(serverName, Date.now())
+    if (result && result.isError) {
+      return `MCP ${serverName}.${bareTool} 调用失败：${msgOf((result as { error?: unknown }).error ?? 'unknown error')}`
+    }
+    const text = contentText(result ? (result as { content?: unknown }).content : undefined)
+    return text.length > 0 ? text : `MCP ${serverName}.${bareTool} 无返回内容`
+  } catch (error) {
+    return `MCP ${serverName}.${bareTool} 调用异常：${msgOf(error)}（提示：tool 参数应传该 server 上的裸名；server/tool 是否存在可先 mcp_search 确认）`
+  } finally {
+    const next = (state.refCounts.get(serverName) ?? 1) - 1
+    if (next <= 0) state.refCounts.delete(serverName)
+    else state.refCounts.set(serverName, next)
+  }
+}
+
 /** 失败 / 无并发时恢复原状态：禁用并清 AI owner。 */
 async function restore(
   control: McpControlCtx,
@@ -402,7 +464,32 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
         return `MCP 工具 ${serverName}.${bareTool} 已被禁用（请在 MCP 管理面板打开该工具后再调用）`
       }
       const entry = caches.resolveEntry(serverName)
-      if (!entry) return `未知 MCP server：${serverName}（不在 loader 中）`
+      if (!entry) {
+        // 0.5.6 预设行直通：rc.1 preset 行挂 standing 组合、不在 loader.entries()
+        // 里（findMcpEntry miss）。此时按 serverName 找当前会话 preset 的 standing
+        // 行：已启用的行（!disabled）其 mcp__* 工具已由 mcp-client 注册进 tools
+        // 注册表 scope 层 → 跳过 ensureEnabled/restore（无 Entry 句柄可 update），
+        // 直接走 collectToolViews+waitRegistered+execute 执行链。禁用的预设行
+        // （disabled:true）无运行时启用通道（dsh-mcp-client 无 enable 导出，
+        // standing Entry 句柄不可达），拒绝并提示走面板；preset 无此 server 则
+        // 回退原「不在 loader 中」。
+        const presetRow = caches.resolvePresetRow
+          ? await caches.resolvePresetRow(serverName, agent).catch(() => undefined)
+          : undefined
+        if (presetRow) {
+          // running 快照仅作错误提示增强：enabled 但实例未 running 时工具大概率
+          // 未注册，waitRegistered 会等满超时；提前在文案里点出 running 供排查
+          // （启动竞态下 transient 未 running 仍走等待，不硬拒绝，见 WARN-1）。
+          if (presetRow.disabled) {
+            return `MCP server "${serverName}" 当前已停用（预设行 ${presetRow.rowId}），请在 MCP 管理面板打开后（新会话生效）再调用`
+          }
+          const presetTimeout = presetRow.toolCallTimeoutMs
+          const hint = presetRow.running ? '' : '（提示：该行已启用但实例暂未运行，若持续超时请在面板确认后重试）'
+          const out = await callViaPresetViews(ctx, caches, state, serverName, bareTool, name, args, agent, signal, explicitTimeoutMs ?? presetTimeout)
+          return out.startsWith(`MCP ${serverName}.${bareTool} 调用异常`) && hint ? `${out}${hint}` : out
+        }
+        return `未知 MCP server：${serverName}（不在 loader 中）`
+      }
       const entryId = entry.id
       const presetTimeout = caches.presetTimeoutMs ? await caches.presetTimeoutMs(serverName).catch(() => undefined) : undefined
       const timeoutMs = explicitTimeoutMs ?? presetTimeout ?? caches.serverTimeoutMs(serverName)

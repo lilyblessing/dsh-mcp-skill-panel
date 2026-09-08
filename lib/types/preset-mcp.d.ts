@@ -1,11 +1,11 @@
 /**
- * rc.1 standing 组合 preset 行读取（空面板修复A，2026-09-08）。
+ * rc.1 standing 组合 preset 行读取（空面板修复A 0.5.5 + 预设直通 0.5.6，2026-09-08）。
  *
  * 背景：dsh 0.1.2-rc.1 起 preset 行挂在 standing 组合（agent scope 树），不再进
  * `ctx.loader.entries()`（实证 host/agent loader 156 行零 MCP，而
  * `compositionInventory()` 显示 standard-mcp 10 行、filesystem fiberState=2 运行中）。
- * collectMcp 只扫 loader → mcp[]==0 空面板；mcp_call 也因 findMcpEntry miss 而
- * 报「不在 loader 中」。
+ * collectMcp 只扫 loader → mcp[]==0 空面板（0.5.5 补行修复）；mcp_call 也因
+ * findMcpEntry miss 而报「不在 loader 中」（0.5.6 直通修复见 mcpcall.ts call()）。
  *
  * 本模块只经 `ctx.agentPresets` 服务读数（compositionInventory/resolve/read），
  * 不直连 `livePresetMounts` 模块实例（host 与面板各装一份，模块态不共享），
@@ -39,6 +39,13 @@ export interface PresetMcpRow {
     /** preset 组合文件绝对路径（state.json mcp 段的文件键）。 */
     file: string;
 }
+/**
+ * 按 serverName 在某 preset 的 standing 行里定位（mcp_call 预设直调用，0.5.6）。
+ * serverName 大小写敏感精确匹配（与 serverNameOf/config.serverName 同语义）；
+ * preset 文本缺 serverName 键时按 fallbackServerName 回落（与 listPresetMcpRows
+ * 同规则，覆盖 mcp-anki→anki-mcp 例外）。若重复取首行（上游保证唯一）。
+ */
+export declare function findPresetRowByServerName(ctx: Context, presetId: string, serverName: string): Promise<PresetMcpRow | undefined>;
 /**
  * 列出某 preset 在 standing 组合中的全部 MCP 行。
  * inventory 给 entryId/enabled/fiberState，preset 文本给 serverName/transport/超时。

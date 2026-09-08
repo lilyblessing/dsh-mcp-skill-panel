@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader';
 import type { Catalog } from './catalog';
+import type { PresetMcpRow } from './preset-mcp';
 /**
  * 归一化 mcp_call 的 tool 参数（2026-08-22 修补）：模型可能把 mcp_search 返回的
  * 注册全名（mcp__<server>__<tool>）直接填入 tool，无条件拼接会生成双重前缀。
@@ -20,6 +21,8 @@ export declare function normalizeToolName(serverName: string, toolName: string):
  * - 解析失败或非字典形态 → 保留原值交由远端给出可读错误。
  */
 export declare function normalizeArguments(raw: unknown): unknown;
+/** 预设行直通用最小信息（= preset-mcp.ts PresetMcpRow，type-only import 零运行时依赖）。 */
+export type PresetMcpRowInfo = PresetMcpRow;
 /**
  * 控制层依赖：由 src/index.ts 在 apply 里构建并注入。这些 helper 封闭了
  * 插件对 catalog 内存态、catalog.json 持久化、loader entry 反查、state.json
@@ -45,11 +48,20 @@ export interface McpControlCtx {
     /** server 自己的注册/调用超时（读 entry config 的 toolCallTimeoutMs，缺省回退）。 */
     serverTimeoutMs(serverName: string): number;
     /**
-     * rc.1 standing 组合兜底超时（窄场景）：loader 有行但缺 toolCallTimeoutMs 时，
-     * 从 preset 快照补读。loader 无行（mcp_call 预设行）仍走「不在 loader 中」返回，
-     * 预设行直通调用是后续修复，本 PR 定为仅面板修复（见 toggleMcp 预设分支注释）。
-     * 返回 undefined = preset 也无该 server，调用方回退默认超时。
-     * 调用方应做 TTL 缓存（inventory+resolve+read 较重），见 index.ts 闭包。
+     * rc.1 standing 组合预设行定位（0.5.6 直通调用）：按 serverName 找当前会话
+     * preset 的 standing 行（compositionInventory+resolve+read，经 60s 缓存）。
+     * 返回 undefined = preset 也无该 server，调用方回退「不在 loader 中」。
+     * 调用方收到行后须自行判定 disabled/running（快照布尔，非 Entry 句柄，
+     * 无 entry.update 通道；禁用的预设行拒绝调用并提示走面板）。
+     * 与 presetTimeoutMs 共用同一行来源，见 index.ts 闭包。
+     */
+    resolvePresetRow?(serverName: string, agent: Agent | undefined): Promise<PresetMcpRowInfo | undefined>;
+    /**
+     * rc.1 standing 组合兜底超时：loader 行缺 toolCallTimeoutMs 时从 preset 快照
+     * 补读（与 resolvePresetRow 共行来源）。注意（WARN-3）：本函数无 agent 参数，
+     * 恒用 roots[0]/list[0] 的 preset；多会话挂不同 preset 且同名 server 超时不
+     * 同时会取错——只影响等待时长。直通分支的超时由调用方经 presetRow 直取，
+     * 不走本函数，故不受影响。
      */
     presetTimeoutMs?(serverName: string): Promise<number | undefined>;
     /** AI-owner 标记：上次自动开启该 entry 的时间戳。 */

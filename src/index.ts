@@ -32,6 +32,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Catalog, CatalogEntry } from './catalog'
 import { snapshotFromSchemas, loadCatalog, saveCatalog } from './catalog'
 import { installMcpVisibilityFilter } from './filter'
@@ -42,7 +43,7 @@ export { normalizeToolName, normalizeArguments, msgOf } from './mcpcall'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
 import type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
 import { createDomainCaches, getSchemasView, resolveCollectScopeKey, type DomainCaches } from './collect'
-import { listPresetMcpRows } from './preset-mcp'
+import { findPresetRowByServerName, type PresetMcpRow } from './preset-mcp'
 import { makeRoutes } from './routes'
 import { readState, writeState, setStateAiOwner, clearStateAiOwner } from './state'
 import { syncPresetFiles } from './preset'
@@ -67,7 +68,8 @@ export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } fr
 // 工具级禁用作用域（selftest 回归护栏：全局 vs 项目工作区隔离）
 export { loadDisabledTools, setToolDisabled, isToolDisabled, disabledToolsOf } from './tool-disable'
 // rc.1 standing 组合 preset 行解析（selftest 回归护栏：parsePresetMcpText 文本抽取 + mcp-anki 例外）
-export { parsePresetMcpText } from './preset-mcp'
+export { parsePresetMcpText, findPresetRowByServerName } from './preset-mcp'
+export type { PresetMcpRow } from './preset-mcp'
 
 export const name = 'runtime-inventory'
 
@@ -301,9 +303,36 @@ async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime, caches: Do
 function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config, caches: DomainCaches): McpControlCtx {
   // 默认值与 Config schema 的 .default() 一致：schema 生效后 config 必有值，
   // ?? 是「config 未经 schema 直接传入」时的防御性兜底（P2-10 收敛说明）。
-  // preset 超时缓存（presetId+serverName → 超时/ms，有效 60s）：inventory+resolve+read
-  // 每次 mcp_call 都做太重，key 含 presetId（切 preset 即换 key，天然失效）。
-  const presetTimeoutCache = new Map<string, { at: number; timeout: number | undefined }>()
+  // preset 行缓存（presetId+serverName → standing 行，有效 60s）：inventory+
+  // resolve+read 每次 mcp_call 都做太重，key 含 presetId（切 preset 即换 key，
+  // 天然失效）。resolvePresetRow 与 presetTimeoutMs 共用同一缓存条目。
+  // 注意（WARN-2）：disabled/running 快照最长过期 60s；面板开关后同会话重试
+  // 可能仍按旧快照放行/拒绝（fail-closed 方向：开→关走超时失败，关→开被误拒），
+  // 下次会话/60s 后收敛。上限 500 条防异常 server 名撑大（含 ghost 负缓存）。
+  const presetRowCache = new Map<string, { at: number; row: PresetMcpRow | undefined }>()
+  const cachedPresetRow = async (
+    agent: Agent | undefined,
+    serverName: string,
+  ): Promise<PresetMcpRow | undefined> => {
+    try {
+      const live = agent ?? ctx.agents.roots()[0] ?? ctx.agents.list()[0]
+      const presetId = live ? (ctx.agentPresets.composedPreset(live.ctx) ?? null) : null
+      if (!presetId) return undefined
+      const key = `${presetId}\0${serverName}`
+      const hit = presetRowCache.get(key)
+      if (hit && Date.now() - hit.at < 60_000) return hit.row
+      const row = await findPresetRowByServerName(ctx, presetId, serverName)
+      presetRowCache.set(key, { at: Date.now(), row })
+      // 有界：异常 server 名高频 miss 时 ghost 负缓存不无限膨胀
+      if (presetRowCache.size > 500) {
+        const oldest = presetRowCache.keys().next()
+        if (!oldest.done) presetRowCache.delete(oldest.value)
+      }
+      return row
+    } catch {
+      return undefined
+    }
+  }
   return {
     keepAliveMs: config.keepAliveMs ?? 30_000,
     searchLimitDefault: config.searchLimitDefault ?? 5,
@@ -316,20 +345,19 @@ function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config, 
     persistCatalog: () => persistCatalog(() => ctx, runtime),
     resolveEntry: (serverName) => findMcpEntry(ctx, serverName),
     serverTimeoutMs: (serverName) => serverTimeoutMs(ctx, serverName),
+    // 0.5.6 预设行直通：call() 在 loader miss 时按 serverName 找当前会话
+    // preset 的 standing 行（调用方 agent 优先，无则 roots[0]/list[0]，
+    // 与 collect.ts:127-136 resolveAgent 同规则；差异：collect 侧 agent 缺席
+    // 时 presetId 直接 null，本处回落 roots[0]/list[0] 的 agent）。禁用的预设行由调用方拒绝，
+    // 这里只做定位（返回 disabled/running 快照供调用方判定）。
+    resolvePresetRow: async (serverName, agent) => cachedPresetRow(agent, serverName),
     presetTimeoutMs: async (serverName) => {
-      // rc.1 standing 组合兜底（窄场景）：仅 loader 有行但缺 toolCallTimeoutMs 时补读；
-      // loader 无行的 mcp_call 预设行仍返回「不在 loader 中」（预设行直通是后续修复）。
+      // rc.1 standing 组合兜底：loader 有行但缺 toolCallTimeoutMs 时补读；
+      // loader 无行的已启用预设行由 call() 预设直通分支处理（含超时直取），
+      // 这里保留作 loader 行的超时补读（与 resolvePresetRow 共行来源）。
       try {
-        const agent = ctx.agents.roots()[0] ?? ctx.agents.list()[0]
-        const presetId = agent ? (ctx.agentPresets.composedPreset(agent.ctx) ?? null) : null
-        if (!presetId) return undefined
-        const key = `${presetId}\0${serverName}`
-        const hit = presetTimeoutCache.get(key)
-        if (hit && Date.now() - hit.at < 60_000) return hit.timeout
-        const { rows } = await listPresetMcpRows(ctx, presetId)
-        const timeout = rows.find((r) => r.serverName === serverName)?.toolCallTimeoutMs
-        presetTimeoutCache.set(key, { at: Date.now(), timeout })
-        return timeout
+        const row = await cachedPresetRow(undefined, serverName)
+        return row?.toolCallTimeoutMs
       } catch {
         return undefined
       }
