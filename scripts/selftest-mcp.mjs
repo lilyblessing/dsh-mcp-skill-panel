@@ -514,6 +514,56 @@ check('projectServerName：不同工作区同名 server 得到不同 serverName�
   assert.ok(long.length <= 32)
 })
 
+// ── rc.1 standing 组合 preset 行解析（空面板修复A 回归护栏） ──
+check('parsePresetMcpText：抽取 mcp-* 行 serverName/transport/超时 + mcp-anki 例外', () => {
+  const text = [
+    '- id: persona',
+    "  name: '@deepseek-ai/dsh-persona'",
+    '- id: mcp-filesystem',
+    "  name: '@deepseek-ai/dsh-mcp-client'",
+    '  config:',
+    '    serverName: filesystem',
+    '    transport: stdio',
+    '    command: npx',
+    '- id: mcp-anki',
+    "  name: '@deepseek-ai/dsh-mcp-client'",
+    '  disabled: true',
+    '  config:',
+    '    serverName: anki-mcp',
+    '    transport: stdio',
+    '- id: mcp-mimo-image',
+    "  name: '@deepseek-ai/dsh-mcp-client'",
+    '  disabled: true',
+    '  config:',
+    '    serverName: mimo-image',
+    '    transport: stdio',
+    '    toolCallTimeoutMs: 300000',
+  ].join('\n')
+  const parsed = index.parsePresetMcpText(text)
+  assert.equal(parsed.size, 3)
+  assert.equal(parsed.get('mcp-filesystem').serverName, 'filesystem')
+  assert.equal(parsed.get('mcp-filesystem').transport, 'stdio')
+  assert.equal(parsed.get('mcp-anki').serverName, 'anki-mcp')
+  assert.equal(parsed.get('mcp-mimo-image').toolCallTimeoutMs, 300000)
+  // 非 mcp-* 行不收录
+  assert.equal(parsed.get('persona'), undefined)
+})
+
+check('parsePresetMcpText：缺 serverName 键时回落（mcp-anki→anki-mcp，其余去前缀）', () => {
+  const text = '- id: mcp-anki\n  name: x\n- id: mcp-foo\n  name: x\n  config:\n    transport: stdio\n'
+  const parsed = index.parsePresetMcpText(text)
+  assert.equal(parsed.get('mcp-anki').serverName, 'anki-mcp')
+  assert.equal(parsed.get('mcp-foo').serverName, 'foo')
+})
+
+check('parsePresetMcpText：引号值去引号 + transport 缺席为 null', () => {
+  const text = '- id: mcp-q\n  name: x\n  config:\n    serverName: "quoted-srv"\n    transport: "stdio"\n- id: mcp-notransport\n  name: x\n  config:\n    serverName: plain-srv\n'
+  const parsed = index.parsePresetMcpText(text)
+  assert.equal(parsed.get('mcp-q').serverName, 'quoted-srv')
+  assert.equal(parsed.get('mcp-q').transport, 'stdio')
+  assert.equal(parsed.get('mcp-notransport').transport, null)
+})
+
 if (failed) {
   console.log('\nselftest: FAILED')
   process.exit(1)
