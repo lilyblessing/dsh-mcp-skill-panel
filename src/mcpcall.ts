@@ -19,7 +19,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { Catalog, SearchHit } from './catalog'
 import { searchCatalog, listServer } from './catalog'
 import { isToolDisabled } from './tool-disable'
@@ -415,7 +415,7 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
         // view 在 waitRegistered resolve 时必定存在（ToolView 已被解析）
         const execTools = view!.tools!
         const result = (await execTools.execute({
-          callId: `mcp-call-${randomUUID()}` as import('@deepseek-ai/dsh-llm').CallId,
+          callId: `mcp-call-${randomUUID()}` as import('@deepseek-ai/dsh-llm').ToolCallId,
           name,
           arguments: args,
           agent,

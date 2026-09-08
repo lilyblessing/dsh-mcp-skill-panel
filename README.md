@@ -9,7 +9,7 @@
 
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.5.3-green.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.5.4-green.svg">
 </p>
 
 ---
@@ -122,7 +122,7 @@ dsh plugin --profile web add "github:lilyblessing/dsh-mcp-skill-panel#main"
 
 > 📦 已发布到 **npm**：`dsh-mcp-skill-panel`（[npm 页面](https://www.npmjs.com/package/dsh-mcp-skill-panel)）。npm 版为预构建产物，安装可跳过 `allowBuilds` 构建授权，也可直接以包名安装；git 源方式始终可用。
 >
-> ⬆️ **升级**：git 源用户请在 DSH profile 目录执行 `pnpm update dsh-mcp-skill-panel`（`pnpm add` 对相同 spec 不会重解析 git 分支）；npm 用户 `pnpm add dsh-mcp-skill-panel@latest`（当前 latest = **0.5.3**）即可。
+> ⬆️ **升级**：git 源用户请在 DSH profile 目录执行 `pnpm update dsh-mcp-skill-panel`（`pnpm add` 对相同 spec 不会重解析 git 分支）；npm 用户 `pnpm add dsh-mcp-skill-panel@latest`（当前 latest = **0.5.4**）即可。
 
 ## 🚀 使用
 
@@ -257,6 +257,12 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 `build.mjs` 的顺序必须是「tsdown → tsc dts」：tsdown 的 `clean` 会清掉 `lib/`，若先 tsc 生成、后 tsdown，`lib/types` 会被连带删除（0.4.7 修复，verify 有护栏）。
 
 ## 📋 变更日志
+
+### v0.5.4（2026-09-08）— rc.1 兼容（无业务变更）
+
+- 🔧 **rc.1 兼容**：`dsh.client.inject` 去残留 `@deepseek-ai/dsh-client-runtime` 一行；dsh 系 pin `0.1.0-rc.8`→`0.1.2-rc.1`（含 peer `dsh-scope`，新增 `dsh-util-values` 类型依赖）。
+- 🐛 **构建修复**（rc.1 类型漂移，纯类型层、零运行时影响）：`JsonValue` 改自 `@deepseek-ai/dsh-util-values` 导入（`tools` 不再转出）；`CallId` 改名 `ToolCallId`（`dsh-llm`）。
+- ✅ **确认**：`settings.section`（`runtime-inventory`/order 30）沿用 `slots.inject` 写法，与 rc.1 下正常的 `hud 1.3.0` 同构，有效不动。
 
 ### v0.5.3（2026-08-27）— 发布批次：新功能 + 测试期修复 + 工程改进
 
