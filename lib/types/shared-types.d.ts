@@ -30,8 +30,10 @@ export interface McpRow {
      * - 'live' = ctx.loader.entries() 真实行（可 toggle/entry.update）
      * - 'preset' = compositionInventory standing 快照行（rc.1 preset 行不在 loader.entries，
      *   开关走 state.json desired 意图 + 下次启动物化，面板置 pending）
+     * - 'gateway' = P5 网关自托管 gw- 行（loader 常驻，entryId=gw-mcp-<server>；
+     *   toggle 走 preset 意图分支，见 routes.ts toggleMcp 网关分支）
      */
-    source?: 'live' | 'preset';
+    source?: 'live' | 'preset' | 'gateway';
     /** 该 server 的工具列表（面板工具级禁用用；null = 该 server 暂无工具目录）。 */
     toolList?: Array<{
         name: string;

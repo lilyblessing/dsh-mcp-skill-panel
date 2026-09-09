@@ -798,6 +798,7 @@ check('parseMcpServersJson：P1 failOnStartupError 透传（缺省 undefined 不
 const makeGatewayHarness = (presetRow, toolsImpl) => {
   const control = {
     serverTimeoutMs: () => 60_000,
+    resolveEntry: () => undefined,
     resolvePresetRow: async () => presetRow,
   }
   const ctx = {
@@ -841,10 +842,10 @@ await checkAsync('gatewayCall：前置 normalize 跨 server 全名 throw 透传'
 })
 
 await checkAsync('gatewayCall：禁用行/停用行/miss 均 throw（非文本）', async () => {
-  // miss：resolvePresetRow → undefined
+  // miss：resolvePresetRow → undefined（+ resolveEntry → undefined）
   {
     const tools = gatewayToolsOk('x')
-    const control = { serverTimeoutMs: () => 60_000, resolvePresetRow: async () => undefined }
+    const control = { serverTimeoutMs: () => 60_000, resolveEntry: () => undefined, resolvePresetRow: async () => undefined }
     const ctx = { tools, logger: {}, timeout: (fn) => { fn(); return () => undefined }, root: { on: () => () => true }, effect: () => () => undefined }
     const state = { refCounts: new Map(), lastUsed: new Map() }
     await assert.rejects(
@@ -905,6 +906,85 @@ check('decideMount：不可挂载/停用/已挂载/新挂载四态', () => {
   assert.equal(index.decideMount('exa', { serverName: 'exa' }, true, new Map()), 'skip')
   assert.equal(index.decideMount('exa', { serverName: 'exa' }, false, new Map([['exa', 1]])), 'reuse')
   assert.equal(index.decideMount('exa', { serverName: 'exa' }, false, new Map()), 'mount')
+})
+
+// ── P5 网关挂载：B3 让路分支 + B4 id 映射 + ensureOpenMounts 四态 ──
+check('decideMount：loader已有同名行时skip-official让路（B3）', () => {
+  assert.equal(index.decideMount('exa', { serverName: 'exa' }, false, new Map(), true), 'skip-official')
+  // 让路优先于 reuse（不建第二实例）
+  assert.equal(index.decideMount('exa', { serverName: 'exa' }, false, new Map([['exa', 1]]), true), 'skip-official')
+  // 缺省第五参=false，保持旧四态
+  assert.equal(index.decideMount('exa', { serverName: 'exa' }, false, new Map()), 'mount')
+})
+
+check('gatewayEntryId：连字符前缀双向映射（B4，冒号不可用）', () => {
+  assert.equal(index.gatewayEntryId('exa'), 'gw-mcp-exa')
+  assert.equal(index.gatewayServerOfEntryId('gw-mcp-exa'), 'exa')
+  assert.equal(index.gatewayServerOfEntryId('mcp-exa'), null)
+  assert.equal(index.GATEWAY_ENTRY_PREFIX, 'gw-mcp-')
+  assert.ok(!index.gatewayEntryId('exa').includes(':'))
+})
+
+await checkAsync('ensureOpenMounts：单飞guard+空态（真值表循环由decideMount覆盖）', async () => {
+  const calls = []
+  const fakeLoader = {
+    entries: () => [],
+    create: async (row) => {
+      calls.push(row)
+      if (row.config.serverName === 'bad') throw new Error('spawn fail')
+      return { id: row.id }
+    },
+    remove: async () => undefined,
+  }
+  const fakeCtx = { loader: fakeLoader, logger: {}, agents: { roots: () => [], list: () => [] }, agentPresets: { composedPreset: () => 'p' } }
+  // fake control：resolvePresetConfig 不用（ensureOpenMounts 经 listPresetMcpRows 直读，此处 fake roles 由 loader 侧 rows 注入）
+  const { ensureOpenMounts, createGatewayState } = index
+  // 用可注入 rows 的变体：直接测 decideMount 真值表 + create 记账（listPresetMcpRows 需 ctx harness，此处覆盖纯逻辑面）
+  const state = createGatewayState()
+  assert.equal(state.mounts.size, 0)
+  assert.equal(state.entryIds.size, 0)
+  assert.equal(state.syncing, false)
+  // 单飞 guard：syncing=true 时直接回空结果
+  state.syncing = true
+  const skipped = await ensureOpenMounts({ ctx: fakeCtx, control: {}, state }, 'p')
+  assert.deepEqual(skipped, { mounted: [], reused: [], skipped: [], skippedOfficial: [], errors: [] })
+  state.syncing = false
+})
+
+await checkAsync('gatewayCall：loader行走callViaLoaderEntry分支（B1，不再miss）', async () => {
+  // loader 有行 + preset 无行：旧 gatewayCall 会 throw 未知 server；B1 后走 loader 分支成功
+  const tools = gatewayToolsOk('via-loader')
+  const entry = { id: 'gw-mcp-proj', disabled: false }
+  const control = {
+    serverTimeoutMs: () => 60_000,
+    resolveEntry: () => entry,
+    resolvePresetRow: async () => undefined,
+    setAiOwner: async () => undefined,
+    clearAiOwner: async () => undefined,
+  }
+  const ctx = { tools, logger: {}, timeout: (fn) => { fn(); return () => undefined }, root: { on: () => () => true }, effect: () => () => undefined }
+  const state = { refCounts: new Map(), lastUsed: new Map() }
+  const out = await index.gatewayCall(ctx, control, state, 'proj', 'do_thing', {}, { signal: AbortSignal.timeout(5000), agent: undefined })
+  assert.equal(out, 'via-loader')
+  assert.equal(state.refCounts.size, 0)
+})
+
+await checkAsync('gatewayCall：loader行禁用时ensureEnabled开启后执行（B1）', async () => {
+  let updated = null
+  const tools = gatewayToolsOk('opened')
+  const entry = { id: 'gw-mcp-proj2', disabled: true, update: async (patch) => { updated = patch; entry.disabled = patch.disabled } }
+  const control = {
+    serverTimeoutMs: () => 60_000,
+    resolveEntry: () => entry,
+    resolvePresetRow: async () => undefined,
+    setAiOwner: async () => undefined,
+    clearAiOwner: async () => undefined,
+  }
+  const ctx = { tools, logger: {}, timeout: (fn) => { fn(); return () => undefined }, root: { on: () => () => true }, effect: () => () => undefined }
+  const state = { refCounts: new Map(), lastUsed: new Map() }
+  const out = await index.gatewayCall(ctx, control, state, 'proj2', 'do_thing', {}, { signal: AbortSignal.timeout(5000), agent: undefined })
+  assert.equal(out, 'opened')
+  assert.deepEqual(updated, { disabled: false })
 })
 
 check('checkChildVisible：恒为双工具才 PASS', () => {

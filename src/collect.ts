@@ -18,6 +18,7 @@ import { messageOf } from './util'
 import { readState } from './state'
 import { pendingMcp } from './pending'
 import { listPresetMcpRows } from './preset-mcp'
+import { gatewayServerOfEntryId } from './gateway'
 
 /** 分域缓存 TTL：事件驱动失效为主，TTL 只是兜底（事件丢失场景） */
 export const DOMAIN_TTL_MS = 60_000
@@ -381,7 +382,9 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
         desired: rowDesired,
         pending: rowDesired !== undefined ? rowDesired !== disabled : false,
         workspace: projectWorkspace,
-        source: 'live',
+        // P5（B4/B5）：网关 gw- 行走 loader live 分支，source 标 'gateway'（toggle
+        // 走 preset 意图分支，见 toggleMcp）；running 读 entry.fiber（意图≠现实）。
+        source: gatewayServerOfEntryId(entry.id) !== null ? 'gateway' : 'live',
       })
     }
   } catch (error) {
@@ -394,6 +397,9 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
   // 快照行补行：开关走 state.json desired 意图（pending 徽标），pending.ts:state.json
   // 残留补齐负责下次启动/会话边界物化（syncPresetFiles 写 preset 文件）。
   // 仅当「loader 零行」时补行——loader 有行（旧版/未来版）时保持原行为不动。
+  // P5（B5）：网关 gw- 行已进 loader（live 分支天然覆盖并标 source:'gateway'），
+  // preset 补行仍仅 loader 零行时触发——此时无 loader 行可去重，删去重代码
+  //（复审 WARN-1：守卫内 liveServers 恒为空集，去重永不触发，删之）。
   if (mcp.length === 0) {
     try {
       // 当前会话 preset：缺 sessionId 时 roots[0]/list[0]（与 resolveAgent 同规则）

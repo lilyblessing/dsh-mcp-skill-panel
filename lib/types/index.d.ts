@@ -38,8 +38,15 @@ export { mergeSchemas, computeStatus } from './collect';
 export { setRowFlag, setSkillFlag, rowDisabledState, syncPresetFiles, isValidSkillName, buildSkillMd } from './preset';
 export { scanWorkspaceMcp } from './project-mcp';
 export { installProjectMcp, remountWorkspace, projectServerOwner, projectServerName } from './project-mcp';
-export { createGatewayState, isolateChildScope, decideMount, checkChildVisible, disposeGatewayState } from './gateway';
-export type { GatewayState } from './gateway';
+export { createGatewayState, isolateChildScope, decideMount, checkChildVisible, disposeGatewayState, disposeGatewayStateSync, ensureOpenMounts, gatewayEntryId, gatewayServerOfEntryId, GATEWAY_ENTRY_PREFIX } from './gateway';
+export type { GatewayState, EnsureOpenMountsResult } from './gateway';
+/** P5（D5）：/debug 只读网关挂载面（无 secrets）。模块级单例由 apply 赋值。 */
+import type { GatewayState as GatewayStateType } from './gateway';
+export declare function gatewayStateForDebug(): {
+    mounted: string[];
+    lastCheck: GatewayStateType['lastCheck'];
+};
+export declare function ensureOpenMountsForDebug(): Promise<unknown>;
 export { readState, writeState } from './state';
 export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending';
 export { loadDisabledTools, setToolDisabled, isToolDisabled, disabledToolsOf } from './tool-disable';

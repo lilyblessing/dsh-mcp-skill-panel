@@ -38,11 +38,11 @@ import { snapshotFromSchemas, loadCatalog, saveCatalog } from './catalog'
 import { installMcpVisibilityFilter } from './filter'
 import type { McpControlCtx, McpCallController } from './mcpcall'
 import { createMcpCallController, installMcpControlTools } from './mcpcall'
-import { createGatewayState, disposeGatewayState } from './gateway'
+import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
+import { createGatewayState, disposeGatewayState, disposeGatewayStateSync, ensureOpenMounts } from './gateway'
 
 export { normalizeToolName, normalizeArguments, msgOf, gatewayCall } from './mcpcall'
 export type { GatewayCallOpts, GatewayCallState } from './mcpcall'
-import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
 import type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
 import { createDomainCaches, getSchemasView, resolveCollectScopeKey, type DomainCaches } from './collect'
 import { findPresetRowByServerName, type PresetMcpRow } from './preset-mcp'
@@ -65,8 +65,26 @@ export { scanWorkspaceMcp } from './project-mcp'
 // 项目 MCP 运行时装配（外部复用/端到端验证：手动安装、按工作空间重扫、owner 查询）
 export { installProjectMcp, remountWorkspace, projectServerOwner, projectServerName } from './project-mcp'
 // P4 网关常驻态（自测回归护栏：挂载决策/视野隔离/自检断言纯逻辑）
-export { createGatewayState, isolateChildScope, decideMount, checkChildVisible, disposeGatewayState } from './gateway'
-export type { GatewayState } from './gateway'
+export { createGatewayState, isolateChildScope, decideMount, checkChildVisible, disposeGatewayState, disposeGatewayStateSync, ensureOpenMounts, gatewayEntryId, gatewayServerOfEntryId, GATEWAY_ENTRY_PREFIX } from './gateway'
+export type { GatewayState, EnsureOpenMountsResult } from './gateway'
+
+/** P5（D5）：/debug 只读网关挂载面（无 secrets）。模块级单例由 apply 赋值。 */
+import type { GatewayState as GatewayStateType } from './gateway'
+
+let debugGatewayState: GatewayStateType | null = null
+
+export function gatewayStateForDebug(): { mounted: string[]; lastCheck: GatewayStateType['lastCheck'] } {
+  if (!debugGatewayState) return { mounted: [], lastCheck: null }
+  return { mounted: [...debugGatewayState.mounts.keys()].sort(), lastCheck: debugGatewayState.lastCheck }
+}
+
+/** P5（W3）：/debug/collect 先挂载后快照的挂载入口（无 control 闭包时 no-op）。 */
+let debugEnsureOpenMounts: (() => Promise<unknown>) | null = null
+
+export function ensureOpenMountsForDebug(): Promise<unknown> {
+  if (!debugEnsureOpenMounts) return Promise.resolve(undefined)
+  return debugEnsureOpenMounts()
+}
 export { readState, writeState } from './state'
 // P1 会话边界：待生效队列与边界应用入口（selftest 直接测构建产物行为）
 export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending'
@@ -516,6 +534,8 @@ export function apply(ctx: Context, config: Config = {}): void {
   // 装配可见性（v0.4.2+）：每回合构建一次 server → 可见性 Map（单次 loader 遍历），
   // 过滤时 O(1) 查表。用户打开的 server 可见（disabled=false 且非 AI 临时启用）；
   // 停用或 AI 临时启用的 server 对模型过滤，经 mcp_search/mcp_call 按需调用。
+  // P5（D3）：网关 gw- 行是 loader 常驻行，open（!disabled）天然可见——无需显式 put；
+  // closed 行无实例即无工具（filter ??true 兜底仅影响畸形名，不影响 closed 行）。
   const buildVisibility = (): ReadonlyMap<string, boolean> => {
     const map = new Map<string, boolean>()
     for (const entry of ctx.loader.entries()) {
@@ -528,11 +548,15 @@ export function apply(ctx: Context, config: Config = {}): void {
   let autoDisposers: Array<() => void> = []
   // P4 网关常驻态：随 autoManage 开关创建/释放（restrict lift + mounts 清理，
   // 不碰 standing 本体，靠 fiber unwind）。
+  // P5（B2/D1）：gw- 行建在 loader root 树，fiber 不回收——关闭/卸载走 dispose
+  // 同步释放（fire-and-forget remove）；开启走 ensureOpenMounts 挂载 open 行。
   const gatewayState = createGatewayState()
+  debugGatewayState = gatewayState
+  debugEnsureOpenMounts = () => ensureOpenMounts({ ctx, control, state: gatewayState })
   catalogRuntime.applyAutoManage = (on: boolean) => {
     for (const d of autoDisposers) d()
     autoDisposers = []
-    disposeGatewayState(ctx, gatewayState)
+    disposeGatewayStateSync(ctx, gatewayState)
     catalogRuntime.autoManage = on
     if (!on) return
     const disposers: Array<() => void> = []
@@ -548,12 +572,16 @@ export function apply(ctx: Context, config: Config = {}): void {
       return
     }
     autoDisposers = disposers
+    // P5：open 行网关挂载（fire-and-forget；失败记 lastCheck + errors，不抛）。
+    void ensureOpenMounts({ ctx, control, state: gatewayState }).catch((error: unknown) => {
+      ctx.logger.warn(`mcp-skill-panel: gateway ensureOpenMounts failed: ${messageOf(error)}`)
+    })
   }
   // 插件卸载兜底：释放当前挂载的中间层（effect disposer 手动调用后 fiber 卸载不再重复）。
   ctx.effect(
     () => () => {
       for (const d of autoDisposers) d()
-      disposeGatewayState(ctx, gatewayState)
+      disposeGatewayStateSync(ctx, gatewayState)
     },
     'mcp-skill-panel: autoManage teardown',
   )

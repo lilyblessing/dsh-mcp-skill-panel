@@ -12,7 +12,26 @@ import { homedir } from 'node:os'
 import { readState, writeState, stateApplyMode, type ApplyMode } from './state'
 import { setSkillFlag, rowDisabledState, isValidSkillName, buildSkillMd } from './preset'
 import { pendingMcp, applyPendingMcp } from './pending'
-import { findPresetRowByEntryId } from './preset-mcp'
+import { findPresetRowByEntryId, findPresetRowByServerName } from './preset-mcp'
+import { gatewayServerOfEntryId } from './gateway'
+
+/**
+ * B4：网关行 serverName → 当前会话 preset 行定位（entryId 映射不到 preset entryId，
+ * 按 serverName 精确匹配；presetId 取当前会话 composedPreset，无会话返回 undefined）。
+ */
+async function findPresetRowByServerNameLike(ctx: Context, serverName: string) {
+  try {
+    const { resolveAgent } = await import('./collect')
+    const agent = resolveAgent(ctx, undefined)
+    const presetId = agent ? (ctx.agentPresets.composedPreset(agent.ctx) ?? null) : null
+    if (!presetId) return undefined
+    const row = await findPresetRowByServerName(ctx, presetId, serverName)
+    if (!row) return undefined
+    return { presetId, row, presetPath: row.file }
+  } catch {
+    return undefined
+  }
+}
 import { resolveAgent, resolveCollectScopeKey, scopeKeySource, getSchemasView, mergeSchemas, collectMcp, collectSkills, confirmedSkills, pruneExpired, DOMAIN_TTL_MS, SKILL_TOGGLE_POLL_MS, type DomainCaches, type Deps } from './collect'
 import { isMcpEntry, serverNameOf } from './mcp-entry'
 import { parseMcpServersJson, serversToPatchYaml, serversToRows, type McpServers, type McpRowConfig } from './mcp-convert'
@@ -141,8 +160,14 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
   // rc.1 standing 组合兜底：preset 行不在 loader.entries/resolve 里（resolve 抛
   // "cannot resolve entry"）。行以 source:'preset' 进面板，开关走 state.json
   // desired 意图（恒 pending），由 syncPresetFiles/applyStateResidue 物化/补齐。
-  if (!entry) {
-    const found = await findPresetRowByEntryId(ctx, entryId)
+  // P5（B4）：网关 gw- 行虽可 resolve，但 toggle 不走 live entry.update——走 preset
+  // 意图分支（意图→下次 ensureOpenMounts 不同步该行即等价关闭；开则意图清除后重挂）。
+  // 三键映射（B4）：entryId=gw-mcp-<server> ↔ serverName ↔ preset rowId。
+  if (!entry || gatewayServerOfEntryId(entryId) !== null) {
+    const gwServer = gatewayServerOfEntryId(entryId)
+    const found =
+      (gwServer ? await findPresetRowByServerNameLike(ctx, gwServer).catch(() => undefined) : undefined) ??
+      (await findPresetRowByEntryId(ctx, entryId).catch(() => undefined))
     if (found) {
       const state = await readState()
       state.mcp ??= {}
@@ -176,7 +201,8 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
         file: found.presetPath,
         applied: false,
         pending: true,
-        source: 'preset' as const,
+        // 网关行面板口径与 collect 一致（NIT-4）：collect 标 'gateway'，此处回 'gateway'。
+        source: 'gateway' as const,
       }
     }
   }
@@ -717,6 +743,14 @@ export function makeRoutes(
         for (const [server, info] of Object.entries(catalogRuntime.catalog)) {
           catalog[server] = { tools: info.tools.length, fetchedAt: info.fetchedAt, source: info.source }
         }
+        // P5（D5）：网关挂载面（无 secrets；lastCheck 仅计数 detail）。
+        let gateway: { mounted: string[]; lastCheck: { at: number; ok: boolean; detail: string } | null } | undefined
+        try {
+          const { gatewayStateForDebug } = await import('./index')
+          gateway = gatewayStateForDebug()
+        } catch {
+          gateway = undefined
+        }
         // HTTP 路径 scope 诊断（2026-08-27 filesystem「无工具」取证）：
         // 复现 collectMcp 的 scope 解析 + schemas 视图，确认 key 是否命中 standing 层链。
         const scopeDiag: Record<string, unknown> = { error: null }
@@ -742,13 +776,20 @@ export function makeRoutes(
         } catch (error) {
           scopeDiag.error = messageOf(error)
         }
-        return { diag: catalogRuntime.diag, catalog, scopeDiag }
+        return { diag: catalogRuntime.diag, catalog, scopeDiag, ...(gateway ? { gateway } : {}) }
       }),
     },
     {
       kind: 'exact',
       path: `${API_PREFIX}/debug/collect`,
       handler: handle('POST', async () => {
+        // P5（W3）：先挂载后快照（新工具进 catalog），串行；挂载失败不阻断快照。
+        try {
+          const { ensureOpenMountsForDebug } = await import('./index')
+          await ensureOpenMountsForDebug().catch(() => undefined)
+        } catch {
+          /* 挂载失败不阻断快照 */
+        }
         await triggerSnapshot()
         return { diag: catalogRuntime.diag }
       }, true),

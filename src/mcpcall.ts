@@ -418,6 +418,12 @@ export async function gatewayCall(
     throw new Error(`MCP 工具 ${serverName}.${bareTool} 已被禁用（请在 MCP 管理面板打开该工具后再调用）`)
   }
   // 定位失败=回退 miss 语义：此处保留 catch→undefined（P2 设计唯一允许的吞错）
+  // B1（P5）：loader 常驻行优先——项目行（哈希重命名）/global 行只在 loader，
+  // 永不在 preset；preset 行走直通。双路分发保证 D2 改道后 loader 行不 miss。
+  const entry = control.resolveEntry(serverName)
+  if (entry) {
+    return callViaLoaderEntry(ctx, control, state, serverName, bareTool, name, normArgs, opts, entry)
+  }
   const presetRow = control.resolvePresetRow
     ? await control.resolvePresetRow(serverName, opts.agent).catch(() => undefined)
     : undefined
@@ -466,6 +472,98 @@ export async function gatewayCall(
 export interface GatewayCallState {
   refCounts: Map<string, number>
   lastUsed: Map<string, number>
+}
+
+/**
+ * B1（P5）：loader 常驻行执行分支（项目行/global 行/网关 gw- 行）。
+ * 与 call() 的 loader 分支同语义但错误走 throw：ensureEnabled 开启→执行→
+ * 失败且本次 AI 启用且无并发则 restore。超时=loader 行 toolCallTimeoutMs。
+ */
+async function callViaLoaderEntry(
+  ctx: Context,
+  control: McpControlCtx,
+  state: GatewayCallState,
+  serverName: string,
+  bareTool: string,
+  name: string,
+  normArgs: unknown,
+  opts: GatewayCallOpts,
+  entry: Entry,
+): Promise<string> {
+  const entryId = entry.id
+  const timeoutMs = opts.explicitTimeoutMs ?? control.serverTimeoutMs(serverName)
+  let aiOwned = false
+  try {
+    aiOwned = await ensureEnabledGateway(control, ctx, serverName, entry)
+  } catch (error) {
+    throw new Error(`启用 MCP server "${serverName}" 失败：${msgOf(error)}`)
+  }
+  state.refCounts.set(serverName, (state.refCounts.get(serverName) ?? 0) + 1)
+  state.lastUsed.set(serverName, Date.now())
+  let failed = false
+  try {
+    const views = collectToolViews(ctx, opts.agent)
+    const view = await waitRegistered(ctx, name, views, timeoutMs, opts.signal)
+    if (opts.signal.aborted) throw opts.signal.reason ?? new Error('aborted')
+    const execTools = view!.tools!
+    const result = (await execTools.execute({
+      callId: `mcp-call-${randomUUID()}` as import('@deepseek-ai/dsh-llm').ToolCallId,
+      name,
+      arguments: normArgs,
+      agent: opts.agent,
+      signal: opts.signal,
+    })) as { isError?: boolean; error?: unknown; content?: unknown; structuredContent?: unknown } | undefined
+    state.lastUsed.set(serverName, Date.now())
+    if (result && result.isError) {
+      failed = true
+      const failure = new Error(
+        `MCP ${serverName}.${bareTool} 调用失败：${msgOf((result as { error?: unknown }).error ?? 'unknown error')}`,
+      )
+      ;(failure as Error & { cause?: unknown }).cause = result
+      throw failure
+    }
+    const text = contentText(result ? (result as { content?: unknown }).content : undefined)
+    if (text.length === 0) {
+      failed = true
+      throw new Error(`MCP ${serverName}.${bareTool} 无返回内容`)
+    }
+    return text
+  } catch (error) {
+    failed = true
+    throw error
+  } finally {
+    const next = (state.refCounts.get(serverName) ?? 1) - 1
+    if (next <= 0) state.refCounts.delete(serverName)
+    else state.refCounts.set(serverName, next)
+    if (failed && aiOwned && next <= 0) void restoreGateway(control, ctx, serverName, entryId)
+  }
+}
+
+/** loader 分支的 ensureEnabled（不碰 ControllerState.aiEnabled；网关行用户语义恒用户打开）。 */
+async function ensureEnabledGateway(
+  control: McpControlCtx,
+  ctx: Context,
+  serverName: string,
+  entry: Entry,
+): Promise<boolean> {
+  if (!entry.disabled) return false
+  await entry.update({ disabled: false })
+  await control.setAiOwner(entry.id, Date.now()).catch(() => undefined)
+  ctx.logger.info?.(`mcp-skill-panel: gateway enabled MCP server "${serverName}"`)
+  return true
+}
+
+/** loader 分支的失败恢复（best-effort；网关常驻行失败即回关，不留半开）。 */
+async function restoreGateway(control: McpControlCtx, ctx: Context, serverName: string, entryId: string): Promise<void> {
+  try {
+    const entry = control.resolveEntry(serverName)
+    if (entry && entry.id === entryId && !entry.disabled) {
+      await entry.update({ disabled: true })
+    }
+    await control.clearAiOwner(entryId).catch(() => undefined)
+  } catch (error) {
+    ctx.logger.warn?.(`mcp-skill-panel: gateway restore disabled for "${serverName}" failed: ${msgOf(error)}`)
+  }
 }
 
 /** 失败 / 无并发时恢复原状态：禁用并清 AI owner。 */
@@ -817,8 +915,13 @@ function registerMcpCallTool(ctx: Context, controller: McpCallController): () =>
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     execute: (args, exec) => {
+      // P5 改道（D2）：走 gateway() 透传分支（loader 行 + preset 行双路），错误 throw→
+      // 恒文本契约：catch 转文本（W1 映射表：miss/disabled/isError/empty/timeout/abort/
+      // normalize 各分支 message 沿用 gatewayCall 原文，前缀 `MCP 调用异常：` 统一）。
       // 2026-08-24：模型可能把 arguments 填成 JSON 字符串（见 normalizeArguments 注释），先归一化再透传
-      return controller.call(args.server, args.tool, normalizeArguments(args.arguments), exec.agent, exec.signal)
+      return controller
+        .gateway(args.server, args.tool, normalizeArguments(args.arguments), exec.agent, exec.signal)
+        .catch((error: unknown) => `MCP 调用异常：${msgOf(error)}`)
     },
   })
   return ctx.tools.register(definition)

@@ -16,18 +16,28 @@
  * - secrets 不回面板（BLOCK-2；config 只在 host 侧流转）。
  */
 import type { Context } from '@deepseek-ai/cordis';
+import type { McpControlCtx } from './mcpcall';
+/** 网关行 entryId 前缀（连字符；冒号是 EntryTree.sep 不可用，见 B4）。 */
+export declare const GATEWAY_ENTRY_PREFIX = "gw-mcp-";
+/** 网关行 entryId ↔ serverName 双向映射（B4 三键落字）。 */
+export declare function gatewayEntryId(serverName: string): string;
+export declare function gatewayServerOfEntryId(entryId: string): string | null;
 /** 网关挂载态（常驻，随 autoManage 开关创建/释放）。 */
 export interface GatewayState {
     /** restrict 返回的 disposer（逐个 lift 可回滚）。 */
     restrictDisposers: Array<() => void>;
     /** 当前网关拉起的 server（serverName → mount 时间）。 */
     mounts: Map<string, number>;
+    /** serverName → loader entryId（B2：卸载逐个 loader.remove 用）。 */
+    entryIds: Map<string, string>;
     /** 最近一次自检结果（/debug 可读，面板不展示 secrets）。 */
     lastCheck: {
         at: number;
         ok: boolean;
         detail: string;
     } | null;
+    /** 并发 guard：ensureOpenMounts 单飞（W3）。 */
+    syncing: boolean;
 }
 /** 空网关态。 */
 export declare function createGatewayState(): GatewayState;
@@ -45,12 +55,15 @@ export declare function isolateChildScope(childTools: {
  * open 行网关挂载决策（纯逻辑，可自测）：
  * - preset 行缺失/不可挂载（config undefined）→ 'skip'（回退旧直通语义）；
  * - preset 行 disabled → 'skip'（拒绝语义归 gatewayCall，前置已判定）；
+ * - loader 已有同名 server 行（官方行/项目行/global 行启用中，网关让路）→ 'skip-official'
+ *  （B3：rc.1 下 standing 行不在 loader.entries，判据=loader 同 serverName 行存在；
+ *   standing 行与网关行是否同 scope 抛错互斥未经现网实证，不假设——让路即不建第二实例）；
  * - 已有同名 mount → 'reuse'（防 #3984 `already in use` / #4798 重复注册）；
  * - 否则 'mount'。
  */
 export declare function decideMount(serverName: string, presetConfig: {
     serverName: string;
-} | undefined, presetDisabled: boolean, mounted: ReadonlyMap<string, number>): 'mount' | 'reuse' | 'skip';
+} | undefined, presetDisabled: boolean, mounted: ReadonlyMap<string, number>, hasLoaderRow?: boolean): 'mount' | 'reuse' | 'skip' | 'skip-official';
 /**
  * 网关自检断言（MVT-4 ASSERT-A/A2 产品化）：child 可见面恒为双工具。
  * 纯逻辑：visible 名单由调用方传入（`tools.view(childKey).visible.keys()`），
@@ -60,5 +73,39 @@ export declare function checkChildVisible(visibleNames: readonly string[]): {
     ok: boolean;
     detail: string;
 };
-/** 释放网关挂载态：restrict disposer 逐个 lift + 清 mounts（不碰 standing 本体）。 */
+/** 释放网关挂载态：restrict disposer 逐个 lift + loader gw- 行逐个 remove + 清 mounts（B2）。 */
 export declare function disposeGatewayState(ctx: Context, state: GatewayState): void;
+/** 同步释放（applyAutoManage 同步体内/卸载兜底共用；remove fire-and-forget）。 */
+export declare function disposeGatewayStateSync(ctx: Context, state: GatewayState): void;
+export interface GatewayDeps {
+    ctx: Context;
+    /** 预留控制层依赖（当前 ensureOpenMounts 经 listPresetMcpRows 直读，未用；占位见 NIT-2）。 */
+    control: McpControlCtx;
+    state: GatewayState;
+}
+/** ensureOpenMounts 结果计数（W3 lastCheck detail 同格式）。 */
+export interface EnsureOpenMountsResult {
+    mounted: string[];
+    reused: string[];
+    skipped: string[];
+    skippedOfficial: string[];
+    errors: Array<{
+        server: string;
+        error: string;
+    }>;
+}
+/**
+ * 网关常驻挂载（P5）：open 的 preset 行经 loader.create 自托管拉起 dsh-mcp-client。
+ *
+ * 真值表（B3）：
+ * - preset 无行/不可挂载（config undefined）→ skipped（回退旧直通语义）；
+ * - preset 行 disabled → skipped（拒绝语义归 gatewayCall）；
+ * - loader 已有同名 server 行 → skippedOfficial（网关让路，不建第二实例）；
+ * - mounts 已有同名 → reused；
+ * - 否则 loader.create({id: gw-mcp-<server>, name, config, disabled:false}) → mounted/errors。
+ *
+ * 单飞（W3）：syncing guard + 顶层 try/finally；一家失败记 errors 不抛（一家挂不拖全家）。
+ * preset 选择（W4）：调用方 agent 优先，无则 roots[0]/list[0]（与 cachedPresetRow 同规则）；
+ * listPresetMcpRows 按 presetId 全量列出行，挂载逐行决策。
+ */
+export declare function ensureOpenMounts(deps: GatewayDeps, presetId?: string): Promise<EnsureOpenMountsResult>;
