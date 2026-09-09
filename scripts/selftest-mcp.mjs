@@ -947,8 +947,50 @@ await checkAsync('ensureOpenMounts：单飞guard+空态（真值表循环由deci
   // 单飞 guard：syncing=true 时直接回空结果
   state.syncing = true
   const skipped = await ensureOpenMounts({ ctx: fakeCtx, control: {}, state }, 'p')
-  assert.deepEqual(skipped, { mounted: [], reused: [], skipped: [], skippedOfficial: [], errors: [] })
+  assert.deepEqual(skipped, { mounted: [], reused: [], skipped: [], skippedOfficial: [], unmounted: [], errors: [] })
   state.syncing = false
+})
+
+await checkAsync('ensureOpenMounts：关意图即拆+同轮不重建（WARN-3/BLOCK-1，可注入行源/意图源）', async () => {
+  // WARN-3 收紧（复审，2026-09-10）：经 deps.listRows/readIntents 注入，
+  // 断言 remove 被调、账清空、unmounted 内容、同轮不重建、开行照常 mount。
+  const removed = []
+  const created = []
+  const fakeLoader = {
+    entries: () => [],
+    create: async (row) => { created.push(row.id); return { id: row.id } },
+    remove: async (entryId) => { removed.push(entryId); return undefined },
+  }
+  const rows = [
+    { serverName: 'exa', rowId: 'mcp-exa', file: '/p/agent.cordis.yml', disabled: false, config: { serverName: 'exa', transport: 'stdio', command: 'x' } },
+    { serverName: 'chrome', rowId: 'mcp-chrome', file: '/p/agent.cordis.yml', disabled: false, config: { serverName: 'chrome', transport: 'stdio', command: 'x' } },
+  ]
+  const fakeCtx = { loader: fakeLoader, logger: {}, agents: { roots: () => [], list: () => [] }, agentPresets: { composedPreset: () => 'p' } }
+  const { ensureOpenMounts: ensure, createGatewayState: mkState } = index
+  const state = mkState()
+  state.mounts.set('exa', 1)
+  state.entryIds.set('exa', 'gw-mcp-exa')
+  const out = await ensure(
+    {
+      ctx: fakeCtx,
+      control: {},
+      state,
+      listRows: async () => ({ rows, presetPath: '/p/agent.cordis.yml' }),
+      readIntents: async () => ({ 'mcp-exa': { desired: true, lastApplied: false } }),
+    },
+    'p',
+  )
+  // 关意图行：remove 被调 + 清账 + unmounted + 同轮不重建
+  assert.deepEqual(removed, ['gw-mcp-exa'])
+  assert.equal(state.mounts.has('exa'), false)
+  assert.equal(state.entryIds.has('exa'), false)
+  assert.deepEqual(out.unmounted, ['exa'])
+  assert.ok(!created.includes('gw-mcp-exa'), '关意图行同轮不得重建（BLOCK-1）')
+  assert.ok(out.skipped.includes('exa'), '关意图行计 skipped（意图闸）')
+  // 开行照常 mount
+  assert.deepEqual(created, ['gw-mcp-chrome'])
+  assert.deepEqual(out.mounted, ['chrome'])
+  assert.equal(state.syncing, false)
 })
 
 await checkAsync('gatewayCall：loader行走callViaLoaderEntry分支（B1，不再miss）', async () => {

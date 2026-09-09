@@ -133,6 +133,22 @@ export interface GatewayDeps {
   /** 预留控制层依赖（当前 ensureOpenMounts 经 listPresetMcpRows 直读，未用；占位见 NIT-2）。 */
   control: McpControlCtx
   state: GatewayState
+  /**
+   * 可注入行源/意图源（自测用；现网缺省走真实现）。
+   * WARN-3（复审，2026-09-10）：自测读不到真 state.json（进程缓存）且 fake
+   * compositionInventory 空行，必须可注入才能覆盖拆分支。
+   */
+  listRows?: (ctx: Context, presetId: string) => Promise<{ rows: GatewayPresetRow[]; presetPath: string }>
+  readIntents?: () => Promise<Record<string, { desired?: boolean; lastApplied?: boolean | null }>>
+}
+
+/** ensureOpenMounts 行源最小形状（= preset-mcp.ts PresetMcpRow 子集）。 */
+export interface GatewayPresetRow {
+  serverName: string
+  rowId: string
+  file: string
+  disabled: boolean
+  config?: import('./preset-mcp').PresetMcpClientConfig
 }
 
 /** ensureOpenMounts 结果计数（W3 lastCheck detail 同格式）。 */
@@ -141,6 +157,8 @@ export interface EnsureOpenMountsResult {
   reused: string[]
   skipped: string[]
   skippedOfficial: string[]
+  /** 关意图即拆：state.json desired=true 的已挂载行，本轮 remove 掉的名单。 */
+  unmounted: string[]
   errors: Array<{ server: string; error: string }>
 }
 
@@ -154,13 +172,19 @@ export interface EnsureOpenMountsResult {
  * - mounts 已有同名 → reused；
  * - 否则 loader.create({id: gw-mcp-<server>, name, config, disabled:false}) → mounted/errors。
  *
+ * 关意图即拆（WARN-3 补关链路，2026-09-10 现网实证）：
+ * - toggle 网关行只写 state.json desired 意图（routes.ts 网关分支，不碰 live gw- 行）；
+ * - 本轮先读 state，对「已挂载 mounts 中 desired=true（关意图）」的行逐个 loader.remove
+ *   并清 mounts/entryIds 账，记 unmounted；意图链不动（state/pending 由 toggle 侧维护）。
+ * - 开意图（desired=false/无意图）走正常挂载真值表；关→开即重挂。
+ *
  * 单飞（W3）：syncing guard + 顶层 try/finally；一家失败记 errors 不抛（一家挂不拖全家）。
  * preset 选择（W4）：调用方 agent 优先，无则 roots[0]/list[0]（与 cachedPresetRow 同规则）；
  * listPresetMcpRows 按 presetId 全量列出行，挂载逐行决策。
  */
 export async function ensureOpenMounts(deps: GatewayDeps, presetId?: string): Promise<EnsureOpenMountsResult> {
   const { ctx, control, state } = deps
-  const out: EnsureOpenMountsResult = { mounted: [], reused: [], skipped: [], skippedOfficial: [], errors: [] }
+  const out: EnsureOpenMountsResult = { mounted: [], reused: [], skipped: [], skippedOfficial: [], unmounted: [], errors: [] }
   if (state.syncing) return out
   state.syncing = true
   try {
@@ -174,20 +198,72 @@ export async function ensureOpenMounts(deps: GatewayDeps, presetId?: string): Pr
       }
     }
     if (!pid) {
-      state.lastCheck = { at: Date.now(), ok: true, detail: 'mounted=0 reused=0 skipped=0 skippedOfficial=0 errors=0 (no preset)' }
+      state.lastCheck = { at: Date.now(), ok: true, detail: 'mounted=0 reused=0 skipped=0 skippedOfficial=0 unmounted=0 errors=0 (no preset)' }
       return out
     }
     const { listPresetMcpRows } = await import('./preset-mcp')
     const { isMcpEntry, serverNameOf } = await import('./mcp-entry')
     const { MCP_CLIENT_NAME } = await import('./mcp-convert')
-    let rows: Array<{ serverName: string; disabled: boolean; config?: import('./preset-mcp').PresetMcpClientConfig }> = []
+    const { readState } = await import('./state')
+    const listRows = deps.listRows ?? (async (c: Context, pid2: string) => listPresetMcpRows(c, pid2))
+    const readIntents =
+      deps.readIntents ??
+      (async () => {
+        const stateFile = await readState().catch(() => undefined)
+        return (presetPathRef.current ? stateFile?.mcp?.[presetPathRef.current] : undefined) ?? {}
+      })
+    let rows: GatewayPresetRow[] = []
+    const presetPathRef: { current: string } = { current: '' }
     try {
-      rows = (await listPresetMcpRows(ctx, pid)).rows
+      const listed = await listRows(ctx, pid)
+      rows = listed.rows
+      presetPathRef.current = listed.presetPath
     } catch (error) {
       state.lastCheck = { at: Date.now(), ok: false, detail: `listPreset failed: ${messageOf(error)}` }
       return out
     }
-    // loader 同 serverName 行集合（B3 让路判据；只读一次）
+    // 关意图即拆：state.json desired=true 的已挂载行先 remove（只拆网关自己拉起的 mounts，
+    // 官方行/项目行不在 mounts 账里，不碰）。意图来源与 toggle 网关分支同键
+    //（state.mcp[presetPath][rowId].desired，见 routes.ts:184）。
+    // BLOCK-1（复审，2026-09-10）：intents 必须外提——挂载循环对 desired=true 的行
+    // 直接跳过（计 skipped），否则拆后同轮立即重建，关净效果为零。
+    let intents: Record<string, { desired?: boolean; lastApplied?: boolean | null }> = {}
+    try {
+      intents = await readIntents()
+      for (const [serverName, entryId] of [...state.entryIds]) {
+        if (!state.mounts.has(serverName)) {
+          state.entryIds.delete(serverName)
+          continue
+        }
+        const row = rows.find((r) => r.serverName === serverName)
+        if (!row) continue
+        if (intents[row.rowId]?.desired !== true) continue
+        let removed = false
+        try {
+          await ctx.loader.remove(entryId)
+          removed = true
+        } catch (error) {
+          // WARN-1：remove 失败不清账（瞬态失败下轮重试；行已失效时 loader.remove
+          // 本身抛错——此时按「已不存在」处理，见下）。
+          const msg = messageOf(error)
+          if (/not found|cannot resolve|no such|不存在|已失效|already removed/i.test(msg)) {
+            removed = true
+          } else {
+            ctx.logger.warn?.(`mcp-skill-panel: gateway unmount "${serverName}" failed, retry next round: ${msg}`)
+            continue
+          }
+        }
+        state.entryIds.delete(serverName)
+        state.mounts.delete(serverName)
+        out.unmounted.push(serverName)
+        void removed
+      }
+    } catch {
+      /* 意图读不到 → 跳过拆行，只走挂载真值表 */
+    }
+    // loader 同 serverName 行集合（B3 让路判据；只读一次）。
+    // 注意：上面「关意图即拆」已把 desired=true 的网关行 remove 掉，所以这里
+    // 扫到的同名行只剩官方行/项目行/global 行——网关自己的挂载行不会误判让路。
     const loaderServers = new Set<string>()
     try {
       for (const entry of ctx.loader.entries()) {
@@ -198,6 +274,12 @@ export async function ensureOpenMounts(deps: GatewayDeps, presetId?: string): Pr
       /* loader 不可读 → 视为空集，逐行挂载失败再记 errors */
     }
     for (const row of rows) {
+      // BLOCK-1 意图闸：desired=true 的行本轮不再建（拆后不重建；开意图 desired=false/
+      // 无意图才走真值表，关→开自然恢复可挂载）。
+      if (intents[row.rowId]?.desired === true) {
+        out.skipped.push(row.serverName)
+        continue
+      }
       const decision = decideMount(row.serverName, row.config, row.disabled, state.mounts, loaderServers.has(row.serverName))
       if (decision === 'skip') {
         out.skipped.push(row.serverName)
@@ -229,7 +311,7 @@ export async function ensureOpenMounts(deps: GatewayDeps, presetId?: string): Pr
     state.lastCheck = {
       at: Date.now(),
       ok,
-      detail: `mounted=${out.mounted.length} reused=${out.reused.length} skipped=${out.skipped.length} skippedOfficial=${out.skippedOfficial.length} errors=${out.errors.length}`,
+      detail: `mounted=${out.mounted.length} reused=${out.reused.length} skipped=${out.skipped.length} skippedOfficial=${out.skippedOfficial.length} unmounted=${out.unmounted.length} errors=${out.errors.length}`,
     }
     return out
   } finally {

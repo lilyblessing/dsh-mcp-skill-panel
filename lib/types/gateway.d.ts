@@ -82,6 +82,27 @@ export interface GatewayDeps {
     /** 预留控制层依赖（当前 ensureOpenMounts 经 listPresetMcpRows 直读，未用；占位见 NIT-2）。 */
     control: McpControlCtx;
     state: GatewayState;
+    /**
+     * 可注入行源/意图源（自测用；现网缺省走真实现）。
+     * WARN-3（复审，2026-09-10）：自测读不到真 state.json（进程缓存）且 fake
+     * compositionInventory 空行，必须可注入才能覆盖拆分支。
+     */
+    listRows?: (ctx: Context, presetId: string) => Promise<{
+        rows: GatewayPresetRow[];
+        presetPath: string;
+    }>;
+    readIntents?: () => Promise<Record<string, {
+        desired?: boolean;
+        lastApplied?: boolean | null;
+    }>>;
+}
+/** ensureOpenMounts 行源最小形状（= preset-mcp.ts PresetMcpRow 子集）。 */
+export interface GatewayPresetRow {
+    serverName: string;
+    rowId: string;
+    file: string;
+    disabled: boolean;
+    config?: import('./preset-mcp').PresetMcpClientConfig;
 }
 /** ensureOpenMounts 结果计数（W3 lastCheck detail 同格式）。 */
 export interface EnsureOpenMountsResult {
@@ -89,6 +110,8 @@ export interface EnsureOpenMountsResult {
     reused: string[];
     skipped: string[];
     skippedOfficial: string[];
+    /** 关意图即拆：state.json desired=true 的已挂载行，本轮 remove 掉的名单。 */
+    unmounted: string[];
     errors: Array<{
         server: string;
         error: string;
@@ -103,6 +126,12 @@ export interface EnsureOpenMountsResult {
  * - loader 已有同名 server 行 → skippedOfficial（网关让路，不建第二实例）；
  * - mounts 已有同名 → reused；
  * - 否则 loader.create({id: gw-mcp-<server>, name, config, disabled:false}) → mounted/errors。
+ *
+ * 关意图即拆（WARN-3 补关链路，2026-09-10 现网实证）：
+ * - toggle 网关行只写 state.json desired 意图（routes.ts 网关分支，不碰 live gw- 行）；
+ * - 本轮先读 state，对「已挂载 mounts 中 desired=true（关意图）」的行逐个 loader.remove
+ *   并清 mounts/entryIds 账，记 unmounted；意图链不动（state/pending 由 toggle 侧维护）。
+ * - 开意图（desired=false/无意图）走正常挂载真值表；关→开即重挂。
  *
  * 单飞（W3）：syncing guard + 顶层 try/finally；一家失败记 errors 不抛（一家挂不拖全家）。
  * preset 选择（W4）：调用方 agent 优先，无则 roots[0]/list[0]（与 cachedPresetRow 同规则）；
