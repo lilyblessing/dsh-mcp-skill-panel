@@ -925,6 +925,17 @@ check('gatewayEntryId：连字符前缀双向映射（B4，冒号不可用）', 
   assert.ok(!index.gatewayEntryId('exa').includes(':'))
 })
 
+check('collect补行去重：loader已有同名跳过、缺席补行（2026-09-10 面板全行）', () => {
+  // 纯集合逻辑回归（无需 harness）：去重键=serverName，loader 行优先。
+  const loaderRows = [{ serverName: 'exa' }, { serverName: 'filesystem' }]
+  const liveServers = new Set(loaderRows.map((row) => row.serverName))
+  const presetRows = [{ serverName: 'exa' }, { serverName: 'calcmcp' }, { serverName: 'chrome' }]
+  const filtered = presetRows.filter((pr) => !liveServers.has(pr.serverName)).map((pr) => pr.serverName)
+  assert.deepEqual(filtered, ['calcmcp', 'chrome'])
+  const merged = [...loaderRows.map((r) => r.serverName), ...filtered].sort()
+  assert.deepEqual(merged, ['calcmcp', 'chrome', 'exa', 'filesystem'])
+})
+
 await checkAsync('ensureOpenMounts：单飞guard+空态（真值表循环由decideMount覆盖）', async () => {
   const calls = []
   const fakeLoader = {

@@ -387,26 +387,31 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
         source: gatewayServerOfEntryId(entry.id) !== null ? 'gateway' : 'live',
       })
     }
+    mcp.sort((a, b) => a.serverName.localeCompare(b.serverName))
   } catch (error) {
     errors.push(`loader.entries: ${messageOf(error)}`)
   }
-  mcp.sort((a, b) => a.serverName.localeCompare(b.serverName))
 
   // rc.1 standing 组合兜底（空面板修复A，2026-09-08）：preset 行挂 standing 组合，
   // 不在 ctx.loader.entries() 里时 mcp[] 为空。此时以当前会话 preset 的 standing
   // 快照行补行：开关走 state.json desired 意图（pending 徽标），pending.ts:state.json
   // 残留补齐负责下次启动/会话边界物化（syncPresetFiles 写 preset 文件）。
-  // 仅当「loader 零行」时补行——loader 有行（旧版/未来版）时保持原行为不动。
-  // P5（B5）：网关 gw- 行已进 loader（live 分支天然覆盖并标 source:'gateway'），
-  // preset 补行仍仅 loader 零行时触发——此时无 loader 行可去重，删去重代码
-  //（复审 WARN-1：守卫内 liveServers 恒为空集，去重永不触发，删之）。
-  if (mcp.length === 0) {
-    try {
-      // 当前会话 preset：缺 sessionId 时 roots[0]/list[0]（与 resolveAgent 同规则）
-      const presetId = agent ? (ctx.agentPresets.composedPreset(agent.ctx) ?? null) : null
-      if (presetId) {
+  // P5 网关（2026-09-10 现网需求）：loader 有网关行时 preset 关态行消失——用户要求
+  // 所有安装的 MCP 都在面板列出（开+关均可见可开关）。补行改为始终执行，loader 已有
+  // 同 serverName 的行（网关 gw- 行/官方行/项目行）优先，preset 快照只补缺席的 server。
+  // 关态行 toggle 走原 preset 意图分支（routes.ts），不动；开意图物化（syncPresetFiles
+  // 写 preset 文件）后下轮 ensureOpenMounts 挂载（最终一致，非即时）。去重键=serverName
+  //（loader 行与 preset 快照同名并存时只留 loader 行）。
+  try {
+    // 当前会话 preset：缺 sessionId 时 roots[0]/list[0]（与 resolveAgent 同规则）
+    const presetId = agent ? (ctx.agentPresets.composedPreset(agent.ctx) ?? null) : null
+    if (presetId) {
+      try {
         const { rows: presetRows } = await listPresetMcpRows(ctx, presetId)
+        // 去重：loader 已有同 serverName 行（网关/官方/项目）时跳过 preset 快照。
+        const liveServers = new Set(mcp.map((row) => row.serverName))
         for (const pr of presetRows) {
+          if (liveServers.has(pr.serverName)) continue
           const projectWorkspace = projectServerOwner(pr.serverName)
           const agg = byServer.get(pr.serverName)
           const liveTools = agg?.tools ?? 0
@@ -451,10 +456,12 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
           })
         }
         mcp.sort((a, b) => a.serverName.localeCompare(b.serverName))
+      } catch (error) {
+        errors.push(`preset-mcp: ${messageOf(error)}`)
       }
-    } catch (error) {
-      errors.push(`preset-mcp: ${messageOf(error)}`)
     }
+  } catch (error) {
+    errors.push(`preset-mcp: ${messageOf(error)}`)
   }
 
   return {
