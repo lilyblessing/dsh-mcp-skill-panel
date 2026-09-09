@@ -36,6 +36,10 @@ export interface McpRow {
   source?: 'live' | 'preset'
   /** 该 server 的工具列表（面板工具级禁用用；null = 该 server 暂无工具目录）。 */
   toolList?: Array<{ name: string; description: string; disabled: boolean }> | null
+  // BLOCK-2（2026-09-09）：McpRow 不再携带全量挂载 config。曾有 `config?` 可选
+  // 字段透出 preset 快照行的 command/args/env/headers（含求值后 secrets），而
+  // /state 是无鉴权 GET 且 client 零消费；P4 网关走 host 侧 resolvePresetConfig，
+  // 不经网络。host 侧全量配置见 preset-mcp.ts PresetMcpClientConfig。
 }
 
 export interface McpView {

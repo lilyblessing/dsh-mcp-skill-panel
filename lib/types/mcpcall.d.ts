@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader';
 import type { Catalog } from './catalog';
-import type { PresetMcpRow } from './preset-mcp';
+import type { PresetMcpRow, PresetMcpClientConfig } from './preset-mcp';
 /**
  * 归一化 mcp_call 的 tool 参数（2026-08-22 修补）：模型可能把 mcp_search 返回的
  * 注册全名（mcp__<server>__<tool>）直接填入 tool，无条件拼接会生成双重前缀。
@@ -64,6 +64,12 @@ export interface McpControlCtx {
      * 不走本函数，故不受影响。
      */
     presetTimeoutMs?(serverName: string): Promise<number | undefined>;
+    /**
+     * P1 直读（2026-09-09）：按 serverName 取当前会话 preset 行的全量挂载配置
+     * （与 resolvePresetRow 同一行来源/同一缓存条目；无行或 transport 不可挂载
+     * 时返回 undefined，调用方回退原行为）。网关挂载（P4）用它重建 client 行。
+     */
+    resolvePresetConfig?(serverName: string, agent: Agent | undefined): Promise<PresetMcpClientConfig | undefined>;
     /** AI-owner 标记：上次自动开启该 entry 的时间戳。 */
     setAiOwner(entryId: string, at: number): Promise<void>;
     clearAiOwner(entryId: string): Promise<void>;
@@ -82,6 +88,12 @@ export interface McpCallController {
     markUserEnabled(serverName: string): void;
     /** 完整调用流程，返回给模型的文本结果（不会 throw，错误也转文本）。 */
     call(serverName: string, toolName: string, args: unknown, agent: Agent | undefined, signal: AbortSignal, explicitTimeoutMs?: number): Promise<string>;
+    /**
+     * 网关透传流程（P2，与 call() 同态共享引用计数）：成功返文本，失败 throw
+     *（isError→Error cause 保原始 result；超时/abort 原样；禁用/停用/miss 均
+     * throw）。供网关 own 层双工具复用；call() 原行为不动。
+     */
+    gateway(serverName: string, toolName: string, args: unknown, agent: Agent | undefined, signal: AbortSignal, explicitTimeoutMs?: number): Promise<string>;
     /** 启动空闲回收器；返回 disposer。 */
     startIdleReaper(): () => void;
     /** 诊断视图：AI 启用的 server 及其引用计数。 */
@@ -92,6 +104,36 @@ export interface McpCallController {
     }>;
 }
 export declare function msgOf(error: unknown): string;
+/**
+ * 网关透传调用（P2，与 call() 并存）：与 callViaPresetViews 同执行链
+ * （collectToolViews+waitRegistered+execute），但错误走 throw 而非文本。
+ * call() 的恒文本契约（:175-182）不动；网关/双工具走本函数。
+ *
+ * 三抛：
+ * - isError→throw（前缀 `MCP ${server}.${bare} 调用失败`，cause 保原始
+ *   result 对象：content/structuredContent/error 均在 cause 上）；
+ * - 注册超时（waitRegistered 原文 `tool "…" 未在 Xms 内注册`）与执行失败
+ *   均原样 throw（message 沿用原文便 grep；调用方按 message 区分 code）；
+ * - signal.aborted→AbortError 原样透传（waitRegistered onAbort / execute
+ *   signal 同源，不包装）。
+ * 前置 normalizeToolName 捕获（跨 server 全名 throw 原样透传，不进 try）。
+ * WARN-2 下沉（2026-09-09）：arguments 归一化收进本函数（与 mcp_call wrapper
+ * :789 同调 normalizeArguments），P4 网关双工具直调本函数即得 JSON 字符串
+ * 兼容；call() 路径保持 wrapper 侧调用不变（双调幂等：对象原样透传同引用）。
+ * finally 抄 refCount 对称（callViaPresetViews finally）；绝不调 restore
+ * （无 Entry 可恢复，直通语义）；绝不新增 dispose.
+ */
+export interface GatewayCallOpts {
+    signal: AbortSignal;
+    agent: Agent | undefined;
+    explicitTimeoutMs?: number;
+}
+export declare function gatewayCall(ctx: Context, control: McpControlCtx, state: GatewayCallState, serverName: string, bareIn: string, args: unknown, opts: GatewayCallOpts): Promise<string>;
+/** gatewayCall 共享的引用计数态（与 ControllerState 同形；P4 网关常驻复用）。 */
+export interface GatewayCallState {
+    refCounts: Map<string, number>;
+    lastUsed: Map<string, number>;
+}
 /**
  * 创建控制层控制器。`caches` 即控制层依赖（McpControlCtx），由 index.ts
  * 在 apply 里构建并封闭所有 IO。

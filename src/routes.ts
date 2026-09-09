@@ -436,6 +436,7 @@ interface McpServerConfigLike {
   url?: string
   headers?: Record<string, string>
   toolCallTimeoutMs?: number
+  failOnStartupError?: boolean
 }
 
 /* ── 添加 Skill（项目/全局） ───────────────────────────────────────────── */

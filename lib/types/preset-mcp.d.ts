@@ -12,20 +12,43 @@
  * 不产生运行时新依赖（type-only import，tsdown external 无影响）。
  */
 import type { Context } from '@deepseek-ai/cordis';
-/** preset 文件文本解析出的单行 MCP 配置（key = 短 rowId，如 mcp-filesystem）。 */
+/** preset 文件文本解析出的单行 MCP 配置（key = 短 rowId，如 mcp-filesystem）。
+ *
+ * P1 直读（2026-09-09）：除 serverName/transport/超时外，追加 dsh-mcp-client
+ * 挂载所需的全键（command/args/env/cwd/url/headers/failOnStartupError）。
+ * env/headers 的值是**求值后**的最终字符串（`!!js` 在解析时即用 process.env
+ * 求值，与 loader 加载时语义一致；失败回落 ''）。transport 缺省时按
+ * mcp-convert.ts:108-119 规则推断（有 command→stdio/有 url→http），推断不出
+ * 才为 null（兼容旧行为）。
+ */
 export interface PresetMcpParsed {
     serverName: string;
     transport: string | null;
     toolCallTimeoutMs?: number;
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    cwd?: string;
+    url?: string;
+    headers?: Record<string, string>;
+    failOnStartupError?: boolean;
 }
 /**
- * 解析 preset 组合文本，抽取全部 `mcp-*` 行的 serverName/transport/超时。
- * 纯文本正则（preset 文件结构稳定）：按 `^- id:` 切块，块内抓三个键。
+ * 解析 preset 组合文本，抽取全部 `mcp-*` 行的 serverName/transport/超时/挂载全键。
+ * 纯文本正则（preset 文件结构稳定）：按 `^- id:` 切块，块内抓 serverName/
+ * transport/toolCallTimeoutMs/command/args/env/cwd/url/headers/failOnStartupError。
  * 键锚定行首（防注释/长键误命中）；值允许可选双引号（YAML `"stdio"` 形态）。
+ * `!!js "..."` 表达式在解析时即求值（process.env 语义，与 loader 一致）。
+ * transport 缺省按 mcp-convert.ts:108-119 推断（有 command→stdio/有 url→http）。
  * 纯函数，可被 selftest 直接覆盖。
  */
 export declare function parsePresetMcpText(text: string): Map<string, PresetMcpParsed>;
-/** standing 组合中的一行 MCP（inventory 行 + preset 文本配置的合并）。 */
+/** standing 组合中的一行 MCP（inventory 行 + preset 文本配置的合并）。
+ *
+ * P1 直读（2026-09-09）：新增可选 `config`，为该行的 dsh-mcp-client 全量挂载
+ * 配置（与 McpServerConfig 形状对齐的子集；`!!js`/`${VAR}` 已在解析时求值）。
+ * 旧字段语义不变：disabled/running 仍是 inventory 快照。
+ */
 export interface PresetMcpRow {
     /** inventory 长 id（含 standing 前缀，如 include:agent-presets:mcp-filesystem）。 */
     entryId: string;
@@ -38,7 +61,24 @@ export interface PresetMcpRow {
     running: boolean;
     /** preset 组合文件绝对路径（state.json mcp 段的文件键）。 */
     file: string;
+    /** 该行的 dsh-mcp-client 全量挂载配置（P1 直读新增；缺省=旧快照行）。 */
+    config?: PresetMcpClientConfig;
 }
+/** dsh-mcp-client 行 config 全量子集（与 mcp-convert.ts McpServerConfig 对齐）。 */
+export interface PresetMcpClientConfig {
+    serverName: string;
+    transport: 'stdio' | 'streamable-http';
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    cwd?: string;
+    url?: string;
+    headers?: Record<string, string>;
+    toolCallTimeoutMs?: number;
+    failOnStartupError?: boolean;
+}
+/** 由 PresetMcpParsed 组装挂载 config（transport 归一失败/缺失时返回 undefined）。 */
+export declare function presetConfigOf(parsed: PresetMcpParsed): PresetMcpClientConfig | undefined;
 /**
  * 按 serverName 在某 preset 的 standing 行里定位（mcp_call 预设直调用，0.5.6）。
  * serverName 大小写敏感精确匹配（与 serverNameOf/config.serverName 同语义）；

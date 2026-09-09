@@ -116,22 +116,22 @@ const buildCatalog = () => {
   return c
 }
 
-check('searchCatalog 打分排序：描述命中 > 未命中、工具名命中权重高', () => {
+check('searchCatalog 打分排序（P3 加权 B：裸名 substring 15/描述 6/参数 3/server 3/兜底 1）', () => {
   const c = buildCatalog()
-  // "integ" 是 mcp__calcmcp__integrate 工具名 token 的前缀 → 命中且最高分
+  // "integ" 命中 mcp__calcmcp__integrate 裸名 substring（15 + 兜底 1）
   const hits = catalog.searchCatalog(c, 'integ')
   assert.ok(hits.length >= 1)
   assert.equal(hits[0].server, 'calcmcp')
   assert.equal(hits[0].tool.name, 'mcp__calcmcp__integrate')
-  // 工具名命中 "read"（read_memory）
-  const readHits = catalog.searchCatalog(c, 'read')
-  assert.equal(readHits[0].tool.name, 'mcp__cheatengine__read_memory')
-  assert.ok(readHits[0].server === 'cheatengine')
+  // 中文连写 substring 命中（P3：描述原文 substring，不切分）
+  const cnHits = catalog.searchCatalog(c, '读取游戏')
+  assert.ok(cnHits.length >= 1)
+  assert.equal(cnHits[0].tool.name, 'mcp__cheatengine__read_memory')
   // 无命中时为空
   assert.equal(catalog.searchCatalog(c, 'zzzznope').length, 0)
 })
 
-check('searchCatalog 参数名命中权重', () => {
+check('searchCatalog 参数名命中权重（P3：参数名 substring 3 分）', () => {
   const c = buildCatalog()
   // "addr" 是多个工具的参数名；权重 1 但应命中
   const hits = catalog.searchCatalog(c, 'addr', 5)
@@ -139,23 +139,34 @@ check('searchCatalog 参数名命中权重', () => {
   assert.ok(hits.every((h) => ['read_memory', 'write_memory'].includes(h.tool.name.split('__').pop())))
 })
 
-check('searchCatalog 空 query 返回空；limit 被尊重', () => {
+check('searchCatalog 空 query 返回空；limit 被尊重（P3 缺省 8）', () => {
   const c = buildCatalog()
   assert.equal(catalog.searchCatalog(c, '').length, 0)
   assert.ok(catalog.searchCatalog(c, 'memory', 1).length <= 1)
-  // 默认 limit=5
-  const all = catalog.searchCatalog(c, 'read write navigate integ matrix addr url', 10)
-  assert.ok(all.length >= 4)
+  // topK 显式优先语义（W4）：searchCatalog limit 直传即 topK
+  assert.ok(catalog.searchCatalog(c, 'read write navigate integ matrix addr url', 2).length <= 2)
 })
 
-check('listServer 返回精简名+描述；未知 server undefined', () => {
+check('listServer 分页上限钳制 200（W4）', () => {
+  const c = buildCatalog()
+  const page = catalog.listServer(c, 'chrome', 0, 9999)
+  assert.ok(page.tools.length <= 200)
+  assert.equal(page.totalCount, 1)
+})
+
+check('listServer 返回精简名+描述；未知 server undefined；分页 offset/limit（P3）', () => {
   const c = buildCatalog()
   const chrome = catalog.listServer(c, 'chrome')
   assert.ok(chrome)
-  assert.equal(chrome.length, 1)
-  assert.equal(chrome[0].name, 'mcp__chrome__navigate')
-  assert.equal(chrome[0].description, '导航到 URL')
+  assert.equal(chrome.totalCount, 1)
+  assert.equal(chrome.tools.length, 1)
+  assert.equal(chrome.tools[0].name, 'mcp__chrome__navigate')
+  assert.equal(chrome.tools[0].description, '导航到 URL')
   assert.equal(catalog.listServer(c, 'nope'), undefined)
+  // P3 分页：超界 offset 返回空页但 totalCount 保留
+  const page = catalog.listServer(c, 'chrome', 10, 20)
+  assert.equal(page.totalCount, 1)
+  assert.equal(page.tools.length, 0)
 })
 
 check('serverOfMcp 解析 server 名', () => {
@@ -625,6 +636,289 @@ await checkAsync('findPresetRowByServerName：按 serverName 定位 standing 行
 
 check('findPresetRowByServerName 经构建产物导出（index 转出）', () => {
   assert.equal(typeof index.findPresetRowByServerName, 'function')
+})
+
+// ── P1 直读：parsePresetMcpText 全键抓取（command/args/env/cwd/url/headers/failOnStartupError） ──
+// BLOCK-1 回归：flow 单行 args（实块 6 行 stdio 形态）必须解析，弃测即漏保真断裂
+check('parsePresetMcpText：P1 直读 flow 单行 args（calcmcp 实块形态）', () => {
+  const text = [
+    '- id: mcp-calcmcp',
+    '  disabled: true',
+    "  name: '@deepseek-ai/dsh-mcp-client'",
+    '  config:',
+    '    serverName: calcmcp',
+    '    transport: stdio',
+    '    command: python',
+    "    args: ['-u', 'D:\\software\\HarnessWorkspace\\CalcMCP\\mcp_server.py']",
+  ].join('\n')
+  const parsed = index.parsePresetMcpText(text)
+  const row = parsed.get('mcp-calcmcp')
+  assert.ok(row)
+  assert.equal(row.serverName, 'calcmcp')
+  assert.equal(row.transport, 'stdio')
+  assert.equal(row.command, 'python')
+  assert.deepEqual(row.args, ['-u', 'D:\\software\\HarnessWorkspace\\CalcMCP\\mcp_server.py'])
+  const cfg = index.presetConfigOf(row)
+  assert.ok(cfg)
+  assert.equal(cfg.transport, 'stdio')
+  assert.equal(cfg.command, 'python')
+  assert.deepEqual(cfg.args, ['-u', 'D:\\software\\HarnessWorkspace\\CalcMCP\\mcp_server.py'])
+})
+
+check('parsePresetMcpText：P1 直读 flow 单行 args（filesystem 4 路径含空格/CJK）', () => {
+  const text = [
+    '- id: mcp-filesystem',
+    "  name: '@deepseek-ai/dsh-mcp-client'",
+    '  config:',
+    '    serverName: filesystem',
+    '    transport: stdio',
+    '    command: npx',
+    "    args: ['-y', '@modelcontextprotocol/server-filesystem', 'D:\\sync\\VSC项目管理', 'D:\\SteamLibrary\\steamapps\\common\\ZED ZONE', 'D:\\Obsidian\\笔记', 'D:\\software\\HarnessWorkspace']",
+  ].join('\n')
+  const row = index.parsePresetMcpText(text).get('mcp-filesystem')
+  assert.ok(row)
+  assert.deepEqual(row.args, ['-y', '@modelcontextprotocol/server-filesystem', 'D:\\sync\\VSC项目管理', 'D:\\SteamLibrary\\steamapps\\common\\ZED ZONE', 'D:\\Obsidian\\笔记', 'D:\\software\\HarnessWorkspace'])
+})
+
+check('parsePresetMcpText：P1 直读 flow 单行 args（codegraph serve --mcp）', () => {
+  const text = [
+    '- id: mcp-codegraph',
+    '  disabled: true',
+    "  name: '@deepseek-ai/dsh-mcp-client'",
+    '  config:',
+    '    serverName: codegraph',
+    '    transport: stdio',
+    '    command: codegraph',
+    "    args: ['serve', '--mcp']",
+  ].join('\n')
+  const row = index.parsePresetMcpText(text).get('mcp-codegraph')
+  assert.ok(row)
+  assert.deepEqual(row.args, ['serve', '--mcp'])
+  assert.ok(index.presetConfigOf(row))
+})
+
+check('parsePresetMcpText：P1 直读 block 多行 args（mimo-image 形态，节内注释不截断）', () => {
+  const text = [
+    '- id: mcp-mimo-image',
+    '  disabled: true',
+    "  name: '@deepseek-ai/dsh-mcp-client'",
+    '  config:',
+    '    serverName: mimo-image',
+    '    transport: stdio',
+    '    command: python',
+    '    args:',
+    '      # 紧贴节的注释行（WARN-2 回归：不得截断其后条目）',
+    "      - '-u'",
+    "      - 'server.py'",
+  ].join('\n')
+  const row = index.parsePresetMcpText(text).get('mcp-mimo-image')
+  assert.ok(row)
+  assert.deepEqual(row.args, ['-u', 'server.py'])
+})
+
+check('parsePresetMcpText：P1 直读 http 全键 + !!js 求值（exa 形态）', () => {
+  process.env.__DSH_P1_TEST_EXA = 'exa-key-123'
+  try {
+    const text = [
+      '- id: mcp-exa',
+      "  name: '@deepseek-ai/dsh-mcp-client'",
+      '  config:',
+      '    serverName: exa',
+      '    transport: streamable-http',
+      '    url: https://mcp.exa.ai/mcp',
+      '    headers:',
+      '      Authorization: !!js "process.env.__DSH_P1_TEST_EXA ? `Bearer ${process.env.__DSH_P1_TEST_EXA}` : \'\'"',
+      '    failOnStartupError: false',
+    ].join('\n')
+    const parsed = index.parsePresetMcpText(text)
+    const row = parsed.get('mcp-exa')
+    assert.ok(row)
+    assert.equal(row.url, 'https://mcp.exa.ai/mcp')
+    assert.equal(row.headers.Authorization, 'Bearer exa-key-123')
+    assert.equal(row.failOnStartupError, false)
+    const cfg = index.presetConfigOf(row)
+    assert.ok(cfg)
+    assert.equal(cfg.transport, 'streamable-http')
+    assert.equal(cfg.url, 'https://mcp.exa.ai/mcp')
+  } finally {
+    delete process.env.__DSH_P1_TEST_EXA
+  }
+})
+
+check('parsePresetMcpText：P1 直读 env 多键 + transport 缺省推断', () => {
+  const text = [
+    '- id: mcp-mimo-image',
+    '  disabled: true',
+    "  name: '@deepseek-ai/dsh-mcp-client'",
+    '  config:',
+    '    serverName: mimo-image',
+    '    command: python',
+    '    args:',
+    "      - '-u'",
+    "      - 'server.py'",
+    '    env:',
+    '      MIMO_MODEL: mimo-v2.5',
+    '      MIMO_TIMEOUT: \'300\'',
+    '    toolCallTimeoutMs: 300000',
+    '    failOnStartupError: false',
+  ].join('\n')
+  const parsed = index.parsePresetMcpText(text)
+  const row = parsed.get('mcp-mimo-image')
+  assert.ok(row)
+  // transport 缺省 → 有 command 推断 stdio（mcp-convert.ts:108-119 同规则）
+  assert.equal(row.transport, 'stdio')
+  assert.equal(row.env.MIMO_MODEL, 'mimo-v2.5')
+  assert.equal(row.env.MIMO_TIMEOUT, '300')
+  assert.equal(row.toolCallTimeoutMs, 300000)
+})
+
+check('presetConfigOf：transport 不可挂载时回 undefined（旧快照行兼容）', () => {
+  assert.equal(index.presetConfigOf({ serverName: 'x', transport: null }), undefined)
+  assert.equal(index.presetConfigOf({ serverName: 'x', transport: 'stdio' }), undefined)
+  assert.equal(index.presetConfigOf({ serverName: 'x', transport: 'streamable-http' }), undefined)
+})
+
+check('parseMcpServersJson：P1 failOnStartupError 透传（缺省 undefined 不变）', () => {
+  const withFlag = convert.parseMcpServersJson(JSON.stringify({
+    mcpServers: { exa: { url: 'https://mcp.exa.ai/mcp', failOnStartupError: false } },
+  }))
+  assert.equal(withFlag.errors.length, 0)
+  assert.equal(withFlag.servers.exa.failOnStartupError, false)
+  const rows = convert.serversToRows(withFlag.servers)
+  assert.equal(rows[0].config.failOnStartupError, false)
+  const noFlag = convert.parseMcpServersJson(JSON.stringify({ c: { command: 'x' } }))
+  assert.equal(noFlag.servers.c.failOnStartupError, undefined)
+  // serversToRows 缺省不落键（现网行为不变）
+  assert.ok(!('failOnStartupError' in convert.serversToRows(noFlag.servers)[0].config))
+})
+
+// ── P2 gatewayCall：与 call() 并存，三抛透传（fake control/ctx 覆盖分支） ──
+// fake 说明：control 仅实现 gatewayCall 所需三键（resolvePresetRow/serverTimeoutMs），
+// ctx 仅实现 collectToolViews 消费的 tools + waitRegistered 消费的 logger/timeout/on/effect。
+const makeGatewayHarness = (presetRow, toolsImpl) => {
+  const control = {
+    serverTimeoutMs: () => 60_000,
+    resolvePresetRow: async () => presetRow,
+  }
+  const ctx = {
+    tools: toolsImpl,
+    logger: {},
+    timeout: (fn) => {
+      fn()
+      return () => undefined
+    },
+    root: { on: () => () => true },
+    effect: () => () => undefined,
+  }
+  const state = { refCounts: new Map(), lastUsed: new Map() }
+  return { ctx, control, state }
+}
+const gatewayToolsOk = (text) => ({
+  get: () => ({}),
+  execute: async () => ({ content: [{ type: 'text', text }] }),
+})
+
+await checkAsync('gatewayCall：成功返文本 + refCount 对称清零', async () => {
+  const { ctx, control, state } = makeGatewayHarness(
+    { rowId: 'mcp-filesystem', serverName: 'filesystem', transport: 'stdio', disabled: false, running: true },
+    gatewayToolsOk('hello'),
+  )
+  const out = await index.gatewayCall(ctx, control, state, 'filesystem', 'read_text_file', {}, { signal: AbortSignal.timeout(5000), agent: undefined })
+  assert.equal(out, 'hello')
+  assert.equal(state.refCounts.size, 0)
+})
+
+await checkAsync('gatewayCall：前置 normalize 跨 server 全名 throw 透传', async () => {
+  const { ctx, control, state } = makeGatewayHarness(
+    { rowId: 'mcp-exa', serverName: 'exa', transport: 'streamable-http', disabled: false, running: true },
+    gatewayToolsOk('x'),
+  )
+  await assert.rejects(
+    () => index.gatewayCall(ctx, control, state, 'exa', 'mcp__mimo-image__understand_image', {}, { signal: AbortSignal.timeout(5000), agent: undefined }),
+    /裸名/,
+  )
+  assert.equal(state.refCounts.size, 0)
+})
+
+await checkAsync('gatewayCall：禁用行/停用行/miss 均 throw（非文本）', async () => {
+  // miss：resolvePresetRow → undefined
+  {
+    const tools = gatewayToolsOk('x')
+    const control = { serverTimeoutMs: () => 60_000, resolvePresetRow: async () => undefined }
+    const ctx = { tools, logger: {}, timeout: (fn) => { fn(); return () => undefined }, root: { on: () => () => true }, effect: () => () => undefined }
+    const state = { refCounts: new Map(), lastUsed: new Map() }
+    await assert.rejects(
+      () => index.gatewayCall(ctx, control, state, 'ghost', 'x', {}, { signal: AbortSignal.timeout(5000), agent: undefined }),
+      /未知 MCP server/,
+    )
+  }
+  // 停用行
+  {
+    const { ctx, control, state } = makeGatewayHarness(
+      { rowId: 'mcp-exa', serverName: 'exa', transport: 'streamable-http', disabled: true, running: false },
+      gatewayToolsOk('x'),
+    )
+    await assert.rejects(
+      () => index.gatewayCall(ctx, control, state, 'exa', 'web_search_exa', {}, { signal: AbortSignal.timeout(5000), agent: undefined }),
+      /当前已停用/,
+    )
+  }
+})
+
+await checkAsync('gatewayCall：isError→throw 且 cause 保原始 result；空内容 throw', async () => {
+  const raw = { isError: true, error: { code: -32602 }, content: [{ type: 'text', text: 'bad' }] }
+  const { ctx, control, state } = makeGatewayHarness(
+    { rowId: 'mcp-exa', serverName: 'exa', transport: 'streamable-http', disabled: false, running: true },
+    { get: () => ({}), execute: async () => raw },
+  )
+  const err = await index.gatewayCall(ctx, control, state, 'exa', 'web_search_exa', {}, { signal: AbortSignal.timeout(5000), agent: undefined }).then(
+    () => { throw new Error('should throw') },
+    (e) => e,
+  )
+  assert.ok(String(err.message).includes('调用失败'))
+  assert.equal(err.cause, raw)
+  // 空内容
+  const { ctx: ctx2, control: control2, state: state2 } = makeGatewayHarness(
+    { rowId: 'mcp-exa', serverName: 'exa', transport: 'streamable-http', disabled: false, running: true },
+    { get: () => ({}), execute: async () => ({ content: [] }) },
+  )
+  await assert.rejects(
+    () => index.gatewayCall(ctx2, control2, state2, 'exa', 'web_search_exa', {}, { signal: AbortSignal.timeout(5000), agent: undefined }),
+    /无返回内容/,
+  )
+})
+
+await checkAsync('gatewayCall：JSON 字符串 arguments 归一化下沉（WARN-2）', async () => {
+  let seen = null
+  const { ctx, control, state } = makeGatewayHarness(
+    { rowId: 'mcp-filesystem', serverName: 'filesystem', transport: 'stdio', disabled: false, running: true },
+    { get: () => ({}), execute: async (exec) => { seen = exec.arguments; return { content: [{ type: 'text', text: 'ok' }] } } },
+  )
+  const out = await index.gatewayCall(ctx, control, state, 'filesystem', 'read_text_file', '{"path": "README.md"}', { signal: AbortSignal.timeout(5000), agent: undefined })
+  assert.equal(out, 'ok')
+  assert.deepEqual(seen, { path: 'README.md' })
+})
+
+// ── P4 网关纯逻辑：挂载决策/视野隔离/自检断言 ──
+check('decideMount：不可挂载/停用/已挂载/新挂载四态', () => {
+  assert.equal(index.decideMount('x', undefined, false, new Map()), 'skip')
+  assert.equal(index.decideMount('exa', { serverName: 'exa' }, true, new Map()), 'skip')
+  assert.equal(index.decideMount('exa', { serverName: 'exa' }, false, new Map([['exa', 1]])), 'reuse')
+  assert.equal(index.decideMount('exa', { serverName: 'exa' }, false, new Map()), 'mount')
+})
+
+check('checkChildVisible：恒为双工具才 PASS', () => {
+  assert.ok(index.checkChildVisible(['mcp_search', 'mcp_call']).ok)
+  assert.ok(!index.checkChildVisible(['mcp_call']).ok)
+  assert.ok(!index.checkChildVisible(['mcp_call', 'mcp_search', 'mcp__exa__web_search_exa']).ok)
+})
+
+check('isolateChildScope：deny 转调 restrict 并回 disposer', () => {
+  let got = null
+  const childTools = { restrict: (filter) => { got = filter; return () => 'lifted' } }
+  const lift = index.isolateChildScope(childTools, ['mcp__exa__web_search_exa'])
+  assert.deepEqual(got, { deny: ['mcp__exa__web_search_exa'] })
+  assert.equal(lift(), 'lifted')
 })
 
 if (failed) {

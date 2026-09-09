@@ -29,7 +29,8 @@
 import Schema from '@deepseek-ai/schemastery';
 import type { Context } from '@deepseek-ai/cordis';
 import type { Catalog } from './catalog';
-export { normalizeToolName, normalizeArguments, msgOf } from './mcpcall';
+export { normalizeToolName, normalizeArguments, msgOf, gatewayCall } from './mcpcall';
+export type { GatewayCallOpts, GatewayCallState } from './mcpcall';
 import type { McpView, SkillsView } from './shared-types';
 export type { McpView, SkillsView, McpRow, SkillRow } from './shared-types';
 export type { DomainCaches } from './collect';
@@ -37,11 +38,13 @@ export { mergeSchemas, computeStatus } from './collect';
 export { setRowFlag, setSkillFlag, rowDisabledState, syncPresetFiles, isValidSkillName, buildSkillMd } from './preset';
 export { scanWorkspaceMcp } from './project-mcp';
 export { installProjectMcp, remountWorkspace, projectServerOwner, projectServerName } from './project-mcp';
+export { createGatewayState, isolateChildScope, decideMount, checkChildVisible, disposeGatewayState } from './gateway';
+export type { GatewayState } from './gateway';
 export { readState, writeState } from './state';
 export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending';
 export { loadDisabledTools, setToolDisabled, isToolDisabled, disabledToolsOf } from './tool-disable';
-export { parsePresetMcpText, findPresetRowByServerName } from './preset-mcp';
-export type { PresetMcpRow } from './preset-mcp';
+export { parsePresetMcpText, findPresetRowByServerName, presetConfigOf } from './preset-mcp';
+export type { PresetMcpRow, PresetMcpClientConfig, PresetMcpParsed } from './preset-mcp';
 export declare const name = "runtime-inventory";
 export declare const inject: string[];
 export interface Config {
@@ -52,7 +55,7 @@ export interface Config {
     autoManage?: boolean;
     /** 保活回收窗口（ms）。默认 30_000。 */
     keepAliveMs?: number;
-    /** mcp_search 缺省 top-K。默认 5。 */
+    /** mcp_search 缺省 top-K。默认 8（P3 网关定稿；线3 bench 平均 tok 最小拐点）。 */
     searchLimitDefault?: number;
     /** mcp_search top-K 上限。默认 10。 */
     searchLimitMax?: number;

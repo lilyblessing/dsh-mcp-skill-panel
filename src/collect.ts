@@ -437,6 +437,11 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
             pending: pendingFlag,
             workspace: projectWorkspace,
             source: 'preset',
+            // BLOCK-2 修复（2026-09-09）：preset 快照行不再向 McpView 透出全量
+            // 挂载 config。config 含求值后的 secrets（exa/mimo Authorization、
+            // obsidian Bearer），而 /state 是无鉴权 GET（routes.ts:546），client
+            // views.tsx 零消费该字段；P4 网关走 host 侧 resolvePresetConfig
+            //（index.ts），根本不需要网络传输。
           })
         }
         mcp.sort((a, b) => a.serverName.localeCompare(b.serverName))

@@ -12,7 +12,11 @@
  *
  * 纯逻辑、零依赖（仅类型），可被 scripts/selftest 用构建产物直接覆盖。
  */
-/** 单个 MCP server 的规范化配置（与 dsh-mcp-client 的 config 形状对齐）。 */
+/** 单个 MCP server 的规范化配置（与 dsh-mcp-client 的 config 形状对齐）。
+ *
+ * P1 直读（2026-09-09）：新增可选 failOnStartupError（yml 直读透传用；
+ * parseServer 解析不到/compute 时保持 undefined = 现网行为不变）。
+ */
 export interface McpServerConfig {
     serverName: string;
     transport: 'stdio' | 'streamable-http';
@@ -23,6 +27,7 @@ export interface McpServerConfig {
     url?: string;
     headers?: Record<string, string>;
     toolCallTimeoutMs?: number;
+    failOnStartupError?: boolean;
 }
 /** serverName → 配置（JSON 键即 serverName）。 */
 export type McpServers = Record<string, McpServerConfig>;

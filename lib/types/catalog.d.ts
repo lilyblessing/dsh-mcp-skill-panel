@@ -41,19 +41,26 @@ export declare function snapshotFromSchemas(schemas: ReadonlyArray<{
     parameters?: unknown;
 }>, serverName: string): CatalogEntry[];
 /**
- * 关键词全文检索 top-K。
- * 打分：工具名命中 3 / 工具名前缀 2 / 描述命中 2 / 描述前缀 1 / 参数名 1。
+ * 关键词全文检索 top-K（P3 网关定稿：加权 B）。
+ * 打分（bench `.scratch/mvt-5-search-bench.mjs` 实测定稿，加权 B）：
+ * 工具裸名 substring 15 / server 名 substring 3 / 描述 substring 6 /
+ * 参数名命中 3 / 公名 haystack（server/bare 拼接）substring 兜底 +1。
+ * substring 而非 token 精确命中：中文连写（“读文件”）不切分也能命中。
  * 返回按分数降序（同分按 server、name 字典序稳定）的命中数组。
  */
 export declare function searchCatalog(catalog: Catalog, query: string, limit?: number): SearchHit[];
 /**
- * 列出某 server 的全部工具（精简：name + description）。
+ * 列出某 server 的全部工具（精简：name + description；L2 无 schema）。
+ * 分页：offset/limit（1..200，缺省 0/20；P3 网关定稿 limit=20）。
  * 返回 undefined 表示该 server 不在 catalog 中。
  */
-export declare function listServer(catalog: Catalog, server: string): Array<{
-    name: string;
-    description: string;
-}> | undefined;
+export declare function listServer(catalog: Catalog, server: string, offset?: number, limit?: number): {
+    tools: Array<{
+        name: string;
+        description: string;
+    }>;
+    totalCount: number;
+} | undefined;
 /** catalog 文件路径：<dir>/catalog.json。 */
 export declare function catalogFileFor(dir: string): string;
 /** 从目录加载 catalog；文件不存在 / 解析失败时返回空 catalog。 */

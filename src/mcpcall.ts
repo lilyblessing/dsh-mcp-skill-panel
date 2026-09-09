@@ -23,7 +23,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { Catalog, SearchHit } from './catalog'
 import { searchCatalog, listServer } from './catalog'
 import { isToolDisabled } from './tool-disable'
-import type { PresetMcpRow } from './preset-mcp'
+import type { PresetMcpRow, PresetMcpClientConfig } from './preset-mcp'
 
 /** 空闲回收器扫描周期（ms）。 */
 const REAPER_INTERVAL_MS = 10_000
@@ -140,6 +140,13 @@ export interface McpControlCtx {
    */
   presetTimeoutMs?(serverName: string): Promise<number | undefined>
 
+  /**
+   * P1 直读（2026-09-09）：按 serverName 取当前会话 preset 行的全量挂载配置
+   * （与 resolvePresetRow 同一行来源/同一缓存条目；无行或 transport 不可挂载
+   * 时返回 undefined，调用方回退原行为）。网关挂载（P4）用它重建 client 行。
+   */
+  resolvePresetConfig?(serverName: string, agent: Agent | undefined): Promise<PresetMcpClientConfig | undefined>
+
   /** AI-owner 标记：上次自动开启该 entry 的时间戳。 */
   setAiOwner(entryId: string, at: number): Promise<void>
   clearAiOwner(entryId: string): Promise<void>
@@ -166,6 +173,19 @@ export interface McpCallController {
   markUserEnabled(serverName: string): void
   /** 完整调用流程，返回给模型的文本结果（不会 throw，错误也转文本）。 */
   call(
+    serverName: string,
+    toolName: string,
+    args: unknown,
+    agent: Agent | undefined,
+    signal: AbortSignal,
+    explicitTimeoutMs?: number,
+  ): Promise<string>
+  /**
+   * 网关透传流程（P2，与 call() 同态共享引用计数）：成功返文本，失败 throw
+   *（isError→Error cause 保原始 result；超时/abort 原样；禁用/停用/miss 均
+   * throw）。供网关 own 层双工具复用；call() 原行为不动。
+   */
+  gateway(
     serverName: string,
     toolName: string,
     args: unknown,
@@ -354,6 +374,100 @@ async function callViaPresetViews(
   }
 }
 
+/**
+ * 网关透传调用（P2，与 call() 并存）：与 callViaPresetViews 同执行链
+ * （collectToolViews+waitRegistered+execute），但错误走 throw 而非文本。
+ * call() 的恒文本契约（:175-182）不动；网关/双工具走本函数。
+ *
+ * 三抛：
+ * - isError→throw（前缀 `MCP ${server}.${bare} 调用失败`，cause 保原始
+ *   result 对象：content/structuredContent/error 均在 cause 上）；
+ * - 注册超时（waitRegistered 原文 `tool "…" 未在 Xms 内注册`）与执行失败
+ *   均原样 throw（message 沿用原文便 grep；调用方按 message 区分 code）；
+ * - signal.aborted→AbortError 原样透传（waitRegistered onAbort / execute
+ *   signal 同源，不包装）。
+ * 前置 normalizeToolName 捕获（跨 server 全名 throw 原样透传，不进 try）。
+ * WARN-2 下沉（2026-09-09）：arguments 归一化收进本函数（与 mcp_call wrapper
+ * :789 同调 normalizeArguments），P4 网关双工具直调本函数即得 JSON 字符串
+ * 兼容；call() 路径保持 wrapper 侧调用不变（双调幂等：对象原样透传同引用）。
+ * finally 抄 refCount 对称（callViaPresetViews finally）；绝不调 restore
+ * （无 Entry 可恢复，直通语义）；绝不新增 dispose.
+ */
+export interface GatewayCallOpts {
+  signal: AbortSignal
+  agent: Agent | undefined
+  explicitTimeoutMs?: number
+}
+
+export async function gatewayCall(
+  ctx: Context,
+  control: McpControlCtx,
+  state: GatewayCallState,
+  serverName: string,
+  bareIn: string,
+  args: unknown,
+  opts: GatewayCallOpts,
+): Promise<string> {
+  // 前置捕获：注册全名误传 fast-fail（:48-52 throw 原样透传，不进 try）
+  const bareTool = normalizeToolName(serverName, bareIn)
+  const name = `mcp__${serverName}__${bareTool}`
+  // WARN-2 下沉：arguments 归一化（JSON 字符串→对象，对象同引用透传）
+  const normArgs = normalizeArguments(args)
+  const workspace = typeof opts.agent?.session?.header?.cwd === 'string' ? opts.agent.session.header.cwd : undefined
+  if (isToolDisabled(name, workspace)) {
+    throw new Error(`MCP 工具 ${serverName}.${bareTool} 已被禁用（请在 MCP 管理面板打开该工具后再调用）`)
+  }
+  // 定位失败=回退 miss 语义：此处保留 catch→undefined（P2 设计唯一允许的吞错）
+  const presetRow = control.resolvePresetRow
+    ? await control.resolvePresetRow(serverName, opts.agent).catch(() => undefined)
+    : undefined
+  if (!presetRow) {
+    throw new Error(`未知 MCP server：${serverName}（不在 loader 中）`)
+  }
+  if (presetRow.disabled) {
+    throw new Error(`MCP server "${serverName}" 当前已停用（预设行 ${presetRow.rowId}），请在 MCP 管理面板打开后（新会话生效）再调用`)
+  }
+  const timeoutMs = opts.explicitTimeoutMs ?? presetRow.toolCallTimeoutMs ?? control.serverTimeoutMs(serverName)
+  state.refCounts.set(serverName, (state.refCounts.get(serverName) ?? 0) + 1)
+  state.lastUsed.set(serverName, Date.now())
+  try {
+    const views = collectToolViews(ctx, opts.agent)
+    const view = await waitRegistered(ctx, name, views, timeoutMs, opts.signal)
+    if (opts.signal.aborted) throw opts.signal.reason ?? new Error('aborted')
+    const execTools = view!.tools!
+    const result = (await execTools.execute({
+      callId: `mcp-call-${randomUUID()}` as import('@deepseek-ai/dsh-llm').ToolCallId,
+      name,
+      arguments: normArgs,
+      agent: opts.agent,
+      signal: opts.signal,
+    })) as { isError?: boolean; error?: unknown; content?: unknown; structuredContent?: unknown } | undefined
+    state.lastUsed.set(serverName, Date.now())
+    if (result && result.isError) {
+      const failure = new Error(
+        `MCP ${serverName}.${bareTool} 调用失败：${msgOf((result as { error?: unknown }).error ?? 'unknown error')}`,
+      )
+      ;(failure as Error & { cause?: unknown }).cause = result
+      throw failure
+    }
+    const text = contentText(result ? (result as { content?: unknown }).content : undefined)
+    if (text.length === 0) {
+      throw new Error(`MCP ${serverName}.${bareTool} 无返回内容`)
+    }
+    return text
+  } finally {
+    const next = (state.refCounts.get(serverName) ?? 1) - 1
+    if (next <= 0) state.refCounts.delete(serverName)
+    else state.refCounts.set(serverName, next)
+  }
+}
+
+/** gatewayCall 共享的引用计数态（与 ControllerState 同形；P4 网关常驻复用）。 */
+export interface GatewayCallState {
+  refCounts: Map<string, number>
+  lastUsed: Map<string, number>
+}
+
 /** 失败 / 无并发时恢复原状态：禁用并清 AI owner。 */
 async function restore(
   control: McpControlCtx,
@@ -436,6 +550,22 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
   }
 
   const controller: McpCallController = {
+    /**
+     * 网关透传入口（P2）：与 call() 同控制器共享引用计数态（state），但错误
+     * 走 throw（gatewayCall），不进恒文本 call()。controller 外透出供网关
+     * own 层双工具复用；call() 原行为不动。
+     */
+    async gateway(
+      serverName: string,
+      toolName: string,
+      args: unknown,
+      agent: Agent | undefined,
+      signal: AbortSignal,
+      explicitTimeoutMs?: number,
+    ): Promise<string> {
+      return gatewayCall(ctx, caches, state, serverName, toolName, args, { signal, agent, explicitTimeoutMs })
+    },
+
     async ensureEnabled(serverName): Promise<boolean> {
       const entry = caches.resolveEntry(serverName)
       if (!entry) throw new Error(`unknown MCP server "${serverName}"`)
@@ -593,11 +723,13 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx): () => void
   const definition = defineTool({
     name: 'mcp_search',
     description:
-      '检索可用的 MCP 服务器与工具目录。空参数返回能力摘要表；传 server 列出该服务器的全部工具；传 query 做关键词 top-K 全文检索（命中返回完整 schema）。',
+      '检索可用的 MCP 服务器与工具目录。三层：空参数返回 server 清单（无 schema）；传 server 列出该服务器工具（分页，无 schema）；传 query 做关键词 top-K 全文检索（命中返回完整 schema）。知道工具名可直接 mcp_call，不知道先用关键词搜。中文连写请用空格分词（如“搜索 网页”）。',
     parameters: {
-      query: { type: 'string', description: '检索关键词，按工具名/描述/参数名打分' },
-      server: { type: 'string', description: '列出指定 MCP server 的全部工具' },
-      limit: { type: 'integer', description: 'top-K 上限（默认 5，最大 10）' },
+      query: { type: 'string', description: '检索关键词，按工具名/描述/参数名打分（缺省 top-K 8，上限 10）' },
+      server: { type: 'string', description: '列出指定 MCP server 的全部工具（分页，无 schema）' },
+      limit: { type: 'integer', description: '关键词 top-K（默认 8）或 server 页大小（默认 20，上限 50）' },
+      offset: { type: 'integer', description: 'server 页偏移（默认 0，仅 server 分支有效）' },
+      topK: { type: 'integer', description: '关键词命中数（默认 8，与 limit 同义，显式优先）' },
     },
     output: {
       schema: { type: 'json' },
@@ -607,27 +739,52 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx): () => void
       const catalog = control.getCatalog()
       const query = typeof args.query === 'string' ? args.query.trim() : ''
       const server = typeof args.server === 'string' ? args.server.trim() : ''
-      const limit = clampLimit(typeof args.limit === 'number' ? args.limit : undefined, control.searchLimitDefault, control.searchLimitMax)
+      // P3 定稿：query 缺省 topK=8；server 页缺省 limit=20（上限 50）。
+      const topK = clampLimit(
+        typeof args.topK === 'number' ? args.topK : typeof args.limit === 'number' ? args.limit : undefined,
+        8,
+        10,
+      )
+      const pageLimit = clampLimit(typeof args.limit === 'number' ? args.limit : undefined, 20, 50)
+      const offset = Math.max(0, Math.floor(Number(args.offset) || 0))
       // 按当前会话工作区过滤项目级禁用（全局禁用无条件生效）
       const workspace = typeof exec?.agent?.session?.header?.cwd === 'string' ? exec.agent.session.header.cwd : undefined
       const keep = (name: string): boolean => !isToolDisabled(name, workspace)
 
       if (server) {
-        const result = listServer(catalog, server)
-        const tools = (result ?? []).filter((tool) => keep(tool.name))
+        const page = listServer(catalog, server, offset, pageLimit)
+        if (!page) {
+          return toJson({
+            ok: true,
+            kind: 'list',
+            server,
+            found: false,
+            count: 0,
+            totalCount: 0,
+            offset,
+            limit: pageLimit,
+            tools: [],
+            hint: `未知 server "${server}"，空查 mcp_search 看 server 清单；工具多时改 query + server 缩小范围；中文连写请用空格分词。`,
+          })
+        }
+        const tools = page.tools.filter((tool) => keep(tool.name))
         return toJson({
           ok: true,
           kind: 'list',
           server,
-          found: result !== undefined,
+          found: true,
           count: tools.length,
+          totalCount: page.totalCount,
+          offset,
+          limit: pageLimit,
           tools,
+          hint: '工具多时改 query + server 缩小范围；中文连写请用空格分词。',
         })
       }
 
       if (query) {
-        const hits: SearchHit[] = searchCatalog(catalog, query, limit).filter((hit) => keep(hit.tool.name))
-        return toJson({ ok: true, kind: 'search', query, count: hits.length, limit, hits })
+        const hits: SearchHit[] = searchCatalog(catalog, query, topK).filter((hit) => keep(hit.tool.name))
+        return toJson({ ok: true, kind: 'search', query, count: hits.length, limit: topK, hits })
       }
 
       const servers = buildSummary(control)
@@ -649,7 +806,7 @@ function registerMcpCallTool(ctx: Context, controller: McpCallController): () =>
   const definition = defineTool({
     name: 'mcp_call',
     description:
-      '调用一个 MCP 服务器上的工具。自动保活启用目标 server（用完按 keepAliveMs 空闲回收），等待注册后在下层执行。参数透传给远端工具。',
+      '调用一个 MCP 服务器上的工具。知道工具名直接调（server + 裸 tool 名），不知道先用 mcp_search 关键词搜。参数透传给远端工具。',
     parameters: {
       server: { type: 'string', required: true, description: 'MCP 服务器名（见 mcp_search 摘要）' },
       tool: { type: 'string', required: true, description: '该 server 上的工具名（裸名，如 understand_image；误传注册全名 mcp__<server>__<tool> 会自动归一化）' },

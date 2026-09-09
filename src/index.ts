@@ -38,8 +38,10 @@ import { snapshotFromSchemas, loadCatalog, saveCatalog } from './catalog'
 import { installMcpVisibilityFilter } from './filter'
 import type { McpControlCtx, McpCallController } from './mcpcall'
 import { createMcpCallController, installMcpControlTools } from './mcpcall'
+import { createGatewayState, disposeGatewayState } from './gateway'
 
-export { normalizeToolName, normalizeArguments, msgOf } from './mcpcall'
+export { normalizeToolName, normalizeArguments, msgOf, gatewayCall } from './mcpcall'
+export type { GatewayCallOpts, GatewayCallState } from './mcpcall'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
 import type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
 import { createDomainCaches, getSchemasView, resolveCollectScopeKey, type DomainCaches } from './collect'
@@ -62,14 +64,17 @@ export { setRowFlag, setSkillFlag, rowDisabledState, syncPresetFiles, isValidSki
 export { scanWorkspaceMcp } from './project-mcp'
 // 项目 MCP 运行时装配（外部复用/端到端验证：手动安装、按工作空间重扫、owner 查询）
 export { installProjectMcp, remountWorkspace, projectServerOwner, projectServerName } from './project-mcp'
+// P4 网关常驻态（自测回归护栏：挂载决策/视野隔离/自检断言纯逻辑）
+export { createGatewayState, isolateChildScope, decideMount, checkChildVisible, disposeGatewayState } from './gateway'
+export type { GatewayState } from './gateway'
 export { readState, writeState } from './state'
 // P1 会话边界：待生效队列与边界应用入口（selftest 直接测构建产物行为）
 export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending'
 // 工具级禁用作用域（selftest 回归护栏：全局 vs 项目工作区隔离）
 export { loadDisabledTools, setToolDisabled, isToolDisabled, disabledToolsOf } from './tool-disable'
 // rc.1 standing 组合 preset 行解析（selftest 回归护栏：parsePresetMcpText 文本抽取 + mcp-anki 例外）
-export { parsePresetMcpText, findPresetRowByServerName } from './preset-mcp'
-export type { PresetMcpRow } from './preset-mcp'
+export { parsePresetMcpText, findPresetRowByServerName, presetConfigOf } from './preset-mcp'
+export type { PresetMcpRow, PresetMcpClientConfig, PresetMcpParsed } from './preset-mcp'
 
 export const name = 'runtime-inventory'
 
@@ -83,7 +88,7 @@ export interface Config {
   autoManage?: boolean
   /** 保活回收窗口（ms）。默认 30_000。 */
   keepAliveMs?: number
-  /** mcp_search 缺省 top-K。默认 5。 */
+  /** mcp_search 缺省 top-K。默认 8（P3 网关定稿；线3 bench 平均 tok 最小拐点）。 */
   searchLimitDefault?: number
   /** mcp_search top-K 上限。默认 10。 */
   searchLimitMax?: number
@@ -94,7 +99,7 @@ export interface Config {
 export const Config: Schema<Config> = Schema.object({
   autoManage: Schema.boolean().description('MCP 中间层控制（停用的 MCP 经 mcp_search/mcp_call 按需调用）').default(false),
   keepAliveMs: Schema.number().min(1000).description('MCP 保活空闲回收窗口（ms）').default(30_000),
-  searchLimitDefault: Schema.number().min(1).description('mcp_search 缺省 top-K').default(5),
+  searchLimitDefault: Schema.number().min(1).description('mcp_search 缺省 top-K').default(8),
   searchLimitMax: Schema.number().min(1).description('mcp_search top-K 上限').default(10),
   serverSummary: Schema.dict(Schema.string()).description('MCP 能力摘要表（serverName → 一句话）'),
 })
@@ -335,7 +340,8 @@ function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config, 
   }
   return {
     keepAliveMs: config.keepAliveMs ?? 30_000,
-    searchLimitDefault: config.searchLimitDefault ?? 5,
+    // P3 定稿：searchLimitDefault=8/searchLimitMax=10（与 Config schema .default() 一致）。
+    searchLimitDefault: config.searchLimitDefault ?? 8,
     searchLimitMax: config.searchLimitMax ?? 10,
     serverSummary: config.serverSummary ?? {},
     getCatalog: () => runtime.catalog,
@@ -351,6 +357,15 @@ function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config, 
     // 时 presetId 直接 null，本处回落 roots[0]/list[0] 的 agent）。禁用的预设行由调用方拒绝，
     // 这里只做定位（返回 disabled/running 快照供调用方判定）。
     resolvePresetRow: async (serverName, agent) => cachedPresetRow(agent, serverName),
+    // P1 直读：同一缓存条目透出全量挂载 config（网关 P4 重建 client 行用）。
+    resolvePresetConfig: async (serverName, agent) => {
+      try {
+        const row = await cachedPresetRow(agent, serverName)
+        return row?.config
+      } catch {
+        return undefined
+      }
+    },
     presetTimeoutMs: async (serverName) => {
       // rc.1 standing 组合兜底：loader 有行但缺 toolCallTimeoutMs 时补读；
       // loader 无行的已启用预设行由 call() 预设直通分支处理（含超时直取），
@@ -511,9 +526,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     return map
   }
   let autoDisposers: Array<() => void> = []
+  // P4 网关常驻态：随 autoManage 开关创建/释放（restrict lift + mounts 清理，
+  // 不碰 standing 本体，靠 fiber unwind）。
+  const gatewayState = createGatewayState()
   catalogRuntime.applyAutoManage = (on: boolean) => {
     for (const d of autoDisposers) d()
     autoDisposers = []
+    disposeGatewayState(ctx, gatewayState)
     catalogRuntime.autoManage = on
     if (!on) return
     const disposers: Array<() => void> = []
@@ -534,6 +553,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.effect(
     () => () => {
       for (const d of autoDisposers) d()
+      disposeGatewayState(ctx, gatewayState)
     },
     'mcp-skill-panel: autoManage teardown',
   )

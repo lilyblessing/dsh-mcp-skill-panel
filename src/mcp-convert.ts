@@ -13,7 +13,11 @@
  * 纯逻辑、零依赖（仅类型），可被 scripts/selftest 用构建产物直接覆盖。
  */
 
-/** 单个 MCP server 的规范化配置（与 dsh-mcp-client 的 config 形状对齐）。 */
+/** 单个 MCP server 的规范化配置（与 dsh-mcp-client 的 config 形状对齐）。
+ *
+ * P1 直读（2026-09-09）：新增可选 failOnStartupError（yml 直读透传用；
+ * parseServer 解析不到/compute 时保持 undefined = 现网行为不变）。
+ */
 export interface McpServerConfig {
   serverName: string
   transport: 'stdio' | 'streamable-http'
@@ -24,6 +28,7 @@ export interface McpServerConfig {
   url?: string
   headers?: Record<string, string>
   toolCallTimeoutMs?: number
+  failOnStartupError?: boolean
 }
 
 /** serverName → 配置（JSON 键即 serverName）。 */
@@ -118,6 +123,14 @@ function parseServer(name: string, value: unknown, warnings: string[]): McpServe
     return { error: `server "${name}": 无法推断传输方式（需要 command=stdio 或 url=http）` }
   }
   const toolCallTimeoutMs = typeof cfg.toolCallTimeoutMs === 'number' && Number.isFinite(cfg.toolCallTimeoutMs) ? cfg.toolCallTimeoutMs : undefined
+  // P1 直读：透传 failOnStartupError（boolean 原样；字符串 "true"/"false" 兼容；
+  // 其余形态视为未声明 = undefined，现网行为不变）。
+  const rawFos = cfg.failOnStartupError
+  const failOnStartupError =
+    typeof rawFos === 'boolean' ? rawFos
+    : typeof rawFos === 'string' && rawFos.toLowerCase() === 'true' ? true
+    : typeof rawFos === 'string' && rawFos.toLowerCase() === 'false' ? false
+    : undefined
   if (transport === 'stdio') {
     if (command === undefined) return { error: `server "${name}": stdio 需要 command` }
     const label = `server "${name}"`
@@ -129,6 +142,7 @@ function parseServer(name: string, value: unknown, warnings: string[]): McpServe
       env: strDict(cfg.env, warnings, `${label}.env`) ?? {},
       cwd: str(cfg.cwd),
       toolCallTimeoutMs,
+      ...(failOnStartupError !== undefined ? { failOnStartupError } : {}),
     }
   }
   if (url === undefined) return { error: `server "${name}": http 需要 url` }
@@ -138,6 +152,7 @@ function parseServer(name: string, value: unknown, warnings: string[]): McpServe
     url,
     headers: strDict(cfg.headers, warnings, `server "${name}".headers`) ?? {},
     toolCallTimeoutMs,
+    ...(failOnStartupError !== undefined ? { failOnStartupError } : {}),
   }
 }
 
@@ -232,6 +247,8 @@ export function serversToRows(servers: McpServers, idPrefix = 'mcp'): McpRowConf
       if (server.headers && Object.keys(server.headers).length > 0) config.headers = server.headers
     }
     if (server.toolCallTimeoutMs !== undefined) config.toolCallTimeoutMs = server.toolCallTimeoutMs
+    // P1 直读：failOnStartupError 有声明才落行（缺省 = 现网行为不变）
+    if (server.failOnStartupError !== undefined) config.failOnStartupError = server.failOnStartupError
     rows.push({ id: `${idPrefix}-${server.serverName}`, name: MCP_CLIENT_NAME, config })
   }
   return rows
