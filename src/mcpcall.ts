@@ -199,8 +199,9 @@ export interface McpCallController {
   /**
    * 0.6.0：按需把某个「已安装但没快照」的 server 拉起来采集一次能力表，然后放回关闭。
    * 让 mcp_search 对关着的 server 也能给出工具清单（rc.8 语义）。
+   * `waitMs` 覆盖默认等待上限（关前补采用短上限，避免实例起不来时拖住关闭操作）。
    */
-  fetchInventory(serverName: string): Promise<{ tools: number; joined: boolean } | null>
+  fetchInventory(serverName: string, waitMs?: number): Promise<{ tools: number; joined: boolean } | null>
   /**
    * 用户手动打开该 server：清除 AI 临时启用标记（aiEnabled/引用计数/lastUsed +
    * state.json 的 ai owner），使其转为「用户打开」语义 —— 模型立即可见、回收器不再回收。
@@ -376,6 +377,7 @@ async function collectInventory(
   state: ControllerState,
   serverName: string,
   requestedBy = 'unknown',
+  waitMs?: number,
 ): Promise<{ tools: number; joined: boolean } | null> {
   const t0 = Date.now()
   const trace: InventoryTrace = {
@@ -442,7 +444,7 @@ async function collectInventory(
     // （必要时主动催一次快照）→ 放回关闭。复用久经验证的采集链路，不再重复实现。
     // 先等一拍再判定：`mcp-client` 建立连接→注册工具是异步的，立刻判会撞上"尚无工具"
     // 的空窗；每次轮询先等、再催快照、最后判 catalog，语义最稳。
-    const deadline = Date.now() + caches.serverTimeoutMs(serverName)
+    const deadline = Date.now() + (waitMs !== undefined && waitMs > 0 ? waitMs : caches.serverTimeoutMs(serverName))
     let waited = 0
     for (;;) {
       await ctx.timeout(600)
@@ -1044,8 +1046,8 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
       if (entry) void caches.clearAiOwner(entry.id)
     },
 
-    async fetchInventory(serverName) {
-      return collectInventory(ctx, caches, state, serverName, 'mcp_search')
+    async fetchInventory(serverName, waitMs) {
+      return collectInventory(ctx, caches, state, serverName, 'mcp_search', waitMs)
     },
 
     async call(serverName, toolName, args, agent, signal, explicitTimeoutMs) {

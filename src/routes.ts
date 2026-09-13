@@ -283,7 +283,10 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
     // 采集失败不阻断关闭（best-effort；失败时该 server 首调会自动拉起采集一次）。
     if (disabled) {
       try {
-        await deps.controller?.fetchInventory(serverNameOf(entry))      } catch (error) {
+        // 等待上限 1500ms：关闭是用户动作，不能因为该实例起不来（端点已死/启动慢）
+        // 而把关闭本身拖住 60 秒。采不到也不影响关闭——该 server 首调时会再按需采集。
+        await deps.controller?.fetchInventory(serverNameOf(entry), 1500)
+      } catch (error) {
         ctx.logger.warn?.(`mcp-skill-panel: pre-close inventory snapshot for "${serverNameOf(entry)}" failed: ${messageOf(error)}`)
       }
     }

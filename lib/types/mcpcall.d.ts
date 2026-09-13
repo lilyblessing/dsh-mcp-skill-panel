@@ -125,8 +125,9 @@ export interface McpCallController {
     /**
      * 0.6.0：按需把某个「已安装但没快照」的 server 拉起来采集一次能力表，然后放回关闭。
      * 让 mcp_search 对关着的 server 也能给出工具清单（rc.8 语义）。
+     * `waitMs` 覆盖默认等待上限（关前补采用短上限，避免实例起不来时拖住关闭操作）。
      */
-    fetchInventory(serverName: string): Promise<{
+    fetchInventory(serverName: string, waitMs?: number): Promise<{
         tools: number;
         joined: boolean;
     } | null>;
