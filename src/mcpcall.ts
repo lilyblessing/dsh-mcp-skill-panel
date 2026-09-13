@@ -1294,7 +1294,9 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx, controller:
             open: known?.open ?? true,
             hasSnapshot: page.hasSnapshot,
             probed,
-            count: all.length,
+            // 摘要分支的 `count` = **该 server 的工具总数**。曾误用 `all.length`
+            // （受默认页大小 20 截断）→ 27 个工具的 server 报 20，误导模型判规模。
+            count: page.totalCount,
             totalCount: page.totalCount,
             preview,
             hint: page.hasSnapshot
