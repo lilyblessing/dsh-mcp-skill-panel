@@ -780,14 +780,21 @@ function ApplyTimingCard(props: {
 
   const applyPending = useCallback(async () => {
     // 「立即应用（知晓费用）」：强制把这批待办在当轮改变工具集 → 前缀失效、按 miss 计费。
-    // 点按钮即弹出账提示，让用户在费用知情下操作。
+    // 0.7.2：服务端要求 body 带 { confirm: true }（见 routes.ts 该端点的加固注释）——
+    // 「用户已知晓费用」必须是显式动作，不能被裸 POST（模型/脚本）静默满足。
+    // 这里先弹二次确认对话框（费用说明），用户点「确定」才发请求。
+    if (!window.confirm(t('ri.applyPendingConfirm'))) return
     showWarn(t('ri.cacheWarn'), true)
     setBusy((prev) => ({ ...prev, applyMode: true }))
     setError(null)
     const token = await ensureToken()
     const headers: Record<string, string> = { 'content-type': 'application/json' }
     if (token) headers['x-panel-token'] = token
-    fetch('/api/mcp-skill-panel/mcp/applyPending', { method: 'POST', headers })
+    fetch('/api/mcp-skill-panel/mcp/applyPending', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ confirm: true }),
+    })
       .then((r) => r.json() as Promise<{ ok: boolean; applied?: number; error?: string }>)
       .then((b) => {
         if (!b.ok) throw new Error(b.error ?? 'applyPending failed')
@@ -943,6 +950,15 @@ function McpPanel(props: {
                 {row.pending && (
                   <Badge color="var(--dsw-alias-state-warn-primary)" bg="var(--dsw-alias-state-warn-tertiary)">
                     {t('ri.pendingBadge')}
+                  </Badge>
+                )}
+                {row.aiOwned && (
+                  <Badge
+                    color="var(--dsw-alias-state-warn-primary)"
+                    bg="var(--dsw-alias-state-warn-tertiary)"
+                    title={t('ri.aiOwnedHint')}
+                  >
+                    {t('ri.aiOwnedBadge')}
                   </Badge>
                 )}
                 {row.modelVisible ? (

@@ -374,6 +374,8 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
         modelVisible:
           !disabled &&
           !(deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(serverName) ?? false)),
+        // 0.7.2：AI 临时启用可辨识（否则与"用户打开"外观相同，见 shared-types 注释）
+        aiOwned: deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(serverName) ?? false),
         desired: rowDesired,
         pending: rowDesired !== undefined ? rowDesired !== disabled : false,
         workspace: projectWorkspace,
@@ -442,6 +444,8 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
             modelVisible:
               !pr.disabled &&
               !(deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(pr.serverName) ?? false)),
+            // 0.7.2：与 loader 路径同判据（AI 临时启用可辨识）
+            aiOwned: deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(pr.serverName) ?? false),
             desired: rowDesired,
             pending: pendingFlag,
             workspace: projectWorkspace,

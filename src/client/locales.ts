@@ -107,6 +107,11 @@ export const en: Record<string, string> = {
   'ri.applyPendingBtn': 'Apply pending now',
   'ri.applyDeferredHint': 'Intent recorded; it takes effect at the next new session or after a DSH restart.',
   'ri.pendingBadge': 'Pending',
+  'ri.aiOwnedBadge': 'AI (temp)',
+  'ri.aiOwnedHint':
+    'Temporarily enabled by the model via mcp_call (AI middle layer). Stays invisible to the model and is auto-disabled after ~30s idle — unlike you opening it yourself: no cache cost, no permanent tool prefix.',
+  'ri.applyPendingConfirm':
+    'Apply pending changes now? This makes the tool prefix change on the very next turn — this session loses its prefix cache (KV-Cache 100% miss, ~5-12.5× hit rate) at that turn. Continue?',
   'ri.appliedPending': 'Applied {n} pending change(s).',
   // autoManage switch
   'ri.autoManageTitle': 'AI Middle Layer',
@@ -224,6 +229,11 @@ export const zh: Record<string, string> = {
   'ri.applyPendingBtn': '立即应用待生效变更',
   'ri.applyDeferredHint': '已记录意图，将在下次（新）会话或 DSH 重启后生效。',
   'ri.pendingBadge': '待生效',
+  'ri.aiOwnedBadge': 'AI 临时启用',
+  'ri.aiOwnedHint':
+    '该行由模型经 mcp_call 临时启用（AI 中间层）。它对模型保持不可见，空闲约 30s 后自动关闭——与你手动打开不同：不占上下文、不改每轮工具前缀、无缓存代价。',
+  'ri.applyPendingConfirm':
+    '立即应用待生效变更？该操作会让工具前缀在下一轮发生变化——本次会话在该轮丢失前缀缓存（KV-Cache 100% miss，费率约为 hit 的 5–12.5 倍）。确认继续？',
   'ri.appliedPending': '已应用 {n} 项待生效变更。',
   // autoManage 开关
   'ri.autoManageTitle': 'AI 中间层',

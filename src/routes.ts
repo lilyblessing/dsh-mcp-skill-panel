@@ -799,12 +799,26 @@ export function makeRoutes(
     {
       kind: 'exact',
       path: `${API_PREFIX}/mcp/applyPending`,
-      handler: handle('POST', async () => {
+      handler: handle('POST', async (req) => {
         // P1 会话边界：「立即应用待生效变更」强制生效入口。把 next-session 模式积压的
         // 待办一次性 entry.update（=临时转 immediate），随后的请求会 miss（调用方提示费用）。
+        //
+        // 0.7.2 加固：本端点是 next-session「零缓存失效」承诺的**唯一逃生舱**，而 README
+        // 把它定义为「**用户点击**『立即应用待生效变更』按钮，作为"已知晓费用"的强制生效出口」
+        // ——「用户已知晓费用」这个前提原先在服务端**不存在**：端点只校验 method + 面板令牌，
+        // 于是模型/脚本一发裸 POST 就能单方面作废该承诺（2026-09-14 实测：模型经此端点把
+        // next-session 下的 obsidian 行在当前会话直接打开，README §92 描述的边界被绕过）。
+        // 现在要求请求体显式 `{ confirm: true }`（面板按钮的二次确认对话框才会发送），
+        // 缺了即 400 —— 把「已知晓费用」变成协议上必需的显式确认。
+        const parsed = JSON.parse((await readBody(req)) || '{}') as { confirm?: unknown }
+        if (parsed.confirm !== true) {
+          throw new Error(
+            'applyPending 需要显式确认：请求体须带 { "confirm": true }（该操作会让当前会话下一轮 100% miss 前缀缓存，费率约为 hit 的 5–12.5 倍）。这是「用户已知晓费用」的强制生效出口，不接受静默调用。',
+          )
+        }
         const applied = await applyPendingMcp(deps)
         invalidateMcp()
-        return { applied }
+        return { applied, confirmed: true }
       }, true),
     },
     {

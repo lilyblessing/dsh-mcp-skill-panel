@@ -21,6 +21,15 @@ export interface McpRow {
   status: McpStatus
   /** 模型是否可见（autoManage 下：启用且非 AI 临时启用 → 可见；关闭模式下全部启用可见）。 */
   modelVisible: boolean
+  /**
+   * 0.7.2：该行当前是「AI 经 mcp_call 临时启用」保活中的（autoManage 下为 true）。
+   *
+   * 为什么需要这个字段：卡片此前只有 `modelVisible`——用户手动启用的行同样 `modelVisible=true`，
+   * 于是「用户打开」与「AI 临时打开」在外观上**分不清**。2026-09-14 实测事故里，模型误用面板
+   * API 把 obsidian 行打开后，卡片与用户自己打开的行长得一模一样，没人能一眼看出这是 AI 干的。
+   * AI 临时启用会写 state.json 的 ai 段（被回收器清除后才消失），故本字段也是审计痕迹。
+   */
+  aiOwned?: boolean
   /** 宿主侧期望状态（next-session 模式下可能与 disabled 不同）。 */
   desired?: boolean
   /** true = 已记录意图但尚未在运行时生效（待下次会话/重启）。 */
