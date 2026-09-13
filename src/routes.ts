@@ -281,13 +281,22 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
     // 快照只能靠"关之前那一次"。这里先采一次写进 catalog.json，保证**关掉的 server
     // 依然能被 mcp_search 检索到**（rc.8 语义：能力表属于"已安装"，不属于"在跑"）。
     // 采集失败不阻断关闭（best-effort；失败时该 server 首调会自动拉起采集一次）。
+    //
+    // 0.6.7 前置守卫：**已有快照就跳过**。关前补采要临时拉起该行，而"快照保留"已由
+    // 0.6.1（prune 的 alive 纳入 standing 行）保证——对一个跑过一次的 server，关掉它
+    // 不会丢快照，此时再拉起采集纯属多余动作（实测 chrome：端点已死、白拉一次）。
+    // 只在"确实没有快照"时补采，语义等价而副作用更小。
     if (disabled) {
-      try {
-        // 等待上限 1500ms：关闭是用户动作，不能因为该实例起不来（端点已死/启动慢）
-        // 而把关闭本身拖住 60 秒。采不到也不影响关闭——该 server 首调时会再按需采集。
-        await deps.controller?.fetchInventory(serverNameOf(entry), 1500)
-      } catch (error) {
-        ctx.logger.warn?.(`mcp-skill-panel: pre-close inventory snapshot for "${serverNameOf(entry)}" failed: ${messageOf(error)}`)
+      const presetSnapshot = deps.catalogRuntime.catalog[serverNameOf(entry)]
+      const needsSnapshot = !presetSnapshot || presetSnapshot.tools.length === 0
+      if (needsSnapshot) {
+        try {
+          // 等待上限 1500ms：关闭是用户动作，不能因为该实例起不来（端点已死/启动慢）
+          // 而把关闭本身拖住 60 秒。采不到也不影响关闭——该 server 首调时会再按需采集。
+          await deps.controller?.fetchInventory(serverNameOf(entry), 1500)
+        } catch (error) {
+          ctx.logger.warn?.(`mcp-skill-panel: pre-close inventory snapshot for "${serverNameOf(entry)}" failed: ${messageOf(error)}`)
+        }
       }
     }
     await entry.update({ disabled })
