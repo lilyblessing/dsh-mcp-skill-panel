@@ -76,6 +76,11 @@ export interface McpControlCtx {
     /** 对所有当前 enabled 的 server 重新快照（tools/change / 启动）。 */
     snapshotEnabled(): Promise<void>;
     /**
+     * 0.6.4：主动催一次 catalog 快照（按需能力表采集在等 catalog 出现时用）。
+     * 与 `snapshotEnabled` 同一实现，只是暴露给采集等待循环按需调用。
+     */
+    requestSnapshot?(): Promise<void>;
+    /**
      * 0.6.0：按需采集某 server 的能力表（mcp_search 命中「已安装但没有快照」时用）。
      *
      * 实现由 index.ts 注入（拿得到 resolveScopeSchemas / snapshotFromSchemas /
