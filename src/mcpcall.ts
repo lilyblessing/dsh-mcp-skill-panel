@@ -153,8 +153,38 @@ export interface McpControlCtx {
 
   /** 对所有当前 enabled 的 server 重新快照（tools/change / 启动）。 */
   snapshotEnabled(): Promise<void>
+
+  /**
+   * 0.6.4：主动催一次 catalog 快照（按需能力表采集在等 catalog 出现时用）。
+   * 与 `snapshotEnabled` 同一实现，只是暴露给采集等待循环按需调用。
+   */
+  requestSnapshot?(): Promise<void>
+
+  /**
+   * 0.6.0：按需采集某 server 的能力表（mcp_search 命中「已安装但没有快照」时用）。
+   *
+   * 实现由 index.ts 注入（拿得到 resolveScopeSchemas / snapshotFromSchemas /
+   * persistCatalog 这套 IO），返回采集到的工具数；未采到返回 null。
+   */
+  collectInventory?(serverName: string): Promise<{ tools: number; joined: boolean } | null>
+
+  /**
+   * 0.6.2：把**调用方已经采到**的 schema 写入 catalog（按 serverName 过滤）。
+   * 与 `collectInventory` 的区别：采集口径由调用方决定（命中视图的 scope），
+   * 本函数只负责过滤 + 落盘。
+   */
+  storeInventory?(
+    serverName: string,
+    schemas: ReadonlyArray<{ name?: unknown; description?: unknown; parameters?: unknown }>,
+  ): Promise<{ tools: number; joined: boolean } | null>
+
+  /** 0.6.0：已安装（配置里存在该行）的 MCP server 清单，含用户关闭的。 */
+  installedInventory?(): Array<{ server: string; open: boolean }>
 }
 
+/** 控制层共享状态：调用链（call / gatewayCall）与空闲回收器**是同一个对象**。
+ * 0.5.9 教训：`aiEnabled` 曾一度只有 `call()` 分支登记，而 `mcp_call` 实际走
+ * gatewayCall → 回收器集合恒空、永不回收。两个分支现在都写这一个对象。 */
 interface ControllerState {
   refCounts: Map<string, number>
   lastUsed: Map<string, number>
@@ -166,6 +196,11 @@ export interface McpCallController {
   ensureEnabled(serverName: string): Promise<boolean>
   /** 该 server 当前是否由 AI 临时启用（mcp_call 保活中）——装配过滤据此保持其不可见。 */
   isAiEnabled(serverName: string): boolean
+  /**
+   * 0.6.0：按需把某个「已安装但没快照」的 server 拉起来采集一次能力表，然后放回关闭。
+   * 让 mcp_search 对关着的 server 也能给出工具清单（rc.8 语义）。
+   */
+  fetchInventory(serverName: string): Promise<{ tools: number; joined: boolean } | null>
   /**
    * 用户手动打开该 server：清除 AI 临时启用标记（aiEnabled/引用计数/lastUsed +
    * state.json 的 ai owner），使其转为「用户打开」语义 —— 模型立即可见、回收器不再回收。
@@ -259,12 +294,196 @@ async function ensureEnabled(
   const wasDisabled = entry.disabled
   const entryId = entry.id
   if (wasDisabled) {
+    counters().wakeAdded += 1
     await entry.update({ disabled: false })
     state.aiEnabled.add(serverName)
     await control.setAiOwner(entryId, Date.now())
     ctx.logger.info?.(`mcp-skill-panel: AI enabled MCP server "${serverName}"`)
+  } else {
+    // 行本来就是开的 → 不做 AI 归属登记（回收器不应回收用户自己开着的行）。
+    // 0.5.7/0.5.8 实测的「拉起了却没登记」若落在这里，计数会直接指认。
+    counters().wakeSkippedAlreadyEnabled += 1
   }
   return wasDisabled
+}
+
+/**
+ * 0.6.0：按需采集某个「已安装但没有快照」server 的能力表。
+ *
+ * 使用场景：用户在面板关掉了某个 MCP，它从未运行过 → catalog 里没有它 →
+ * `mcp_search(server=X)` 原本只能回 `found:false`（P1 实验失败的现场）。
+ * 这里把它**临时拉起**（复用 `ensureEnabled`：真连接、真注册工具、登记 AI 归属）、
+ * 等工具注册后采一次 schema 快照写进 catalog，再**显式放回关闭**
+ * （不等回收器：搜索结果返回时它就该回到用户设定的状态）。
+ *
+ * 失败缓存（TTL 5 分钟）：server 起不来时避免模型每次搜索都卡满超时。
+ * 返回 null 表示"没采到"（未挂载 / 无工具 / 失败），调用方按无快照文案回。
+ */
+const INVENTORY_FAIL_TTL_MS = 5 * 60_000
+const inventoryFailUntil = new Map<string, number>()
+
+/**
+ * 0.6.2：从「已确认注册了工具」的那个视图直接取 schema 快照。
+ * 与 index.ts 的 `getSchemasView` 读同一份 dsh-tools 服务，只是**用命中视图自己的
+ * scope**，避免换口径重读采空（0.6.1 实测的采空原因）。
+ */
+export function schemasOfView(view: ToolView | undefined): Array<{ name?: unknown; description?: unknown; parameters?: unknown }> {
+  if (!view?.tools) return []
+  try {
+    const svc = view.tools as unknown as {
+      schemas?: (scope?: object) => Array<{ name?: unknown; description?: unknown; parameters?: unknown }>
+    }
+    return svc.schemas?.(view.scope as object | undefined) ?? []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 0.6.3：能力表采集的逐阶段痕迹。
+ *
+ * 为什么必须加：0.6.0→0.6.2 连续两次"采空"，而外部只能看到两个布尔
+ * （`probed:true` / `hasSnapshot:false`），无法判断卡在"等待注册"还是"读到 0 条 schema"。
+ * 这里把每阶段的原始数字留下，`/debug` 的 `inventoryTrace` 直接可读。
+ */
+interface InventoryTrace {
+  at: number
+  requestedBy: string
+  stage: string
+  ms: number
+  entryFound: boolean | null
+  wasDisabled: boolean | null
+  wakeAdded: boolean | null
+  viewLabel: string | null
+  viewScope: string | null
+  schemaTotal: number | null
+  schemaMatched: number | null
+  stored: number | null
+  error: string | null
+}
+
+const inventoryTrace = new Map<string, InventoryTrace>()
+
+export function inventoryTraceDiag(): Record<string, InventoryTrace & { agoMs: number }> {
+  const out: Record<string, InventoryTrace & { agoMs: number }> = {}
+  for (const [server, row] of inventoryTrace) out[server] = { ...row, agoMs: Date.now() - row.at }
+  return out
+}
+
+async function collectInventory(
+  ctx: Context,
+  caches: McpControlCtx,
+  state: ControllerState,
+  serverName: string,
+  requestedBy = 'unknown',
+): Promise<{ tools: number; joined: boolean } | null> {
+  const t0 = Date.now()
+  const trace: InventoryTrace = {
+    at: t0,
+    requestedBy,
+    stage: 'start',
+    ms: 0,
+    entryFound: null,
+    wasDisabled: null,
+    wakeAdded: null,
+    viewLabel: null,
+    viewScope: null,
+    schemaTotal: null,
+    schemaMatched: null,
+    stored: null,
+    error: null,
+  }
+  inventoryTrace.set(serverName, trace)
+  const mark = (stage: string): void => {
+    trace.stage = stage
+    trace.ms = Date.now() - t0
+  }
+  const stop = (stage: string, error: string): null => {
+    mark(stage)
+    trace.error = error
+    return null
+  }
+  const until = inventoryFailUntil.get(serverName) ?? 0
+  if (Date.now() < until) {
+    return stop('skip:failCache', `retry after ${Math.ceil((until - Date.now()) / 1000)}s`)
+  }
+  const entry = caches.resolveEntry(serverName)
+  trace.entryFound = entry !== undefined
+  if (!entry) return stop('resolveEntry:none', 'no entry for server')
+  // 用户本来就开着的行：直接采（无需拉起，也不改归属）
+  const wasDisabled = entry.disabled === true
+  trace.wasDisabled = wasDisabled
+  const entryId = String(entry.id)
+  let aiOwned = false
+  try {
+    aiOwned = await ensureEnabled(caches, ctx, state, serverName, entry)
+    trace.wakeAdded = aiOwned
+    mark('ensureEnabled')
+  } catch (error) {
+    inventoryFailUntil.set(serverName, Date.now() + INVENTORY_FAIL_TTL_MS)
+    ctx.logger.warn?.(`mcp-skill-panel: inventory fetch enable "${serverName}" failed: ${msgOf(error)}`)
+    return stop('ensureEnabled:ERR', msgOf(error))
+  }
+  state.refCounts.set(serverName, (state.refCounts.get(serverName) ?? 0) + 1)
+  state.lastUsed.set(serverName, Date.now())
+  let out: { tools: number; joined: boolean } | null = null
+  try {
+    mark('ensureEnabled → 等待 catalog 出现该 server（由 snapshotEnabled 采集）')
+    // 0.6.4：**不再自建采集**。
+    //
+    // 0.6.0→0.6.3 三次"采空"的真实原因（0.6.3 的 inventoryTrace 一击定位）：
+    // `waitRegistered` 用 `collectToolViews(ctx, undefined)` 取视图，而工具注册在
+    // **agent scope**；mcp_search 的调用路径拿不到 agent ctx → 视图里永远没有该工具
+    // → 白等满 60s 超时（trace: `viewLabel:null` + `未在 60000ms 内注册`），
+    // 而同一时刻 scopeDiag 显示该 server 的工具**已经注册好**（57 个 MCP 工具）。
+    //
+    // 插件本来就有一条"从正确 scope 采集"的通路：`snapshotEnabled()`（挂 tools/change，
+    // 0.6.1 起已覆盖 standing 行）。所以这里改为：拉起 → 等 catalog 自己长出该 server
+    // （必要时主动催一次快照）→ 放回关闭。复用久经验证的采集链路，不再重复实现。
+    const deadline = Date.now() + caches.serverTimeoutMs(serverName)
+    let waited = 0
+    for (;;) {
+      const snap = caches.getCatalog()[serverName]
+      if (snap && snap.tools.length > 0) {
+        out = { tools: snap.tools.length, joined: false }
+        trace.stored = out.tools
+        break
+      }
+      if (Date.now() >= deadline || waited > 20) break
+      await caches.requestSnapshot?.()
+      await ctx.timeout(500)
+      waited += 1
+    }
+    mark(`catalogWait(n=${out?.tools ?? 0}, polls=${waited})`)
+    if (!out) {
+      inventoryFailUntil.set(serverName, Date.now() + INVENTORY_FAIL_TTL_MS)
+      stop('timeout', `catalog 未在 ${Date.now() - t0}ms 内出现 "${serverName}"（snapshotEnabled 未采到）`)
+    }
+  } catch (error) {
+    inventoryFailUntil.set(serverName, Date.now() + INVENTORY_FAIL_TTL_MS)
+    ctx.logger.warn?.(`mcp-skill-panel: inventory fetch "${serverName}" failed: ${msgOf(error)}`)
+    stop('collect:ERR', msgOf(error))
+  } finally {
+    mark('done')
+    const next = (state.refCounts.get(serverName) ?? 1) - 1
+    if (next <= 0) state.refCounts.delete(serverName)
+    else state.refCounts.set(serverName, next)
+    // 采集完立刻放回用户设定（开着的不动；关着的回关并清 AI 归属）。
+    if (wasDisabled && aiOwned && next <= 0) {
+      try {
+        const cur = caches.resolveEntry(serverName)
+        if (cur && cur.id === entryId && !cur.disabled) await cur.update({ disabled: true })
+        await caches.clearAiOwner(entryId).catch(() => undefined)
+      } catch (error) {
+        ctx.logger.warn?.(`mcp-skill-panel: inventory fetch restore "${serverName}" failed: ${msgOf(error)}`)
+      } finally {
+        state.aiEnabled.delete(serverName)
+        state.refCounts.delete(serverName)
+        state.lastUsed.delete(serverName)
+      }
+    }
+  }
+  return out
 }
 
 async function waitRegistered(
@@ -297,7 +516,19 @@ async function waitRegistered(
       for (const view of views) {
         if (!view.tools) continue
         try {
-          if (Boolean(view.tools.get(name, view.scope as object | undefined))) {
+          // 0.6.0：`name` 以 `__` 结尾时按**前缀**判定（能力表采集用：采集方
+          // 不需要预先知道该 server 上的任何工具名，只看它有没有注册出工具）。
+          // `schemas` 不在 ToolView 声明的最小面上，故按需收窄读取（运行时由
+          // dsh-tools 提供，与 index.ts 的 getSchemasView 同一服务）。
+          const schemasOf = view.tools as unknown as {
+            schemas?: (scope?: object) => Array<{ name?: unknown }>
+          }
+          const hit = name.endsWith('__')
+            ? (schemasOf.schemas?.(view.scope as object | undefined) ?? []).some((s) =>
+                String(s?.name ?? '').startsWith(name),
+              )
+            : Boolean(view.tools.get(name, view.scope as object | undefined))
+          if (hit) {
             ctx.logger.info?.(`mcp-skill-panel: tool "${name}" resolved via view "${view.label}"`)
             return finish(undefined, view)
           }
@@ -468,11 +699,12 @@ export async function gatewayCall(
   }
 }
 
-/** gatewayCall 共享的引用计数态（与 ControllerState 同形；P4 网关常驻复用）。 */
-export interface GatewayCallState {
-  refCounts: Map<string, number>
-  lastUsed: Map<string, number>
-}
+/**
+ * gatewayCall 共享的状态（P4 网关常驻复用）。
+ * 0.5.9 起**必须含 `aiEnabled`**：gatewayCall 是 `mcp_call` 的实际执行分支，
+ * 它拉起的行若不登记进这个集合，空闲回收器就永远看不到（实测 bug）。
+ */
+export type GatewayCallState = ControllerState
 
 /**
  * B1（P5）：loader 常驻行执行分支（项目行/global 行/网关 gw- 行）。
@@ -494,7 +726,7 @@ async function callViaLoaderEntry(
   const timeoutMs = opts.explicitTimeoutMs ?? control.serverTimeoutMs(serverName)
   let aiOwned = false
   try {
-    aiOwned = await ensureEnabledGateway(control, ctx, serverName, entry)
+    aiOwned = await ensureEnabledGateway(control, ctx, state, serverName, entry)
   } catch (error) {
     throw new Error(`启用 MCP server "${serverName}" 失败：${msgOf(error)}`)
   }
@@ -535,26 +767,56 @@ async function callViaLoaderEntry(
     const next = (state.refCounts.get(serverName) ?? 1) - 1
     if (next <= 0) state.refCounts.delete(serverName)
     else state.refCounts.set(serverName, next)
-    if (failed && aiOwned && next <= 0) void restoreGateway(control, ctx, serverName, entryId)
+    if (failed && aiOwned && next <= 0) void restoreGateway(control, ctx, state, serverName, entryId)
   }
 }
 
-/** loader 分支的 ensureEnabled（不碰 ControllerState.aiEnabled；网关行用户语义恒用户打开）。 */
+/**
+ * gateway 透传分支的 ensureEnabled（0.5.9 修正）。
+ *
+ * 历史 bug（0.5.7/0.5.8 实测现场）：本函数原样**不碰 `state.aiEnabled`**，注释理由是
+ * 「网关行用户语义恒用户打开」。但 0.5.6 起 `mcp_call` 已改道 gateway 透传
+ * （见 registerMcpCallTool），于是 preset 行被 AI 拉起的每一次调用都落在这里 →
+ * 「行被真拉起、工具真执行」与「回收器集合永远为空、永不回收」同时成立。
+ * 实测指纹：`mcp_call` 未知 server 返回 `MCP 调用异常：未知 MCP server：…（不在 loader 中）`
+ * ——带 `MCP 调用异常：` 前缀即证明走的是 gatewayCall（`call()` 分支无此前缀），
+ * 而此时 `controller.status().aiOwned` 为空、回收器 `candidates` 为空。
+ *
+ * 现在统一到 `state.aiEnabled`：AI 借用的行用完即关；失败走 restoreGateway 立即回关。
+ * 用户自己打开的行不会进集合（见 markUserEnabled），语义不变。
+ */
 async function ensureEnabledGateway(
   control: McpControlCtx,
   ctx: Context,
+  state: ControllerState,
   serverName: string,
   entry: Entry,
 ): Promise<boolean> {
-  if (!entry.disabled) return false
+  if (!entry.disabled) {
+    counters().wakeSkippedAlreadyEnabled += 1
+    return false // 行本来就是开的 → 非 AI 借用，回收器不接管
+  }
+  counters().wakeAdded += 1
   await entry.update({ disabled: false })
+  state.aiEnabled.add(serverName)
   await control.setAiOwner(entry.id, Date.now()).catch(() => undefined)
   ctx.logger.info?.(`mcp-skill-panel: gateway enabled MCP server "${serverName}"`)
   return true
 }
 
-/** loader 分支的失败恢复（best-effort；网关常驻行失败即回关，不留半开）。 */
-async function restoreGateway(control: McpControlCtx, ctx: Context, serverName: string, entryId: string): Promise<void> {
+/**
+ * gateway 分支的失败恢复（best-effort；失败即回关，不留半开）。
+ * 0.5.9：同时清 `state.aiEnabled`/refCounts/lastUsed —— 否则回关后回收器下一轮
+ * 仍把这个 server 当候选，`idleMs` 因 lastUsed 已被删而变成 `now-0` 的巨值，
+ * 每轮白扫一次（无害但噪声）。调用方保证此时 refCount 已归零。
+ */
+async function restoreGateway(
+  control: McpControlCtx,
+  ctx: Context,
+  state: GatewayCallState,
+  serverName: string,
+  entryId: string,
+): Promise<void> {
   try {
     const entry = control.resolveEntry(serverName)
     if (entry && entry.id === entryId && !entry.disabled) {
@@ -563,6 +825,10 @@ async function restoreGateway(control: McpControlCtx, ctx: Context, serverName: 
     await control.clearAiOwner(entryId).catch(() => undefined)
   } catch (error) {
     ctx.logger.warn?.(`mcp-skill-panel: gateway restore disabled for "${serverName}" failed: ${msgOf(error)}`)
+  } finally {
+    state.aiEnabled.delete(serverName)
+    state.refCounts.delete(serverName)
+    state.lastUsed.delete(serverName)
   }
 }
 
@@ -597,22 +863,112 @@ async function restore(
   }
 }
 
+/** 回收器单轮诊断快照（0.5.8）。历史教训：0.5.7 首次实测「临时拉起」时只看到
+ * 最终没关，看不到回收器**每轮看到了什么、为什么跳过**，白跑一轮实验。此结构把
+ * 判定输入（keepAliveMs / 候选集合 / 各自 refCount 与空闲时长）全部落成可读读数。 */
+export interface ReaperRound {
+  at: number
+  keepAliveMs: number
+  /** aiEnabled 里的候选（回收只对这一集合生效） */
+  candidates: string[]
+  decisions: Array<{ server: string; refCount: number; idleMs: number; action: string }>
+}
+
+/** /debug 只读曝光（模块级单例；零 secrets）。 */
+export interface ReaperDiag {
+  rounds: number
+  /** 最近一轮（存储态不含 agoMs，读取时计算） */
+  lastRound: ReaperRound | null
+  everDisabled: string[]
+}
+
+let reaperDiag: ReaperDiag = { rounds: 0, lastRound: null, everDisabled: [] }
+
+/**
+ * 0.5.9 计数闸门（挂 globalThis，**不依赖模块实例**）。
+ *
+ * 为什么需要：0.5.7/0.5.8 实测出自相矛盾的现场——`mcp_call` 确实把休眠行拉起来了
+ * （返回 `3*x**2`、面板 disabled=false），但 `controller.status()` 的 `aiOwned` 与
+ * 回收器 `candidates` **同时为空**。两者共用同一个 state 对象，理论上不可能。
+ * 可疑面只剩：调用走了另一条分支 / 另有控制器实例 / 中途被清了标记。
+ * 这组计数器把每次分支决策记成可读数字，一轮实验即可判定。
+ */
+interface ControllerCounters {
+  controllers: number
+  callResolvedEntry: number
+  callNoEntry: number
+  callPresetBranch: number
+  wakeAdded: number
+  wakeSkippedAlreadyEnabled: number
+  clearedByUser: number
+  reaped: number
+  reaperDroppedNoEntry: number
+}
+
+const COUNTER_KEY = '__dshMcpPanelControllerCounters__'
+
+function counters(): ControllerCounters {
+  const g = globalThis as unknown as Record<string, ControllerCounters | undefined>
+  let c = g[COUNTER_KEY]
+  if (!c) {
+    c = {
+      controllers: 0,
+      callResolvedEntry: 0,
+      callNoEntry: 0,
+      callPresetBranch: 0,
+      wakeAdded: 0,
+      wakeSkippedAlreadyEnabled: 0,
+      clearedByUser: 0,
+      reaped: 0,
+      reaperDroppedNoEntry: 0,
+    }
+    g[COUNTER_KEY] = c
+  }
+  return c
+}
+
+/** /debug 用：分支决策计数快照。 */
+export function controllerCounters(): ControllerCounters {
+  return { ...counters() }
+}
+
+/** 供 /debug 读取（每次刷新 agoMs，不参与逻辑判断）。 */
+export function reaperDiagnostics(): ReaperDiag & { agoMs: number | null } {
+  return {
+    rounds: reaperDiag.rounds,
+    lastRound: reaperDiag.lastRound,
+    everDisabled: [...reaperDiag.everDisabled],
+    agoMs: reaperDiag.lastRound ? Date.now() - reaperDiag.lastRound.at : null,
+  }
+}
+
 function startIdleReaper(control: McpControlCtx, ctx: Context, state: ControllerState): () => void {
   return ctx.interval(() => {
     const now = Date.now()
+    const keepAliveMs = control.keepAliveMs
+    const decisions: ReaperRound['decisions'] = []
     for (const server of [...state.aiEnabled]) {
       const refCount = state.refCounts.get(server) ?? 0
-      if (refCount > 0) continue
       const last = state.lastUsed.get(server) ?? 0
-      if (now - last < control.keepAliveMs) continue
+      if (refCount > 0) {
+        decisions.push({ server, refCount, idleMs: now - last, action: 'skip:refCount' })
+        continue
+      }
+      if (now - last < keepAliveMs) {
+        decisions.push({ server, refCount, idleMs: now - last, action: 'skip:keepAlive' })
+        continue
+      }
       const entry = control.resolveEntry(server)
       if (!entry) {
+        decisions.push({ server, refCount, idleMs: now - last, action: 'drop:noEntry' })
+        counters().reaperDroppedNoEntry += 1
         state.aiEnabled.delete(server)
         state.refCounts.delete(server)
         state.lastUsed.delete(server)
         continue
       }
       const entryId = entry.id
+      decisions.push({ server, refCount, idleMs: now - last, action: 'reap' })
       void (async () => {
         try {
           if (!entry.disabled) await entry.update({ disabled: true })
@@ -620,6 +976,8 @@ function startIdleReaper(control: McpControlCtx, ctx: Context, state: Controller
           // 此时放弃本轮回收，不清 owner 不打日志。
           if ((state.refCounts.get(server) ?? 0) > 0) return
           await control.clearAiOwner(entryId)
+          if (!reaperDiag.everDisabled.includes(server)) reaperDiag.everDisabled.push(server)
+          counters().reaped += 1
           ctx.logger.info?.(`mcp-skill-panel: idle-reaped MCP server "${server}"`)
         } catch (error) {
           ctx.logger.warn?.(`mcp-skill-panel: idle reaper disable "${server}" failed: ${msgOf(error)}`)
@@ -633,6 +991,7 @@ function startIdleReaper(control: McpControlCtx, ctx: Context, state: Controller
         }
       })()
     }
+    reaperDiag = { ...reaperDiag, rounds: reaperDiag.rounds + 1, lastRound: { at: now, keepAliveMs, candidates: [...state.aiEnabled], decisions } }
   }, REAPER_INTERVAL_MS)
 }
 
@@ -641,6 +1000,7 @@ function startIdleReaper(control: McpControlCtx, ctx: Context, state: Controller
  * 在 apply 里构建并封闭所有 IO。
  */
 export function createMcpCallController(ctx: Context, caches: McpControlCtx): McpCallController {
+  counters().controllers += 1
   const state: ControllerState = {
     refCounts: new Map<string, number>(),
     lastUsed: new Map<string, number>(),
@@ -682,6 +1042,10 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
       if (entry) void caches.clearAiOwner(entry.id)
     },
 
+    async fetchInventory(serverName) {
+      return collectInventory(ctx, caches, state, serverName, 'mcp_search')
+    },
+
     async call(serverName, toolName, args, agent, signal, explicitTimeoutMs) {
       const bareTool = normalizeToolName(serverName, toolName)
       const name = `mcp__${serverName}__${bareTool}`
@@ -693,6 +1057,7 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
       }
       const entry = caches.resolveEntry(serverName)
       if (!entry) {
+        counters().callNoEntry += 1
         // 0.5.6 预设行直通：rc.1 preset 行挂 standing 组合、不在 loader.entries()
         // 里（findMcpEntry miss）。此时按 serverName 找当前会话 preset 的 standing
         // 行：已启用的行（!disabled）其 mcp__* 工具已由 mcp-client 注册进 tools
@@ -719,6 +1084,7 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
         return `未知 MCP server：${serverName}（不在 loader 中）`
       }
       const entryId = entry.id
+      counters().callResolvedEntry += 1
       const presetTimeout = caches.presetTimeoutMs ? await caches.presetTimeoutMs(serverName).catch(() => undefined) : undefined
       const timeoutMs = explicitTimeoutMs ?? presetTimeout ?? caches.serverTimeoutMs(serverName)
 
@@ -792,32 +1158,46 @@ function clampLimit(value: number | undefined, defaultValue: number, max: number
 /** 摘要截断长度：mcp_search 空查询的输出 token 控制（P2-5）。 */
 const SUMMARY_MAX_LEN = 80
 
-function buildSummary(control: McpControlCtx): Array<{ server: string; summary: string }> {
+/**
+ * mcp_search 空查询的 server 清单（0.6.0 重写为「**已安装**」而非「在跑的」）。
+ *
+ * 关键修复动机（P1 实验实测）：原实现只遍历 catalog，而 catalog 只对**运行过的**
+ * 行采快照 → 用户关掉且从未运行过的 server 既不在 catalog、又不在 loader，
+ * 于是模型**完全不知道它存在**，「关着的 server 可被按需拉起」这条 rc.8 语义落空。
+ *
+ * 现在的数据源是「已安装行（standing 树，含关闭行）∪ catalog ∪ Config.serverSummary」：
+ * - 已安装行给出权威的开关状态（open/closed）；
+ * - 摘要优先取 `serverSummary` 配置，其次 catalog 里第一个工具的描述（截断）；
+ * - 无快照的行显式标注「无工具快照，首次按需调用时会自动拉起采集」。
+ */
+function buildSummary(control: McpControlCtx): Array<{ server: string; summary: string; open: boolean; tools: number | null }> {
   const catalog = control.getCatalog()
-  // 只列「配置了 serverSummary 或 catalog 有快照」的 server（此前硬编码作者机器上的
-  // cheatengine/mimo-image/chrome/calcmcp 摘要，本机没装这些 server 的用户会看到误导条目）。
-  const merged: Record<string, string> = { ...control.serverSummary }
-  const lines: Array<{ server: string; summary: string }> = []
-  const seen = new Set<string>()
-  for (const [server, summary] of Object.entries(merged)) {
-    if (seen.has(server)) continue
-    seen.add(server)
-    lines.push({ server, summary })
+  const installed = new Map<string, boolean>()
+  for (const row of control.installedInventory?.() ?? []) installed.set(row.server, row.open)
+
+  const servers = new Set<string>([...installed.keys(), ...Object.keys(catalog), ...Object.keys(control.serverSummary)])
+  const lines: Array<{ server: string; summary: string; open: boolean; tools: number | null }> = []
+  for (const server of servers) {
+    const snap = catalog[server]
+    const tools = snap ? snap.tools.length : null
+    const configured = control.serverSummary[server]
+    let summary: string
+    if (configured !== undefined) {
+      summary = configured
+    } else if (tools && tools > 0) {
+      const raw = String(snap?.tools?.[0]?.description ?? 'MCP server')
+      summary = raw.length > SUMMARY_MAX_LEN ? `${raw.slice(0, SUMMARY_MAX_LEN)}…` : raw
+    } else {
+      summary = '（无工具快照：首次按需调用时会自动拉起并采集）'
+    }
+    lines.push({ server, summary, open: installed.get(server) ?? true, tools })
   }
-  // 补上 catalog 里有但 summary 没写的 server（截断长描述，避免输出膨胀）
-  for (const server of Object.keys(catalog)) {
-    if (seen.has(server)) continue
-    seen.add(server)
-    const first = catalog[server]?.tools?.[0]
-    const raw = first ? String(first.description) : 'MCP server'
-    const summary = raw.length > SUMMARY_MAX_LEN ? `${raw.slice(0, SUMMARY_MAX_LEN)}…` : raw
-    lines.push({ server, summary })
-  }
-  lines.sort((a, b) => a.server.localeCompare(b.server))
+  // 开着（模型已可见）的排前面，其余按名字
+  lines.sort((a, b) => Number(b.open) - Number(a.open) || a.server.localeCompare(b.server))
   return lines
 }
 
-function registerMcpSearchTool(ctx: Context, control: McpControlCtx): () => void {
+function registerMcpSearchTool(ctx: Context, control: McpControlCtx, controller: McpCallController): () => void {
   const definition = defineTool({
     name: 'mcp_search',
     description:
@@ -850,19 +1230,31 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx): () => void
       const keep = (name: string): boolean => !isToolDisabled(name, workspace)
 
       if (server) {
-        const page = listServer(catalog, server, offset, pageLimit)
-        if (!page) {
+        const installedRows = control.installedInventory?.() ?? []
+        const known = installedRows.find((row) => row.server === server)
+        let page = listServer(catalog, server, offset, pageLimit)
+        // 0.6.0：已安装但没有快照（用户关掉且从未运行过）→ 临时拉起采集一次能力表。
+        // 这使 mcp_search 真正成为「已安装能力表」（rc.8 语义），而不是「在跑的能力表」。
+        let probed = false
+        if (!page.hasSnapshot && known) {
+          const fetched = await controller.fetchInventory(server).catch(() => null)
+          probed = true
+          if (fetched) page = listServer(control.getCatalog(), server, offset, pageLimit)
+        }
+        if (!page.hasSnapshot && !known) {
           return toJson({
             ok: true,
             kind: 'list',
             server,
             found: false,
+            installed: false,
+            hasSnapshot: false,
             count: 0,
             totalCount: 0,
             offset,
             limit: pageLimit,
             tools: [],
-            hint: `未知 server "${server}"，空查 mcp_search 看 server 清单；工具多时改 query + server 缩小范围；中文连写请用空格分词。`,
+            hint: `未知 server "${server}"，空查 mcp_search 看 server 清单；中文连写请用空格分词。`,
           })
         }
         const tools = page.tools.filter((tool) => keep(tool.name))
@@ -871,12 +1263,18 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx): () => void
           kind: 'list',
           server,
           found: true,
+          installed: true,
+          open: known?.open ?? true,
+          hasSnapshot: page.hasSnapshot,
+          probed,
           count: tools.length,
           totalCount: page.totalCount,
           offset,
           limit: pageLimit,
           tools,
-          hint: '工具多时改 query + server 缩小范围；中文连写请用空格分词。',
+          hint: page.hasSnapshot
+            ? '工具多时改 query + server 缩小范围；中文连写请用空格分词。'
+            : `该 server 已安装但当前关闭且采集失败（无工具快照）。可直接 mcp_call 调用它——中间层会临时拉起；若持续失败请在面板打开它。`,
         })
       }
 
@@ -886,7 +1284,11 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx): () => void
       }
 
       const servers = buildSummary(control)
-      const text = servers.map((s) => `- ${s.server}: ${s.summary}`).join('\n')
+      const openCount = servers.filter((s) => s.open).length
+      const text = [
+        `已安装 ${servers.length} 个 MCP server（${openCount} 个已打开并对模型可见，${servers.length - openCount} 个已关闭——关闭的对模型不可见，但可经 mcp_call 按需临时拉起）。`,
+        ...servers.map((s) => `- ${s.server} [${s.open ? '开' : '关'}]${s.tools === null ? '' : ` (${s.tools} 工具)`}: ${s.summary}`),
+      ].join('\n')
       return toJson({ ok: true, kind: 'summary', summary: text, servers, count: servers.length })
     },
   })
@@ -936,7 +1338,7 @@ export function installMcpControlTools(ctx: Context, control: McpControlCtx, con
   return ctx.effect(() => {
     const disposers: Array<() => void> = []
     try {
-      disposers.push(registerMcpSearchTool(ctx, control))
+      disposers.push(registerMcpSearchTool(ctx, control, controller))
       disposers.push(registerMcpCallTool(ctx, controller))
     } catch (error) {
       for (const d of disposers) d()

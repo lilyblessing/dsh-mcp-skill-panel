@@ -75,12 +75,56 @@ export interface McpControlCtx {
     clearAiOwner(entryId: string): Promise<void>;
     /** 对所有当前 enabled 的 server 重新快照（tools/change / 启动）。 */
     snapshotEnabled(): Promise<void>;
+    /**
+     * 0.6.0：按需采集某 server 的能力表（mcp_search 命中「已安装但没有快照」时用）。
+     *
+     * 实现由 index.ts 注入（拿得到 resolveScopeSchemas / snapshotFromSchemas /
+     * persistCatalog 这套 IO），返回采集到的工具数；未采到返回 null。
+     */
+    collectInventory?(serverName: string): Promise<{
+        tools: number;
+        joined: boolean;
+    } | null>;
+    /**
+     * 0.6.2：把**调用方已经采到**的 schema 写入 catalog（按 serverName 过滤）。
+     * 与 `collectInventory` 的区别：采集口径由调用方决定（命中视图的 scope），
+     * 本函数只负责过滤 + 落盘。
+     */
+    storeInventory?(serverName: string, schemas: ReadonlyArray<{
+        name?: unknown;
+        description?: unknown;
+        parameters?: unknown;
+    }>): Promise<{
+        tools: number;
+        joined: boolean;
+    } | null>;
+    /** 0.6.0：已安装（配置里存在该行）的 MCP server 清单，含用户关闭的。 */
+    installedInventory?(): Array<{
+        server: string;
+        open: boolean;
+    }>;
+}
+/** 控制层共享状态：调用链（call / gatewayCall）与空闲回收器**是同一个对象**。
+ * 0.5.9 教训：`aiEnabled` 曾一度只有 `call()` 分支登记，而 `mcp_call` 实际走
+ * gatewayCall → 回收器集合恒空、永不回收。两个分支现在都写这一个对象。 */
+interface ControllerState {
+    refCounts: Map<string, number>;
+    lastUsed: Map<string, number>;
+    aiEnabled: Set<string>;
 }
 export interface McpCallController {
     /** 保活启用：disabled 时开启并记录 AI owner。返回本次是否由 AI 开启。 */
     ensureEnabled(serverName: string): Promise<boolean>;
     /** 该 server 当前是否由 AI 临时启用（mcp_call 保活中）——装配过滤据此保持其不可见。 */
     isAiEnabled(serverName: string): boolean;
+    /**
+     * 0.6.0：按需把某个「已安装但没快照」的 server 拉起来采集一次能力表，然后放回关闭。
+     * 让 mcp_search 对关着的 server 也能给出工具清单（rc.8 语义）。
+     */
+    fetchInventory(serverName: string): Promise<{
+        tools: number;
+        joined: boolean;
+    } | null>;
     /**
      * 用户手动打开该 server：清除 AI 临时启用标记（aiEnabled/引用计数/lastUsed +
      * state.json 的 ai owner），使其转为「用户打开」语义 —— 模型立即可见、回收器不再回收。
@@ -104,6 +148,50 @@ export interface McpCallController {
     }>;
 }
 export declare function msgOf(error: unknown): string;
+/** 可执行一个注册工具的最小视图（宿主 ctx 或调用方 agent ctx 的 tools 服务）。 */
+interface ToolView {
+    label: string;
+    tools: {
+        get(name: string, scope?: object): unknown;
+        execute(exec: unknown): Promise<unknown>;
+    } | undefined;
+    scope: object | undefined;
+}
+/**
+ * 0.6.2：从「已确认注册了工具」的那个视图直接取 schema 快照。
+ * 与 index.ts 的 `getSchemasView` 读同一份 dsh-tools 服务，只是**用命中视图自己的
+ * scope**，避免换口径重读采空（0.6.1 实测的采空原因）。
+ */
+export declare function schemasOfView(view: ToolView | undefined): Array<{
+    name?: unknown;
+    description?: unknown;
+    parameters?: unknown;
+}>;
+/**
+ * 0.6.3：能力表采集的逐阶段痕迹。
+ *
+ * 为什么必须加：0.6.0→0.6.2 连续两次"采空"，而外部只能看到两个布尔
+ * （`probed:true` / `hasSnapshot:false`），无法判断卡在"等待注册"还是"读到 0 条 schema"。
+ * 这里把每阶段的原始数字留下，`/debug` 的 `inventoryTrace` 直接可读。
+ */
+interface InventoryTrace {
+    at: number;
+    requestedBy: string;
+    stage: string;
+    ms: number;
+    entryFound: boolean | null;
+    wasDisabled: boolean | null;
+    wakeAdded: boolean | null;
+    viewLabel: string | null;
+    viewScope: string | null;
+    schemaTotal: number | null;
+    schemaMatched: number | null;
+    stored: number | null;
+    error: string | null;
+}
+export declare function inventoryTraceDiag(): Record<string, InventoryTrace & {
+    agoMs: number;
+}>;
 /**
  * 网关透传调用（P2，与 call() 并存）：与 callViaPresetViews 同执行链
  * （collectToolViews+waitRegistered+execute），但错误走 throw 而非文本。
@@ -129,11 +217,60 @@ export interface GatewayCallOpts {
     explicitTimeoutMs?: number;
 }
 export declare function gatewayCall(ctx: Context, control: McpControlCtx, state: GatewayCallState, serverName: string, bareIn: string, args: unknown, opts: GatewayCallOpts): Promise<string>;
-/** gatewayCall 共享的引用计数态（与 ControllerState 同形；P4 网关常驻复用）。 */
-export interface GatewayCallState {
-    refCounts: Map<string, number>;
-    lastUsed: Map<string, number>;
+/**
+ * gatewayCall 共享的状态（P4 网关常驻复用）。
+ * 0.5.9 起**必须含 `aiEnabled`**：gatewayCall 是 `mcp_call` 的实际执行分支，
+ * 它拉起的行若不登记进这个集合，空闲回收器就永远看不到（实测 bug）。
+ */
+export type GatewayCallState = ControllerState;
+/** 回收器单轮诊断快照（0.5.8）。历史教训：0.5.7 首次实测「临时拉起」时只看到
+ * 最终没关，看不到回收器**每轮看到了什么、为什么跳过**，白跑一轮实验。此结构把
+ * 判定输入（keepAliveMs / 候选集合 / 各自 refCount 与空闲时长）全部落成可读读数。 */
+export interface ReaperRound {
+    at: number;
+    keepAliveMs: number;
+    /** aiEnabled 里的候选（回收只对这一集合生效） */
+    candidates: string[];
+    decisions: Array<{
+        server: string;
+        refCount: number;
+        idleMs: number;
+        action: string;
+    }>;
 }
+/** /debug 只读曝光（模块级单例；零 secrets）。 */
+export interface ReaperDiag {
+    rounds: number;
+    /** 最近一轮（存储态不含 agoMs，读取时计算） */
+    lastRound: ReaperRound | null;
+    everDisabled: string[];
+}
+/**
+ * 0.5.9 计数闸门（挂 globalThis，**不依赖模块实例**）。
+ *
+ * 为什么需要：0.5.7/0.5.8 实测出自相矛盾的现场——`mcp_call` 确实把休眠行拉起来了
+ * （返回 `3*x**2`、面板 disabled=false），但 `controller.status()` 的 `aiOwned` 与
+ * 回收器 `candidates` **同时为空**。两者共用同一个 state 对象，理论上不可能。
+ * 可疑面只剩：调用走了另一条分支 / 另有控制器实例 / 中途被清了标记。
+ * 这组计数器把每次分支决策记成可读数字，一轮实验即可判定。
+ */
+interface ControllerCounters {
+    controllers: number;
+    callResolvedEntry: number;
+    callNoEntry: number;
+    callPresetBranch: number;
+    wakeAdded: number;
+    wakeSkippedAlreadyEnabled: number;
+    clearedByUser: number;
+    reaped: number;
+    reaperDroppedNoEntry: number;
+}
+/** /debug 用：分支决策计数快照。 */
+export declare function controllerCounters(): ControllerCounters;
+/** 供 /debug 读取（每次刷新 agoMs，不参与逻辑判断）。 */
+export declare function reaperDiagnostics(): ReaperDiag & {
+    agoMs: number | null;
+};
 /**
  * 创建控制层控制器。`caches` 即控制层依赖（McpControlCtx），由 index.ts
  * 在 apply 里构建并封闭所有 IO。
@@ -145,3 +282,4 @@ export declare function createMcpCallController(ctx: Context, caches: McpControl
  * 返回合并 disposer。
  */
 export declare function installMcpControlTools(ctx: Context, control: McpControlCtx, controller: McpCallController): () => void;
+export {};

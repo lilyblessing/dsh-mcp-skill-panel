@@ -123,21 +123,39 @@ export function searchCatalog(catalog: Catalog, query: string, limit = 8): Searc
 /**
  * 列出某 server 的全部工具（精简：name + description；L2 无 schema）。
  * 分页：offset/limit（1..200，缺省 0/20；P3 网关定稿 limit=20）。
- * 返回 undefined 表示该 server 不在 catalog 中。
+ *
+ * 0.6.0 起**不再用 `undefined` 混表"server 不存在"**：server 可能确实已安装、
+ * 只是能力表还没采过（用户关掉且从未运行过的行）。调用方据此区分三态并给出
+ * 不同的 hint，而不是一律回 `found:false`（那正是 P1 实验失败的现场）。
  */
-export function listServer(
-  catalog: Catalog,
-  server: string,
-  offset = 0,
-  limit = 20,
-): { tools: Array<{ name: string; description: string }>; totalCount: number } | undefined {
-  const serverInfo = catalog[server]
-  if (!serverInfo) return undefined
-  const totalCount = serverInfo.tools.length
+export interface ServerListing {
+  /** 已安装且有快照 */
+  found: boolean
+  /** 该 server 有快照（tools 数组可能为空） */
+  hasSnapshot: boolean
+  tools: Array<{ name: string; description: string }>
+  totalCount: number
+  fetchedAt: number | null
+  source: string | null
+}
+
+export function listServer(catalog: Catalog, server: string, offset = 0, limit = 20): ServerListing {
   const start = Math.max(0, Math.floor(Number(offset) || 0))
   const size = Math.min(200, Math.max(1, Math.floor(Number(limit) || 20)))
+  const serverInfo = catalog[server]
+  if (!serverInfo) {
+    return { found: false, hasSnapshot: false, tools: [], totalCount: 0, fetchedAt: null, source: null }
+  }
+  const totalCount = serverInfo.tools.length
   const tools = serverInfo.tools.slice(start, start + size).map((tool) => ({ name: tool.name, description: tool.description }))
-  return { tools, totalCount }
+  return {
+    found: true,
+    hasSnapshot: true,
+    tools,
+    totalCount,
+    fetchedAt: serverInfo.fetchedAt ?? null,
+    source: serverInfo.source ?? null,
+  }
 }
 
 /** catalog 文件路径：<dir>/catalog.json。 */

@@ -34,6 +34,7 @@ async function findPresetRowByServerNameLike(ctx: Context, serverName: string) {
 }
 import { resolveAgent, resolveCollectScopeKey, scopeKeySource, getSchemasView, mergeSchemas, collectMcp, collectSkills, confirmedSkills, pruneExpired, DOMAIN_TTL_MS, SKILL_TOGGLE_POLL_MS, type DomainCaches, type Deps } from './collect'
 import { isMcpEntry, serverNameOf } from './mcp-entry'
+import { findStandingEntryById, standingDiag } from './standing-rows'
 import { parseMcpServersJson, serversToPatchYaml, serversToRows, type McpServers, type McpRowConfig } from './mcp-convert'
 import { remountWorkspace, projectServerOwner, getActiveWorkspace } from './project-mcp'
 import { disabledToolsOf, setToolDisabled } from './tool-disable'
@@ -157,6 +158,10 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
   } catch {
     entry = undefined
   }
+  // 0.5.7：preset 行不在 loader 可达域，但 standing 树里有真句柄 —— 兜底取回后
+  // 走下面正常的 live 分支（entry.update / 意图持久化都以 entry.parent.tree.filename
+  // 为准），于是面板开关对 preset 行**当场生效**，不再是恒 pending 的空意图。
+  if (!entry) entry = findStandingEntryById(entryId)
   // rc.1 standing 组合兜底：preset 行不在 loader.entries/resolve 里（resolve 抛
   // "cannot resolve entry"）。行以 source:'preset' 进面板，开关走 state.json
   // desired 意图（恒 pending），由 syncPresetFiles/applyStateResidue 物化/补齐。
@@ -249,8 +254,39 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
   const deferred = mode === 'next-session'
   if (deferred) {
     pendingMcp.set(entryId, { entryId, file: (entry.parent?.tree as { filename?: string } | undefined)?.filename ?? null, rowId, disabled })
+    // 0.6.0：意图必须**同时落盘**。原实现只进内存队列，于是"记了意图但没开新会话就重启"
+    // 的用户设置会静默丢失（applyStateResidue 的 desired 兜底因此也永远无输入）。
+    // 与 preset 兜底分支（本文件 :184-185）语义对齐：desired=用户意图，lastApplied=文件现值。
+    const presetFile = (entry.parent?.tree as { filename?: string } | undefined)?.filename
+    if (typeof presetFile === 'string' && presetFile.length > 0) {
+      try {
+        const st = await readState()
+        st.mcp ??= {}
+        st.mcp[presetFile] ??= {}
+        let fileState: boolean | null = null
+        try {
+          fileState = rowDisabledState(await readFile(presetFile, 'utf8'), rowId)
+        } catch {
+          fileState = null
+        }
+        st.mcp[presetFile][rowId] = { desired: disabled, lastApplied: fileState }
+        await writeState(st)
+      } catch (error) {
+        ctx.logger.warn?.(`mcp-skill-panel: persist pending intent for "${entryId}" failed: ${messageOf(error)}`)
+      }
+    }
   } else {
     pendingMcp.delete(entryId)
+    // 0.6.0（关前补采能力表）：用户关掉一行后它就不再运行，schema 视图里随即没有它，
+    // 快照只能靠"关之前那一次"。这里先采一次写进 catalog.json，保证**关掉的 server
+    // 依然能被 mcp_search 检索到**（rc.8 语义：能力表属于"已安装"，不属于"在跑"）。
+    // 采集失败不阻断关闭（best-effort；失败时该 server 首调会自动拉起采集一次）。
+    if (disabled) {
+      try {
+        await deps.controller?.fetchInventory(serverNameOf(entry))      } catch (error) {
+        ctx.logger.warn?.(`mcp-skill-panel: pre-close inventory snapshot for "${serverNameOf(entry)}" failed: ${messageOf(error)}`)
+      }
+    }
     await entry.update({ disabled })
     // 用户手动打开（!disabled）：清除 AI 临时启用标记（aiEnabled/计数/lastUsed +
     // state.json ai owner）—— 转为「用户打开」语义：模型立即可见、回收器不再回收。
@@ -745,11 +781,29 @@ export function makeRoutes(
         }
         // P5（D5）：网关挂载面（无 secrets；lastCheck 仅计数 detail）。
         let gateway: { mounted: string[]; lastCheck: { at: number; ok: boolean; detail: string } | null } | undefined
+        // 0.5.8：临时启用控制器的 aiOwned 集合（回收器唯一作用域）+ 回收器每轮判定输入。
+        let controller: { aiOwned: Array<{ server: string; refCount: number; lastUsed: number; idleMs: number }> } | undefined
+        // 0.6.3：按需能力表采集的阶段痕迹。
+        let inventory: unknown
         try {
-          const { gatewayStateForDebug } = await import('./index')
+          const { gatewayStateForDebug, controllerStatusForDebug, inventoryTraceForDebug } = await import('./index')
           gateway = gatewayStateForDebug()
+          controller = controllerStatusForDebug()
+          // 0.6.3：能力表采集的逐阶段痕迹（采空时唯一的定位手段）
+          inventory = inventoryTraceForDebug()
         } catch {
           gateway = undefined
+          controller = undefined
+        }
+        let reaper: unknown
+        let counters: unknown
+        try {
+          const { reaperDiagnostics, controllerCounters } = await import('./mcpcall')
+          reaper = reaperDiagnostics()
+          counters = controllerCounters()
+        } catch {
+          reaper = undefined
+          counters = undefined
         }
         // HTTP 路径 scope 诊断（2026-08-27 filesystem「无工具」取证）：
         // 复现 collectMcp 的 scope 解析 + schemas 视图，确认 key 是否命中 standing 层链。
@@ -776,7 +830,20 @@ export function makeRoutes(
         } catch (error) {
           scopeDiag.error = messageOf(error)
         }
-        return { diag: catalogRuntime.diag, catalog, scopeDiag, ...(gateway ? { gateway } : {}) }
+        return {
+          diag: catalogRuntime.diag,
+          catalog,
+          scopeDiag,
+          // 0.5.7：preset 行句柄来源的自证读数。`mountsSeen: 0` + `apiAvailable: true`
+          // = 宿主 livePresetMounts() 看不到挂载（模块身份错位或宿主未挂 preset）；
+          // `lastRowCount` 应为 preset 里的 MCP 行数（本机 10）。
+          standingDiag: standingDiag(),
+          ...(controller ? { controllerStatus: controller } : {}),
+          ...(inventory !== undefined ? { inventoryTrace: inventory } : {}),
+          ...(reaper !== undefined ? { reaper } : {}),
+          ...(counters !== undefined ? { counters } : {}),
+          ...(gateway ? { gateway } : {}),
+        }
       }),
     },
     {

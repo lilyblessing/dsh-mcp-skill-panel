@@ -52,15 +52,25 @@ export declare function searchCatalog(catalog: Catalog, query: string, limit?: n
 /**
  * 列出某 server 的全部工具（精简：name + description；L2 无 schema）。
  * 分页：offset/limit（1..200，缺省 0/20；P3 网关定稿 limit=20）。
- * 返回 undefined 表示该 server 不在 catalog 中。
+ *
+ * 0.6.0 起**不再用 `undefined` 混表"server 不存在"**：server 可能确实已安装、
+ * 只是能力表还没采过（用户关掉且从未运行过的行）。调用方据此区分三态并给出
+ * 不同的 hint，而不是一律回 `found:false`（那正是 P1 实验失败的现场）。
  */
-export declare function listServer(catalog: Catalog, server: string, offset?: number, limit?: number): {
+export interface ServerListing {
+    /** 已安装且有快照 */
+    found: boolean;
+    /** 该 server 有快照（tools 数组可能为空） */
+    hasSnapshot: boolean;
     tools: Array<{
         name: string;
         description: string;
     }>;
     totalCount: number;
-} | undefined;
+    fetchedAt: number | null;
+    source: string | null;
+}
+export declare function listServer(catalog: Catalog, server: string, offset?: number, limit?: number): ServerListing;
 /** catalog 文件路径：<dir>/catalog.json。 */
 export declare function catalogFileFor(dir: string): string;
 /** 从目录加载 catalog；文件不存在 / 解析失败时返回空 catalog。 */

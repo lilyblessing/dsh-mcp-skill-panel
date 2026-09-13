@@ -24,6 +24,13 @@ if (existsSync(nodeOut)) {
   check(inline === 0, `no inlined TOOL_RUNTIME_SCHEDULER (found ${inline})`)
   check(/import\s*\{[^}]*scopeOf[^}]*\}\s*from\s*"@deepseek-ai\/dsh-scope"/.test(src), 'external dsh-scope import kept')
   check(/import\s+Schema\s+from\s*"@deepseek-ai\/schemastery"/.test(src), 'external schemastery import kept')
+  // 0.5.7 回归：agent-presets 必须外置。它内部用**模块私有 WeakMap** 记录 standing
+  // 挂载（lib/index.js:622 mounted / :639 mounted.set），内联成第二份实例会让
+  // livePresetMounts() 恒返回 []，preset 行句柄再次失联 —— 与 dsh-tools 双实例同类事故。
+  check(
+    /from\s*"@deepseek-ai\/dsh-agent-presets"/.test(src),
+    'external dsh-agent-presets import kept (inlining breaks preset row handles)',
+  )
 }
 
 if (existsSync(clientOut)) {

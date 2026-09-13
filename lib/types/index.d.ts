@@ -46,6 +46,16 @@ export declare function gatewayStateForDebug(): {
     mounted: string[];
     lastCheck: GatewayStateType['lastCheck'];
 };
+export declare function controllerStatusForDebug(): {
+    aiOwned: Array<{
+        server: string;
+        refCount: number;
+        lastUsed: number;
+        idleMs: number;
+    }>;
+};
+/** 0.6.3：能力表采集的逐阶段痕迹（/debug 的 inventoryTrace）。 */
+export declare function inventoryTraceForDebug(): unknown;
 export declare function ensureOpenMountsForDebug(): Promise<unknown>;
 export { readState, writeState } from './state';
 export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending';

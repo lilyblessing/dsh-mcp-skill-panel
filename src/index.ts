@@ -37,8 +37,9 @@ import type { Catalog, CatalogEntry } from './catalog'
 import { snapshotFromSchemas, loadCatalog, saveCatalog } from './catalog'
 import { installMcpVisibilityFilter } from './filter'
 import type { McpControlCtx, McpCallController } from './mcpcall'
-import { createMcpCallController, installMcpControlTools } from './mcpcall'
+import { createMcpCallController, installMcpControlTools, inventoryTraceDiag } from './mcpcall'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
+import { standingMcpEntries, findStandingEntryByServer, installedMcpRows } from './standing-rows'
 import { createGatewayState, disposeGatewayState, disposeGatewayStateSync, ensureOpenMounts } from './gateway'
 
 export { normalizeToolName, normalizeArguments, msgOf, gatewayCall } from './mcpcall'
@@ -78,9 +79,31 @@ export function gatewayStateForDebug(): { mounted: string[]; lastCheck: GatewayS
   return { mounted: [...debugGatewayState.mounts.keys()].sort(), lastCheck: debugGatewayState.lastCheck }
 }
 
+/**
+ * 0.5.8：/debug 只读曝光「临时启用控制器」的内部状态。
+ *
+ * 取证教训（0.5.7 首次实测「拉起后是否自动回收」）：当时只有「最终没关」这一个
+ * 事实，看不到 aiEnabled 集合是否真的收下了这个 server，也看不到回收器每轮的
+ * 判定输入，导致一轮实验不可判。此函数与 `reaperDiagnostics()` 一起把那条链
+ * 全部落成读数：`aiOwned`（回收器唯一作用域）+ 每轮 keepAliveMs/候选/跳过原因。
+ */
+let debugControllerStatus: (() => Array<{ server: string; refCount: number; lastUsed: number }>) | null = null
+
+export function controllerStatusForDebug(): {
+  aiOwned: Array<{ server: string; refCount: number; lastUsed: number; idleMs: number }>
+} {
+  if (!debugControllerStatus) return { aiOwned: [] }
+  const now = Date.now()
+  return { aiOwned: debugControllerStatus().map((row) => ({ ...row, idleMs: now - row.lastUsed })) }
+}
+
+/** 0.6.3：能力表采集的逐阶段痕迹（/debug 的 inventoryTrace）。 */
+export function inventoryTraceForDebug(): unknown {
+  return inventoryTraceDiag()
+}
+
 /** P5（W3）：/debug/collect 先挂载后快照的挂载入口（无 control 闭包时 no-op）。 */
 let debugEnsureOpenMounts: (() => Promise<unknown>) | null = null
-
 export function ensureOpenMountsForDebug(): Promise<unknown> {
   if (!debugEnsureOpenMounts) return Promise.resolve(undefined)
   return debugEnsureOpenMounts()
@@ -175,7 +198,10 @@ function findMcpEntry(ctx: Context, serverName: string): Entry | undefined {
     if (!isMcpEntry(entry)) continue
     if (serverNameOf(entry) === serverName) return entry
   }
-  return undefined
+  // 0.5.7：preset 行的真句柄来源（dsh 0.1.2-rc.1 起 preset 行不在 loader 可达域）。
+  // 这一处兜底同时救活三条通路：面板 toggle 的 entry.update、mcp_call 的
+  // ensureEnabled（临时拉起关着的行）、startIdleReaper（用完即关）。
+  return findStandingEntryByServer(serverName)
 }
 
 /** server 自己的注册/调用超时阈值。 */
@@ -296,8 +322,13 @@ async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime, caches: Do
     // 失效清理（v0.4.5 → v0.4.6 修复）：
     // 保护：loader 视图为空（组合未挂载 / 启动时序 / realm 隔离异常）时跳过 prune，
     // 绝不删除 last-good —— 0.4.5 曾因 alive 集合为空把 catalog 全部清空并写盘。
+    //
+    // 0.6.0 修复：「alive」从 loader 行扩到**已安装行（loader ∪ standing）**。
+    // 原实现只看 loader，而 preset 行不在 loader 里 → 用户关掉一行后它立刻掉出
+    // alive → 快照被 prune 删掉 → mcp_search 再也搜不到（P1 实验失败的直接机制）。
+    // 现在只要配置里还有这一行就保留快照，关掉只是"不运行"，不代表"没安装"。
     const alive = new Set<string>()
-    for (const entry of ctx.loader.entries()) {
+    for (const entry of [...ctx.loader.entries(), ...standingMcpEntries()]) {
       if (!isMcpEntry(entry)) continue
       alive.add(serverNameOf(entry))
     }
@@ -398,6 +429,39 @@ function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config, 
     setAiOwner: (entryId, at) => setStateAiOwner(entryId, at),
     clearAiOwner: (entryId) => clearStateAiOwner(entryId),
     snapshotEnabled: () => snapshotEnabled(ctx, runtime, caches),
+    requestSnapshot: () => snapshotEnabled(ctx, runtime, caches),
+
+    /**
+     * 0.6.0：按需采集能力表（mcp_search 命中「已安装但无快照」的关闭行时）。
+     * 行此刻已被调用方临时拉起，这里只负责采 schema 快照 + 落 catalog.json。
+     */
+    collectInventory: async (serverName) => {
+      const schemas = await resolveScopeSchemas(ctx, caches)
+      const tools = snapshotFromSchemas(schemas, serverName)
+      if (tools.length === 0) return null
+      const next = { ...runtime.catalog, [serverName]: { tools, fetchedAt: Date.now(), source: 'live' as const } }
+      runtime.catalog = next
+      runtime.dirty = true
+      void persistCatalog(() => ctx, runtime)
+      return { tools: tools.length, joined: false }
+    },
+
+    /** 0.6.0：已安装的 MCP server 清单（含用户关闭的，来自 standing 树）。 */
+    installedInventory: () => installedMcpRows().map((row) => ({ server: row.serverName, open: row.open })),
+
+    /**
+     * 0.6.2：由调用方（命中视图）采到的 schema 落 catalog —— **首选**采集路径。
+     * 0.6.1 的采空 bug 正是口径不一致所致（见 mcpcall.ts collectInventory 注释），
+     * 这里只做过滤与落盘，采集口径由调用方给定。
+     */
+    storeInventory: async (serverName, schemas) => {
+      const tools = snapshotFromSchemas(schemas, serverName)
+      if (tools.length === 0) return null
+      runtime.catalog = { ...runtime.catalog, [serverName]: { tools, fetchedAt: Date.now(), source: 'live' as const } }
+      runtime.dirty = true
+      void persistCatalog(() => ctx, runtime)
+      return { tools: tools.length, joined: false }
+    },
   }
 }
 
@@ -538,11 +602,21 @@ export function apply(ctx: Context, config: Config = {}): void {
   // closed 行无实例即无工具（filter ??true 兜底仅影响畸形名，不影响 closed 行）。
   const buildVisibility = (): ReadonlyMap<string, boolean> => {
     const map = new Map<string, boolean>()
-    for (const entry of ctx.loader.entries()) {
-      if (!isMcpEntry(entry)) continue
+    // 0.5.7 修：原先只遍历 ctx.loader.entries()，而 preset 行（dsh 0.1.2-rc.1 起挂在
+    // standing 组合）不在其中 → map 恒空 → filter.ts 的 `?? true` 兜底放行全部 MCP 工具
+    // → 可见性层整体空转（实测 globalMcpTools=0 / scopedMcpTools=30 即此现场）。
+    // 现在改为「loader 行 ∪ standing 行」并集；行的 disabled 仍是唯一事实源。
+    const put = (entry: Entry): void => {
+      if (!isMcpEntry(entry)) return
       const serverName = serverNameOf(entry)
-      map.set(serverName, !entry.disabled && !controller.isAiEnabled(serverName))
+      const visible = !entry.disabled && !controller.isAiEnabled(serverName)
+      // 同一 serverName 出现多次时「隐藏优先」：同 scope 内重复注册本就不合法，
+      // 真出现时保守取不可见，避免把已停用的 server 工具放给模型。
+      const prev = map.get(serverName)
+      map.set(serverName, prev === undefined ? visible : prev && visible)
     }
+    for (const entry of ctx.loader.entries()) put(entry)
+    for (const entry of standingMcpEntries()) put(entry)
     return map
   }
   let autoDisposers: Array<() => void> = []
@@ -552,6 +626,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // 同步释放（fire-and-forget remove）；开启走 ensureOpenMounts 挂载 open 行。
   const gatewayState = createGatewayState()
   debugGatewayState = gatewayState
+  debugControllerStatus = () => controller.status()
   debugEnsureOpenMounts = () => ensureOpenMounts({ ctx, control, state: gatewayState })
   catalogRuntime.applyAutoManage = (on: boolean) => {
     for (const d of autoDisposers) d()
