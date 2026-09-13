@@ -34,7 +34,7 @@ async function findPresetRowByServerNameLike(ctx: Context, serverName: string) {
 }
 import { resolveAgent, resolveCollectScopeKey, scopeKeySource, getSchemasView, mergeSchemas, collectMcp, collectSkills, confirmedSkills, pruneExpired, DOMAIN_TTL_MS, SKILL_TOGGLE_POLL_MS, type DomainCaches, type Deps } from './collect'
 import { isMcpEntry, serverNameOf } from './mcp-entry'
-import { findStandingEntryById, standingDiag, standingMcpEntries } from './standing-rows'
+import { findStandingEntryById, standingDiag, standingMcpEntries, findStandingEntryByServer } from './standing-rows'
 import { parseMcpServersJson, serversToPatchYaml, serversToRows, type McpServers, type McpRowConfig } from './mcp-convert'
 import { remountWorkspace, projectServerOwner, getActiveWorkspace } from './project-mcp'
 import { disabledToolsOf, setToolDisabled } from './tool-disable'
@@ -382,6 +382,39 @@ async function toggleSkill(deps: Deps, skillName: string, disabled: boolean, ses
  * 先写者的内容会被后写者整体覆盖丢失 → 全部走同一 Promise 链。
  */
 let fileWriteChain: Promise<unknown> = Promise.resolve()
+
+/** 0.7.0：描述某个 standing 行的**全量挂载配置**与运行态（只读；/debug/rowConfig 与配置编辑共用）。 */
+async function describeRow(server: string): Promise<Record<string, unknown>> {
+  const entry = findStandingEntryByServer(server)
+  const out: Record<string, unknown> = {
+    server,
+    standing: standingDiag(),
+    entryFound: entry !== undefined,
+  }
+  if (!entry) return out
+  const cfg = (entry.options.config ?? {}) as Record<string, unknown>
+  const keep = ['serverName', 'transport', 'command', 'args', 'env', 'cwd', 'url', 'headers', 'toolCallTimeoutMs', 'failOnStartupError']
+  const safe: Record<string, unknown> = {}
+  for (const k of keep) if (cfg[k] !== undefined) safe[k] = cfg[k]
+  out.entryId = String(entry.id)
+  out.rowId = entry.options.id ?? null
+  out.disabled = entry.disabled === true
+  out.running = entry.fiber !== undefined
+  out.config = safe
+  out.configKeys = Object.keys(cfg)
+  // 预设文件里的声明（与 live 对比，判断是否有 drift）
+  const tree = entry.parent?.tree as { filename?: string } | undefined
+  out.file = tree?.filename ?? null
+  if (typeof out.file === 'string' && out.file.length > 0) {
+    try {
+      const text = await readFile(out.file, 'utf8')
+      out.fileHasCwd = /^\s*cwd:\s*/m.test(text) ? 'file-has-cwd-line' : 'no-cwd-in-file'
+    } catch (error) {
+      out.fileError = messageOf(error)
+    }
+  }
+  return out
+}
 
 /**
  * 定位 profile 的用户 patch 层（<profile>/cordis.patch.yml）。
@@ -859,6 +892,63 @@ export function makeRoutes(
           ...(gateway ? { gateway } : {}),
         }
       }),
+    },
+    {
+      // 0.7.0 取证用（只读）：读某 server 行的**全量挂载配置**（含 cwd/command/args/env）。
+      //
+      // 面板卡片只显示 serverName/transport/disabled，看不到 cwd 一类字段；而
+      // codegraph 这类按 cwd 认项目的 MCP，配置错在哪正是靠这个端点定位的
+      // （症状：行"在跑"却零工具，因为没有 cwd → 子进程在会话工作区找不到索引）。
+      // 同时附带模块身份读数（模块私有 WeakMap 若错位会静默失联）。
+      kind: 'exact',
+      path: `${API_PREFIX}/debug/rowConfig`,
+      handler: handleAny([
+        {
+          method: 'GET',
+          run: async (req) => {
+            const q = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams
+            const server = (q.get('server') ?? '').trim()
+            if (!server) throw new Error('server is required')
+            return describeRow(server)
+          },
+        },
+        {
+          // 写入（取证用）：把 config 增删改到 standing 行上，观察是否干净重启。
+          // body: { server: string, set?: Record<string,unknown>, unset?: string[], update?: boolean }
+          // `update:false` 只回报将要写入的内容（dry-run），不碰运行时。
+          method: 'POST',
+          run: async (req) => {
+            const body = JSON.parse((await readBody(req)) || '{}') as {
+              server?: string
+              set?: Record<string, unknown>
+              unset?: string[]
+              update?: boolean
+            }
+            const server = String(body.server ?? '').trim()
+            if (!server) throw new Error('server is required')
+            const entry = findStandingEntryByServer(server)
+            if (!entry) throw new Error(`standing 行未找到：${server}`)
+            const before = describeRow(server)
+            const next = { ...((entry.options.config ?? {}) as Record<string, unknown>) }
+            for (const key of body.unset ?? []) delete next[key]
+            for (const [key, value] of Object.entries(body.set ?? {})) next[key] = value
+            const allowed = ['serverName', 'transport', 'command', 'args', 'env', 'cwd', 'url', 'headers', 'toolCallTimeoutMs', 'failOnStartupError']
+            const rejected = Object.keys(next).filter((k) => !allowed.includes(k))
+            if (rejected.length > 0) throw new Error(`不允许的配置键：${rejected.join(', ')}`)
+            if (body.update === false) return { dryRun: true, before, willWrite: next }
+            let updateError: string | null = null
+            try {
+              await entry.update({ config: next })
+            } catch (error) {
+              updateError = messageOf(error)
+            }
+            // 等一拍让 fiber 重建，再回报现场（同 entryId 是否还在 standing 树里、
+            // 是否仍在运行、配置是否已变）—— 这就是"能否热改配置"的判据。
+            await new Promise((resolve) => setTimeout(resolve, 1200))
+            return { updateError, before, after: describeRow(server) }
+          },
+        },
+      ]),
     },
     {
       kind: 'exact',
