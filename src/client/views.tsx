@@ -569,7 +569,17 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
 
   // P2-9：useCallback 稳定引用，避免 McpPanel 每次渲染重建（状态徽标查表）
   const mcpStatus = useCallback(
-    (row: McpRow): { label: string; color: string; bg: string } => {
+    (row: McpRow): { label: string; color: string; bg: string; title?: string } => {
+      // 0.7.1 诚实上报：启用+在跑但零注册（子进程起不来/空转）单独一档，
+      // 不复用 statusIdle 的"No tools"，也不会再被目录快照伪装成 active。
+      if (row.unregistered) {
+        return {
+          label: t('ri.statusUnregistered'),
+          color: 'var(--dsw-alias-state-error-primary)',
+          bg: 'var(--dsw-alias-state-error-secondary)',
+          title: t('ri.statusUnregisteredHint'),
+        }
+      }
       switch (row.status) {
         case 'active':
           return { label: t('ri.statusActive'), color: 'var(--dsw-alias-state-success-primary)', bg: 'var(--dsw-alias-state-success-tertiary)' }
@@ -693,8 +703,8 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
 }
 
 /** P2-7：状态徽标小组件（替代散落的 C.badge span 样板）。 */
-function Badge(props: { color: string; bg: string; children: React.ReactNode }): React.ReactElement {
-  return <span style={C.badge(props.color, props.bg)}>{props.children}</span>
+function Badge(props: { color: string; bg: string; children: React.ReactNode; title?: string }): React.ReactElement {
+  return <span style={C.badge(props.color, props.bg)} title={props.title}>{props.children}</span>
 }
 
 function AutoManageCard(props: {
@@ -854,7 +864,7 @@ function McpPanel(props: {
   t: Props['t']
   busy: Record<string, boolean>
   onToggle: (row: McpRow) => void
-  statusOf: (row: McpRow) => { label: string; color: string; bg: string }
+  statusOf: (row: McpRow) => { label: string; color: string; bg: string; title?: string }
   applyMode: 'immediate' | 'next-session'
   loadMcp: () => void
 }): React.ReactElement {
@@ -927,7 +937,7 @@ function McpPanel(props: {
             <div style={C.cardTop}>
               <h3 style={C.cardTitle}>
                 {row.serverName}
-                <Badge color={st.color} bg={st.bg}>
+                <Badge color={st.color} bg={st.bg} title={st.title}>
                   {st.label}
                 </Badge>
                 {row.pending && (

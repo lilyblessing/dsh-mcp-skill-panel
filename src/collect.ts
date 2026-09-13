@@ -19,6 +19,7 @@ import { readState } from './state'
 import { pendingMcp } from './pending'
 import { listPresetMcpRows } from './preset-mcp'
 import { gatewayServerOfEntryId } from './gateway'
+import { computeStatus, rowDisplay } from './row-display'
 
 /** 分域缓存 TTL：事件驱动失效为主，TTL 只是兜底（事件丢失场景） */
 export const DOMAIN_TTL_MS = 60_000
@@ -183,17 +184,8 @@ export function scopeKeySource(): 'agent' | 'standing' | null {
   return sharedScopeKeySource
 }
 
-/** 行状态徽标判定（纯函数，selftest 表驱动回归）。
- * 语义（2026-08-27 发布前独立审查修正）：active/idle 以 **liveTools**（真实注册）
- * 为准——displayTools 含 catalog 快照兜底，用它判定 active 会掩盖「scope 解析
- * 失败但 catalog 有旧快照」的故障现场（面板显示健康而实际工具未注册）。
- * displayTools 仅用于 tools/tokens 数值展示与停用态回填。
- */
-export function computeStatus(disabled: boolean, running: boolean, liveTools: number): McpRow['status'] {
-  if (disabled) return 'disabled'
-  if (!running) return 'failed'
-  return liveTools > 0 ? 'active' : 'idle'
-}
+/** 行级读数判定已拆到 ./row-display（零宿主依赖，便于 selftest 独立加载）。 */
+export { computeStatus, rowDisplay } from './row-display'
 
 function baseView(
   ctx: Context,
@@ -351,10 +343,12 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
       // 面板联动（P3）：停用/未挂载时优先显示 catalog 目录值（工具数与 token 估算），
       // 让用户看到「该 MCP 有哪些工具可用」而不只是 0
       const catalogInfo = deps.catalogRuntime.catalog[serverName]
-      const displayTools = liveTools > 0 ? liveTools : catalogInfo?.tools.length ?? 0
+      // 0.7.1 诚实上报：启用+在跑却零注册 → tools=0 + unregistered，不回落目录快照
+      const disp = rowDisplay(disabled, running, liveTools, catalogInfo?.tools.length ?? 0)
+      const displayTools = disp.displayTools
       const displayTokens =
         liveTools > 0 ? (agg?.tokens ?? 0) : catalogTokens(deps.catalogRuntime, serverName, catalogInfo)
-      const status = computeStatus(disabled, running, liveTools)
+      const status: McpRow['status'] = disp.unregistered ? 'failed' : computeStatus(disabled, running, liveTools)
       const transportRaw = mcpEntryConfig(entry)?.transport
       // 项目行查所属工作区的项目禁用表；全局行查全局表（disabledToolsOf 内部按 owner 分派）
       const toolDisabled = disabledToolsOf(serverName, projectWorkspace)
@@ -376,6 +370,7 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
         tokens: displayTokens,
         toolList: toolList?.map((tool) => ({ name: tool.name, description: tool.description, disabled: toolDisabled.has(tool.name) })) ?? null,
         status,
+        unregistered: disp.unregistered,
         modelVisible:
           !disabled &&
           !(deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(serverName) ?? false)),
@@ -421,10 +416,12 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
           // toggle 后（pendingHit 或 desired≠live）才挂 pending。
           const pendingFlag = pendingHit ? pendingHit.disabled !== pr.disabled : rowDesired !== undefined ? rowDesired !== pr.disabled : false
           const catalogInfo = deps.catalogRuntime.catalog[pr.serverName]
-          const displayTools = liveTools > 0 ? liveTools : catalogInfo?.tools.length ?? 0
+          // 0.7.1 诚实上报：与 loader 路径同判据（启用+在跑却零注册 → failed + tools=0）
+          const disp = rowDisplay(pr.disabled, pr.running, liveTools, catalogInfo?.tools.length ?? 0)
+          const displayTools = disp.displayTools
           const displayTokens =
             liveTools > 0 ? (agg?.tokens ?? 0) : catalogTokens(deps.catalogRuntime, pr.serverName, catalogInfo)
-          const status = computeStatus(pr.disabled, pr.running, liveTools)
+          const status: McpRow['status'] = disp.unregistered ? 'failed' : computeStatus(pr.disabled, pr.running, liveTools)
           const toolDisabled = disabledToolsOf(pr.serverName, projectWorkspace)
           let toolList = toolsByServer.get(pr.serverName)
           if (!toolList && catalogInfo) {
@@ -441,6 +438,7 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
             tokens: displayTokens,
             toolList: toolList?.map((tool) => ({ name: tool.name, description: tool.description, disabled: toolDisabled.has(tool.name) })) ?? null,
             status,
+            unregistered: disp.unregistered,
             modelVisible:
               !pr.disabled &&
               !(deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(pr.serverName) ?? false)),

@@ -31,9 +31,21 @@ import { fileURLToPath } from 'node:url'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const deployRoot = process.env.DSH_DEPLOY_ROOT ?? join(root, '..', '.deploy')
 const target = join(deployRoot, 'dsh-mcp-skill-panel')
-/** 宿主 @deepseek-ai/* 的真实落点（profiles 基准；可用 DSH_HOST_SCOPE 覆盖）。 */
+/**
+ * 宿主 @deepseek-ai/* 的真实落点（web profile 基准；可用 DSH_HOST_SCOPE 覆盖）。
+ *
+ * 2026-09-13 修正：原默认值是 `profiles/node_modules/@deepseek-ai`（pnpm 扁平层），
+ * 而**那个扁平层在 junction 事故后已断链**（240 项里 170 项 package.json 不可达，
+ * 含 dsh-agent-presets / dsh-tools / dsh-scope）。指向它的部署目录在**冷启动**时
+ * 全部 MODULE_NOT_FOUND —— 实测（改动前）：
+ *   FAIL [deploy] @deepseek-ai/dsh-agent-presets -> MODULE_NOT_FOUND
+ *   （运行中的进程因模块已入内存而不暴露这个问题）
+ * 而 web profile 侧的 `node_modules/@deepseek-ai` 是**修好的真实目录**（241 项全通），
+ * 与扁平层同源（realpath 均为 .pnpm/@deepseek-ai+<pkg>@0.1.5-rc.2…\node_modules\…），
+ * 故以它为基准。改基准后同一基准测试 3/3 解析成功。
+ */
 const hostScope =
-  process.env.DSH_HOST_SCOPE ?? 'C:/Users/lily/.dsh/profiles/node_modules/@deepseek-ai'
+  process.env.DSH_HOST_SCOPE ?? 'C:/Users/lily/.dsh/profiles/web/node_modules/@deepseek-ai'
 
 if (process.argv.includes('--build')) {
   console.log('> npm run build')
@@ -67,6 +79,9 @@ writeFileSync(
 
 // 关键接线：@deepseek-ai/* 一律指向宿主同一份实例。
 // symlinkSync(target, path) —— target 是宿主 scoped 目录，path 是部署目录里的链接位。
+// 安全性说明（2026-09-13 实测）：`rmSync(..., {recursive:true})` **不跟随 junction**
+// （沙箱验证：删掉含 junction 的父目录后，两个链接目标 marker 文件均存活），
+// 故这里的 clean 重建不会伤到宿主 scope 或 pnpm 商店。
 const scopeDir = join(target, 'node_modules', '@deepseek-ai')
 mkdirSync(dirname(scopeDir), { recursive: true })
 rmSync(scopeDir, { recursive: true, force: true })
@@ -76,5 +91,6 @@ console.log(`部署完成：${target}`)
 console.log(`  version      ${version}`)
 console.log(`  @deepseek-ai → ${hostScope}  (junction)`)
 console.log('\n接下来把 profile 的插件目录指向它（需管理员/提权）：')
-console.log(`  Remove-Item 'C:\\Users\\lily\\.dsh\\profiles\\web\\node_modules\\dsh-mcp-skill-panel' -Recurse -Force`)
+console.log('  # ⚠️ 移动语义，禁止 Remove-Item -Recurse（junction 事故约束 2026-09-13）')
+console.log(`  Move-Item 'C:\\Users\\lily\\.dsh\\profiles\\web\\node_modules\\dsh-mcp-skill-panel' 'C:\\Users\\lily\\.dsh\\.backup-deleted\\plugin-junction-<stamp>'`)
 console.log(`  New-Item -ItemType Junction -Path 'C:\\Users\\lily\\.dsh\\profiles\\web\\node_modules\\dsh-mcp-skill-panel' -Target '${target}'`)

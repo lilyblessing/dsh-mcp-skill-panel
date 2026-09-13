@@ -23,6 +23,15 @@ export interface McpRow {
     desired?: boolean;
     /** true = 已记录意图但尚未在运行时生效（待下次会话/重启）。 */
     pending?: boolean;
+    /**
+     * 0.7.1 诚实上报：行**启用且在跑**，但 live 注册的工具数为 0
+     * （子进程起不来/空转：如 codegraph 缺 `.codegraph` 索引、端点不可达）。
+     *
+     * 此前这种行会回落显示 catalog 目录快照的工具数，于是"零注册"被渲染成
+     * "4 个工具在跑"（假绿；2026-09-13 实测 codegraph）。带上本标记后 UI 显示
+     * `failed` 且工具数为 0，目录快照退回 `toolList`（工具级禁用 UI 仍可用）。
+     */
+    unregistered?: boolean;
     /** 项目级 MCP 行：所属工作空间根（<workspace>/.dsh/mcps 所在目录）；缺省 = 全局行。 */
     workspace?: string;
     /**

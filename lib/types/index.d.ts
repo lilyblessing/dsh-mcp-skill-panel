@@ -34,7 +34,7 @@ export type { GatewayCallOpts, GatewayCallState } from './mcpcall';
 import type { McpView, SkillsView } from './shared-types';
 export type { McpView, SkillsView, McpRow, SkillRow } from './shared-types';
 export type { DomainCaches } from './collect';
-export { mergeSchemas, computeStatus } from './collect';
+export { mergeSchemas, computeStatus, rowDisplay } from './collect';
 export { setRowFlag, setSkillFlag, rowDisabledState, syncPresetFiles, isValidSkillName, buildSkillMd } from './preset';
 export { scanWorkspaceMcp } from './project-mcp';
 export { installProjectMcp, remountWorkspace, projectServerOwner, projectServerName } from './project-mcp';

@@ -76,6 +76,23 @@ export default defineConfig([
     },
   },
   {
+    // 行级读数判定（纯逻辑）单独产物，供 scripts/selftest-mcp.mjs 自测。
+    // 0.7.1 拆出：此前埋在 collect.ts 里，selftest 只能经 index.js 触达，
+    // 而 index.js 连带加载 @deepseek-ai/*（repo 侧不完整）→ 这两条判据测不到。
+    entry: ['src/row-display.ts'],
+    format: ['esm'],
+    outDir: 'lib',
+    target: 'node22',
+    platform: 'node',
+    external: [/^@deepseek-ai\//, /^node:/],
+    dts: false,
+    clean: false,
+    sourcemap: false,
+    outputOptions: {
+      entryFileNames: 'row-display.js',
+    },
+  },
+  {
     entry: ['src/client/index.ts'],
     // cjs：ModuleLoader factory 提供 require/module/exports，import 必须转成 require 调用
     format: ['cjs'],

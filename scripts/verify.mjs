@@ -41,5 +41,15 @@ if (existsSync(clientOut)) {
   check(src.includes('require("react")') || src.includes('require(\'react\')'), 'react kept external')
 }
 
+// 0.7.1：row-display 必须是零依赖独立产物（selftest 靠它绕开宿主包解析）。
+{
+  const rowDisplayOut = join(root, 'lib', 'row-display.js')
+  if (check(existsSync(rowDisplayOut), `row-display standalone bundle exists: ${rowDisplayOut}`)) {
+    const src = readFileSync(rowDisplayOut, 'utf8')
+    check(!/^\s*import\s/m.test(src), 'row-display has zero imports (host-free, selftest-loadable)')
+    check(/export\s*\{[^}]*rowDisplay/.test(src), 'row-display exports rowDisplay')
+  }
+}
+
 if (failed) process.exit(1)
 console.log('verify done: all checks passed')

@@ -24,6 +24,9 @@ export const en: Record<string, string> = {
   'ri.statusDisabled': 'Disabled',
   'ri.statusIdle': 'No tools',
   'ri.statusFailed': 'Failed',
+  'ri.statusUnregistered': 'Not registered',
+  'ri.statusUnregisteredHint':
+    'The row is enabled and running but has registered 0 tools — the subprocess likely failed to start or is idling (e.g. a missing project index). Tools still listed below come from the cached catalog; mcp_call will retry once before failing.',
   'ri.toolsCount': '{n} tools',
   'ri.tokensCount': '~{n}k tokens',
   'ri.transport': 'transport',
@@ -138,6 +141,9 @@ export const zh: Record<string, string> = {
   'ri.statusDisabled': '已停用',
   'ri.statusIdle': '无工具',
   'ri.statusFailed': '异常',
+  'ri.statusUnregistered': '未注册工具',
+  'ri.statusUnregisteredHint':
+    '该行已启用且在运行，但**零工具注册** —— 子进程多半没起来或空转（如缺项目索引）。下方列出的工具来自目录快照，不代表当前可用；mcp_call 会重试一次后失败。',
   'ri.toolsCount': '{n} 个工具',
   'ri.tokensCount': '约 {n}k token',
   'ri.transport': '传输',

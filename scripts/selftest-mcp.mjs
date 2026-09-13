@@ -13,6 +13,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const catalog = await import(pathToFileURL(join(root, 'lib', 'catalog.js')).href)
 const index = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
 const convert = await import(pathToFileURL(join(root, 'lib', 'mcp-convert.js')).href)
+// 0.7.1：行级读数判定拆成零宿主依赖模块，纯逻辑护栏不再受宿主包解析环境影响。
+const rowDisplayMod = await import(pathToFileURL(join(root, 'lib', 'row-display.js')).href)
 
 let failed = false
 const check = (label, fn) => {
@@ -261,8 +263,25 @@ check('computeStatus：表驱动四态（active 以 liveTools 真实注册为准
     [false, false, 14, 'failed'],
   ]
   for (const [disabled, running, liveTools, expected] of cases) {
-    const got = index.computeStatus(disabled, running, liveTools)
+    const got = rowDisplayMod.computeStatus(disabled, running, liveTools)
     assert.equal(got, expected, `computeStatus(${disabled}, ${running}, ${liveTools}) -> ${got}, expected ${expected}`)
+  }
+})
+
+check('rowDisplay：诚实上报（0.7.1）—— 启用+在跑却零注册时不再回落目录快照', () => {
+  const cases = [
+    // [disabled, running, liveTools, catalogTools, expectedTools, expectedUnregistered]
+    [false, true, 4, 4, 4, false],    // 真注册 → 用真值
+    [false, true, 0, 4, 0, true],     // 启用+在跑+零注册 → 0 且标未注册（本次修复的故障现场）
+    [false, false, 0, 4, 4, false],   // 未运行（刚要开/已崩成无 fiber）→ 快照仍可展示
+    [true, false, 0, 27, 27, false],  // 停用 → 回落快照（mcp_search 仍可检索）
+    [true, true, 0, 27, 27, false],   // 停用但有残留 fiber → 仍是停用语义
+    [false, true, 0, 0, 0, true],     // 无快照 + 零注册 → 0
+  ]
+  for (const [disabled, running, liveTools, catalogTools, tools, unregistered] of cases) {
+    const got = rowDisplayMod.rowDisplay(disabled, running, liveTools, catalogTools)
+    assert.equal(got.displayTools, tools, `rowDisplay(${disabled}, ${running}, ${liveTools}, ${catalogTools}).displayTools -> ${got.displayTools}, expected ${tools}`)
+    assert.equal(got.unregistered, unregistered, `rowDisplay(${disabled}, ${running}, ${liveTools}, ${catalogTools}).unregistered -> ${got.unregistered}, expected ${unregistered}`)
   }
 })
 
