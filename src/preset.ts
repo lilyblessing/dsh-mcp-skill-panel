@@ -316,26 +316,39 @@ export async function syncPresetFiles(ctx: Context): Promise<number> {
     const next: Record<string, McpRowState> = {}
     for (const [rowId, entry] of Object.entries(rows)) {
       const cur = rowDisabledState(text, rowId)
+      let lastApplied: boolean | null = entry.lastApplied
       if (cur !== entry.lastApplied) {
-        // 文件被外部（用户）修改过：尊重现状，不写文件。
+        // 文件被外部（用户）修改过：**启停意图**上尊重现状，不写 disabled。
         // 2026-08-27 修复：此前直接跳过（行不进入 next → 条目被永久删除）。
         // 物化链路 setRowFlag 无法反转 disabled:false 时 lastApplied 与文件脱节，
         // 会被误判外部修改而把用户设置从 state.json 抹掉（obsidian 事故）。
         // 改为保留条目：lastApplied 对齐现实（cur），desired 保留（面板仍显示
         // 意图徽标，可重新 toggle 接管）；desired 与现状一致时自动恢复管理闭环。
-        next[rowId] = { desired: entry.desired, lastApplied: cur }
-        continue
-      }
-      const curBool = cur === true
-      if (curBool !== entry.desired) {
-        try {
-          text = setRowFlag(text, rowId, 'disabled', entry.desired)
-          changed = true
-          materialized += 1
-        } catch {
-          // 行已不存在（用户删除）：放弃管理
-          continue
+        //
+        // 0.7.1 修复（2026-09-14 实测事故）：**配置意图必须继续物化**。
+        // 原实现在此处 `continue` 把整行跳过 → 「更多配置」改的 cwd 永远进不了
+        // 预设文件且毫无提示。触发场景：codegraph 行无 `disabled` 键 ⇒
+        // rowDisabledState 返回 null，而 state 里记的 lastApplied 来自 live
+        // entry.disabled = false ⇒ null !== false ⇒ 每次启动都判成「外部改动」。
+        // 启停与配置是两个正交字段：对齐 lastApplied 后继续走配置物化是安全的
+        //（本分支不写 `disabled`，用户对启停的改动仍被尊重）。
+        lastApplied = cur
+        ctx.logger.info?.(
+          `mcp-skill-panel: preset row ${rowId} externally modified (disabled ${String(entry.lastApplied)} → ${String(cur)}); keeping desired=${String(entry.desired)}, still materializing config`,
+        )
+      } else {
+        const curBool = cur === true
+        if (curBool !== entry.desired) {
+          try {
+            text = setRowFlag(text, rowId, 'disabled', entry.desired)
+            changed = true
+            materialized += 1
+          } catch {
+            // 行已不存在（用户删除）：放弃管理
+            continue
+          }
         }
+        lastApplied = entry.desired
       }
       // 0.7.0：配置意图物化（仅当与上次物化结果不同才写，幂等且可自愈）
       let configAppliedYaml = entry.configAppliedYaml
@@ -354,8 +367,8 @@ export async function syncPresetFiles(ctx: Context): Promise<number> {
       }
       // lastApplied 记录物化后的文件状态（= desired），而非物化前 curBool：
       // 否则下次启动 cur(文件=desired) !== lastApplied(旧值) 被误判为「外部修改」而放弃管理，
-      // 导致 desired 残留 + 面板徽标悬挂（P1 重启链路闭环）。
-      next[rowId] = { desired: entry.desired, lastApplied: entry.desired, config: entry.config, configAppliedYaml }
+      // 导致 desired 残留 + 面板徽标悬挂（P1 重启链路闭环）。外部改动分支则对齐 cur。
+      next[rowId] = { desired: entry.desired, lastApplied, config: entry.config, configAppliedYaml }
     }
     if (changed) {
       const tmp = `${file}.tmp`

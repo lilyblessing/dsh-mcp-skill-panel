@@ -434,10 +434,20 @@ async function writeRowConfigIntent(
   state.mcp ??= {}
   state.mcp[file] ??= {}
   const prev = state.mcp[file][rowId]
+  // lastApplied 必须取**当前文件事实**，不能沿用面板快照（entry.disabled）。
+  // 2026-09-14 实测事故：codegraph 行没有 `disabled` 键 ⇒ rowDisabledState 返回 null，
+  // 而 entry.disabled 是 false；若把 false 记成 lastApplied，启动物化时 null !== false
+  // 被判成「文件被外部改过」→ 配置意图永不物化，且用户零提示。
+  let fileState: boolean | null = prev?.lastApplied ?? null
+  try {
+    fileState = rowDisabledState(await readFile(file, 'utf8'), rowId)
+  } catch {
+    /* 读盘失败：保留原值，启动物化会自行对齐 */
+  }
   state.mcp[file][rowId] = {
     // 启停意图沿用现值；配置意图记录本次完整配置（不含 configAppliedYaml → 触发物化）
     desired: prev?.desired ?? false,
-    lastApplied: prev?.lastApplied ?? null,
+    lastApplied: fileState,
     config,
   }
   await writeState(state)
