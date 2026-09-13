@@ -83,7 +83,7 @@ $env:DSH_MODULE_BASIS='C:\Users\lily\.dsh\profiles\web\node_modules'
 node scripts/check-module-identity.mjs   # 必须 SAME instance（preset 行句柄可达）
 node scripts/deploy-link.mjs
 # 冷启动模拟（真 ESM import，不重启即可验部署完好）
-node D:\software\HarnessWorkspace\.tmp-ab-probe\cold-start-sim.mjs
+node D:\software\HarnessWorkspace\.subagent\archive\experiments\.tmp-ab-probe\cold-start-sim.mjs
 ```
 
 **A/B 无损预启动**（旧实例继续服务，用备用端口试跑整个新 profile）：
