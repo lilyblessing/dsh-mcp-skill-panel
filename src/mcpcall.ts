@@ -440,18 +440,20 @@ async function collectInventory(
     // 插件本来就有一条"从正确 scope 采集"的通路：`snapshotEnabled()`（挂 tools/change，
     // 0.6.1 起已覆盖 standing 行）。所以这里改为：拉起 → 等 catalog 自己长出该 server
     // （必要时主动催一次快照）→ 放回关闭。复用久经验证的采集链路，不再重复实现。
+    // 先等一拍再判定：`mcp-client` 建立连接→注册工具是异步的，立刻判会撞上"尚无工具"
+    // 的空窗；每次轮询先等、再催快照、最后判 catalog，语义最稳。
     const deadline = Date.now() + caches.serverTimeoutMs(serverName)
     let waited = 0
     for (;;) {
+      await ctx.timeout(600)
       const snap = caches.getCatalog()[serverName]
       if (snap && snap.tools.length > 0) {
         out = { tools: snap.tools.length, joined: false }
         trace.stored = out.tools
         break
       }
-      if (Date.now() >= deadline || waited > 20) break
+      if (Date.now() >= deadline || waited > 80) break
       await caches.requestSnapshot?.()
-      await ctx.timeout(500)
       waited += 1
     }
     mark(`catalogWait(n=${out?.tools ?? 0}, polls=${waited})`)

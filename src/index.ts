@@ -300,10 +300,17 @@ async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime, caches: Do
     }
     runtime.diag.lastMcpTools = mcpTools
     runtime.diag.lastScope = mcpTools > 0
-    for (const entry of ctx.loader.entries()) {
+    // 0.6.5：采集循环同样要覆盖 preset 行。原实现只见 loader 行（`ctx.loader.entries()`），
+    // 而 preset 行挂在 standing 组合 → 永远采不到 → 面板上"关掉的 server"在 catalog 里
+    // 没有快照（实测：snapshotEnabled 能看到 57 个 MCP 工具，却从不为 calcmcp 写一条）。
+    // 先合并两侧行、按 serverName 去重，再对**运行中的行**采快照（行级 enabled 语义不变）。
+    const rowsByName = new Map<string, Entry>()
+    for (const entry of [...ctx.loader.entries(), ...standingMcpEntries()]) {
       if (!isMcpEntry(entry)) continue
+      if (!rowsByName.has(serverNameOf(entry))) rowsByName.set(serverNameOf(entry), entry)
+    }
+    for (const [serverName, entry] of rowsByName) {
       if (entry.disabled) continue
-      const serverName = serverNameOf(entry)
       let tools: CatalogEntry[]
       try {
         tools = snapshotFromSchemas(schemas, serverName)
