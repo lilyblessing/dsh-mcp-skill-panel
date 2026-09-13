@@ -48,7 +48,7 @@ export declare function snapshotFromSchemas(schemas: ReadonlyArray<{
  * substring 而非 token 精确命中：中文连写（“读文件”）不切分也能命中。
  * 返回按分数降序（同分按 server、name 字典序稳定）的命中数组。
  */
-export declare function searchCatalog(catalog: Catalog, query: string, limit?: number): SearchHit[];
+export declare function searchCatalog(catalog: Catalog, query: string, limit?: number, scopedTo?: string): SearchHit[];
 /**
  * 列出某 server 的全部工具（精简：name + description；L2 无 schema）。
  * 分页：offset/limit（1..200，缺省 0/20；P3 网关定稿 limit=20）。

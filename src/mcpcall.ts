@@ -1205,12 +1205,13 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx, controller:
   const definition = defineTool({
     name: 'mcp_search',
     description:
-      '检索可用的 MCP 服务器与工具目录。三层：空参数返回 server 清单（无 schema）；传 server 列出该服务器工具（分页，无 schema）；传 query 做关键词 top-K 全文检索（命中返回完整 schema）。知道工具名可直接 mcp_call，不知道先用关键词搜。中文连写请用空格分词（如“搜索 网页”）。',
+      '检索可用的 MCP 服务器与工具目录（只读，不执行）。四种用法：① 空参数 → server 清单（含已关闭的，标注开/关）；② server=X → 该 server 的**能力摘要**（工具总数 + 前 5 个名字预览，不返回全表，避免上下文膨胀）；③ query + server → 在 X 内按需检索，返回 top-K 命中（含完整 schema），**想找某个 server 上的具体工具就用这个**；④ query → 全目录关键词检索。查到工具名后用 mcp_call(server, tool, arguments) 调用；不知道工具名先用 ②/③，不要用 ② 拉全表（工具多时传 all:true 才会返回全表）。中文连写请用空格分词（如“搜索 网页”）。',
     parameters: {
-      query: { type: 'string', description: '检索关键词，按工具名/描述/参数名打分（缺省 top-K 8，上限 10）' },
-      server: { type: 'string', description: '列出指定 MCP server 的全部工具（分页，无 schema）' },
-      limit: { type: 'integer', description: '关键词 top-K（默认 8）或 server 页大小（默认 20，上限 50）' },
-      offset: { type: 'integer', description: 'server 页偏移（默认 0，仅 server 分支有效）' },
+      query: { type: 'string', description: '检索关键词，按工具名/描述/参数名打分（缺省 top-K 8，上限 10）；与 server 同传即在该 server 内检索' },
+      server: { type: 'string', description: '目标 MCP server 名（见空查清单）。单独传 = 返回该 server 的能力摘要 + 前 5 个工具名预览' },
+      all: { type: 'boolean', description: '仅在传 server 时有效：true = 返回该 server 的完整工具清单（分页，可能很大）。默认 false 只给摘要' },
+      limit: { type: 'integer', description: '关键词 top-K（默认 8）或 server 页大小（默认 20，上限 50；配合 all:true 用）' },
+      offset: { type: 'integer', description: 'server 页偏移（默认 0，仅 all:true 分支有效）' },
       topK: { type: 'integer', description: '关键词命中数（默认 8，与 limit 同义，显式优先）' },
     },
     output: {
@@ -1233,17 +1234,35 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx, controller:
       const workspace = typeof exec?.agent?.session?.header?.cwd === 'string' ? exec.agent.session.header.cwd : undefined
       const keep = (name: string): boolean => !isToolDisabled(name, workspace)
 
+      // 0.6.8：`query + server` = **在该 server 内按需检索**。
+      // 这是"上百个工具时模型怎么知道该调哪个"的正解：有界返回 top-K 命中（带 schema），
+      // 而不是把全表灌进上下文（后者会让上下文先膨胀再收缩，破坏前缀缓存命中率）。
+      if (server && query) {
+        const hits: SearchHit[] = searchCatalog(catalog, query, topK, server).filter((hit) => keep(hit.tool.name))
+        return toJson({
+          ok: true,
+          kind: 'search',
+          server,
+          query,
+          count: hits.length,
+          limit: topK,
+          hits,
+          hint: '命中即用 mcp_call（server + 裸工具名）调用；不够准就换关键词再搜，中文连写请用空格分词。',
+        })
+      }
+
       if (server) {
         const installedRows = control.installedInventory?.() ?? []
         const known = installedRows.find((row) => row.server === server)
         let page = listServer(catalog, server, offset, pageLimit)
-        // 0.6.0：已安装但没有快照（用户关掉且从未运行过）→ 临时拉起采集一次能力表。
-        // 这使 mcp_search 真正成为「已安装能力表」（rc.8 语义），而不是「在跑的能力表」。
+        // 0.6.0：已安装但**没有工具**（用户关掉且从未运行过，或上次采集时后端还没起来）
+        // → 临时拉起采集一次能力表。判据是"工具数为 0"而不仅是"无条目"：后端由用户
+        // 手动启动时，首次采集可能采到空表，之后用户启动了必须还能补采（否则永远为 0）。
         let probed = false
-        if (!page.hasSnapshot && known) {
-          const fetched = await controller.fetchInventory(server).catch(() => null)
+        if (page.totalCount === 0 && known) {
+          await controller.fetchInventory(server).catch(() => null)
           probed = true
-          if (fetched) page = listServer(control.getCatalog(), server, offset, pageLimit)
+          page = listServer(control.getCatalog(), server, offset, pageLimit)
         }
         if (!page.hasSnapshot && !known) {
           return toJson({
@@ -1261,7 +1280,28 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx, controller:
             hint: `未知 server "${server}"，空查 mcp_search 看 server 清单；中文连写请用空格分词。`,
           })
         }
-        const tools = page.tools.filter((tool) => keep(tool.name))
+        const all = page.tools.filter((tool) => keep(tool.name))
+        // 0.6.8：默认**不返回全表**（上百个工具的 server 会瞬间膨胀上下文）。
+        // 默认给「总数 + 前 5 个名字预览 + 检索指引」；要全表须显式 all:true（此时才分页返回）。
+        if (args.all !== true) {
+          const preview = all.slice(0, 5).map((tool) => ({ name: tool.name, description: tool.description }))
+          return toJson({
+            ok: true,
+            kind: 'summary',
+            server,
+            found: true,
+            installed: true,
+            open: known?.open ?? true,
+            hasSnapshot: page.hasSnapshot,
+            probed,
+            count: all.length,
+            totalCount: page.totalCount,
+            preview,
+            hint: page.hasSnapshot
+              ? `共 ${page.totalCount} 个工具，此处只预览 ${preview.length} 个。用 query + server 检索具体能力（推荐，按需且不占上下文）；确需完整清单请传 all: true。`
+              : `该 server 已安装但当前没有工具（未运行或采集未成功）。可直接 mcp_call 调用它——中间层会临时拉起；若持续失败请在面板打开它后重试。`,
+          })
+        }
         return toJson({
           ok: true,
           kind: 'list',
@@ -1271,14 +1311,12 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx, controller:
           open: known?.open ?? true,
           hasSnapshot: page.hasSnapshot,
           probed,
-          count: tools.length,
+          count: all.length,
           totalCount: page.totalCount,
           offset,
           limit: pageLimit,
-          tools,
-          hint: page.hasSnapshot
-            ? '工具多时改 query + server 缩小范围；中文连写请用空格分词。'
-            : `该 server 已安装但当前关闭且采集失败（无工具快照）。可直接 mcp_call 调用它——中间层会临时拉起；若持续失败请在面板打开它。`,
+          tools: all,
+          hint: '已按 all:true 返回全表（分页）。工具多时优先改用 query + server 检索，避免上下文膨胀。',
         })
       }
 

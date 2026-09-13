@@ -87,12 +87,15 @@ function paramNamesOf(parameters: unknown): Set<string> {
  * substring 而非 token 精确命中：中文连写（“读文件”）不切分也能命中。
  * 返回按分数降序（同分按 server、name 字典序稳定）的命中数组。
  */
-export function searchCatalog(catalog: Catalog, query: string, limit = 8): SearchHit[] {
+export function searchCatalog(catalog: Catalog, query: string, limit = 8, scopedTo?: string): SearchHit[] {
   const q = String(query).toLowerCase()
   const terms = q.split(/[\s,，。、/\\|]+/).filter(Boolean)
   if (terms.length === 0) return []
+  // 0.6.8：`scopedTo` 把打分限定在单个 server 内 —— 这是"上百个工具时模型怎么找到
+  // 该调哪个"的正解：按需、有界地检索，而不是把全表灌进上下文。
+  const pool = scopedTo !== undefined ? Object.entries(catalog).filter(([s]) => s === scopedTo) : Object.entries(catalog)
   const scored: Array<{ hit: SearchHit; score: number }> = []
-  for (const [server, serverInfo] of Object.entries(catalog)) {
+  for (const [server, serverInfo] of pool) {
     for (const tool of serverInfo.tools) {
       const bare = tool.name.split('__').pop() ?? tool.name
       const nameHay = `${server}/${bare}`.toLowerCase()
