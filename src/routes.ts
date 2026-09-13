@@ -34,7 +34,7 @@ async function findPresetRowByServerNameLike(ctx: Context, serverName: string) {
 }
 import { resolveAgent, resolveCollectScopeKey, scopeKeySource, getSchemasView, mergeSchemas, collectMcp, collectSkills, confirmedSkills, pruneExpired, DOMAIN_TTL_MS, SKILL_TOGGLE_POLL_MS, type DomainCaches, type Deps } from './collect'
 import { isMcpEntry, serverNameOf } from './mcp-entry'
-import { findStandingEntryById, standingDiag } from './standing-rows'
+import { findStandingEntryById, standingDiag, standingMcpEntries } from './standing-rows'
 import { parseMcpServersJson, serversToPatchYaml, serversToRows, type McpServers, type McpRowConfig } from './mcp-convert'
 import { remountWorkspace, projectServerOwner, getActiveWorkspace } from './project-mcp'
 import { disabledToolsOf, setToolDisabled } from './tool-disable'
@@ -388,10 +388,12 @@ function profilePatchPath(ctx: Context): string {
   throw new Error('无法定位 profile 补丁文件 cordis.patch.yml（未找到 cordis.yml 根树；请确认 profile 已正常挂载后重试）')
 }
 
-/** 已存在检查：loader 存活行或 patch 文本里已有同 id。 */
+/** 已存在检查：loader 存活行、standing 行或 patch 文本里已有同 id。 */
 function existingRowIds(ctx: Context, patchText: string): Set<string> {
   const ids = new Set<string>()
-  for (const entry of ctx.loader.entries()) {
+  // 0.6.6：必须同时看 standing 行。preset 行不在 loader 里（rc.1 起），只查 loader 会把
+  // 已安装的 server 全判成"不存在" → mcp/add 写出重复行 → serverName 同 scope 冲突。
+  for (const entry of [...ctx.loader.entries(), ...standingMcpEntries()]) {
     if (!isMcpEntry(entry)) continue
     ids.add(String(entry.options.id))
   }
