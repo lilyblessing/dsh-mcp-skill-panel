@@ -10,7 +10,7 @@ import { mkdir, readFile, writeFile, rename, access } from 'node:fs/promises'
 import { basename, dirname, join, parse as parsePath } from 'node:path'
 import { homedir } from 'node:os'
 import { readState, writeState, stateApplyMode, type ApplyMode } from './state'
-import { setSkillFlag, rowDisabledState, isValidSkillName, buildSkillMd } from './preset'
+import { setSkillFlag, rowDisabledState, isValidSkillName, buildSkillMd, EDITABLE_CONFIG_KEYS } from './preset'
 import { pendingMcp, applyPendingMcp } from './pending'
 import { findPresetRowByEntryId, findPresetRowByServerName } from './preset-mcp'
 import { gatewayServerOfEntryId } from './gateway'
@@ -382,6 +382,84 @@ async function toggleSkill(deps: Deps, skillName: string, disabled: boolean, ses
  * 先写者的内容会被后写者整体覆盖丢失 → 全部走同一 Promise 链。
  */
 let fileWriteChain: Promise<unknown> = Promise.resolve()
+
+/** 0.7.0：配置合法性校验（UI 预校验与后端落盘共用同一套规则）。 */
+function validateRowConfig(config: Record<string, unknown>): void {
+  const transport = config.transport === undefined ? undefined : String(config.transport)
+  if (transport !== undefined && transport !== 'stdio' && transport !== 'streamable-http') {
+    throw new Error(`transport 只能是 stdio 或 streamable-http（收到 ${transport}）`)
+  }
+  const hasCommand = typeof config.command === 'string' && config.command.trim().length > 0
+  const hasUrl = typeof config.url === 'string' && config.url.trim().length > 0
+  if (transport === 'streamable-http') {
+    if (!hasUrl) throw new Error('streamable-http 需要 url')
+  } else if (transport === 'stdio' || (transport === undefined && hasCommand)) {
+    if (!hasCommand) throw new Error('stdio 需要 command')
+  } else if (!hasCommand && !hasUrl) {
+    throw new Error('需要 command（stdio）或 url（streamable-http）之一')
+  }
+  if (config.url !== undefined && !/^https?:\/\//i.test(String(config.url))) {
+    throw new Error('url 需以 http:// 或 https:// 开头')
+  }
+  if (config.args !== undefined && !Array.isArray(config.args)) throw new Error('args 必须是数组')
+  if (config.cwd !== undefined && (typeof config.cwd !== 'string' || config.cwd.length === 0)) {
+    throw new Error('cwd 必须是非空字符串')
+  }
+  if (config.toolCallTimeoutMs !== undefined) {
+    const n = Number(config.toolCallTimeoutMs)
+    if (!Number.isFinite(n) || n <= 0) throw new Error('toolCallTimeoutMs 必须是正数')
+  }
+  for (const mapKey of ['env', 'headers'] as const) {
+    const value = config[mapKey]
+    if (value === undefined) continue
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`${mapKey} 必须是键值对象`)
+    }
+  }
+}
+
+/**
+ * 0.7.0：把配置意图写进 state.json（运行期唯一安全的写面）。
+ * 结构：state.mcp[预设文件][行 id].config —— 启动早期由 syncPresetFiles 物化。
+ */
+async function writeRowConfigIntent(
+  server: string,
+  described: Record<string, unknown>,
+  config: Record<string, unknown>,
+): Promise<{ file: string; rowId: string; config: Record<string, unknown> }> {
+  const file = typeof described.file === 'string' ? described.file : null
+  const rowId = typeof described.rowId === 'string' ? described.rowId : null
+  if (!file || !rowId) throw new Error(`无法定位该行的预设文件/行 id（server=${server}）`)
+  const state = await readState()
+  state.mcp ??= {}
+  state.mcp[file] ??= {}
+  const prev = state.mcp[file][rowId]
+  state.mcp[file][rowId] = {
+    // 启停意图沿用现值；配置意图记录本次完整配置（不含 configAppliedYaml → 触发物化）
+    desired: prev?.desired ?? false,
+    lastApplied: prev?.lastApplied ?? null,
+    config,
+  }
+  await writeState(state)
+  return { file, rowId, config }
+}
+
+let rowConfigApplyHook: ((server: string, config: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>) | null = null
+
+/** 由 index.ts 在 apply 里注入（热改 live entry 的 config）。 */
+export function setRowConfigApplyHook(
+  hook: (server: string, config: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>,
+): void {
+  rowConfigApplyHook = hook
+}
+
+async function applyRowConfigToLive(
+  server: string,
+  config: Record<string, unknown>,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!rowConfigApplyHook) return { ok: false, error: '热应用不可用（钩子未注入）' }
+  return rowConfigApplyHook(server, config)
+}
 
 /** 0.7.0：描述某个 standing 行的**全量挂载配置**与运行态（只读；/debug/rowConfig 与配置编辑共用）。 */
 async function describeRow(server: string): Promise<Record<string, unknown>> {
@@ -894,6 +972,68 @@ export function makeRoutes(
       }),
     },
     {
+      // 0.7.0「更多配置」：读/写某个 MCP 行的**挂载配置**（cwd/command/args/env/url/headers…）。
+      //
+      // 动机：面板卡片只显示 serverName/transport/disabled，看不到 cwd 一类字段；而
+      // codegraph 这类按 cwd 认项目的 MCP 一旦缺 cwd 就表现为"行在跑却零工具"。
+      //
+      // 三段式（与 toggle 的架构一致，铁律不破）：
+      //   ① 立即生效：热改 live entry 的 config（实测干净：entry.update({config}) 不丢行）；
+      //   ② 意图落盘：写 state.json（运行期唯一安全的写面）；
+      //   ③ 启动物化：syncPresetFiles 在 apply 早期把意图写进预设行。
+      kind: 'exact',
+      path: `${API_PREFIX}/mcp/rowConfig`,
+      handler: handleAny([
+        {
+          method: 'GET',
+          run: async (req) => {
+            const q = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams
+            const server = (q.get('server') ?? '').trim()
+            if (!server) throw new Error('server is required')
+            const described = await describeRow(server)
+            return { ...described, editableKeys: EDITABLE_CONFIG_KEYS }
+          },
+        },
+        {
+          method: 'POST',
+          run: async (req) => {
+            const body = JSON.parse((await readBody(req)) || '{}') as {
+              server?: string
+              set?: Record<string, unknown>
+              unset?: string[]
+              apply?: boolean
+            }
+            const server = String(body.server ?? '').trim()
+            if (!server) throw new Error('server is required')
+            const described = await describeRow(server)
+            if (described.entryFound !== true) throw new Error(`standing 行未找到：${server}`)
+            const badKeys = [...Object.keys(body.set ?? {}), ...(body.unset ?? [])].filter(
+              (k) => !(EDITABLE_CONFIG_KEYS as readonly string[]).includes(k),
+            )
+            if (badKeys.length > 0) throw new Error(`不允许的配置键：${badKeys.join(', ')}`)
+
+            // 合并成新的完整配置：live 现值 → 应用 set/unset
+            const live = (described.config ?? {}) as Record<string, unknown>
+            const nextConfig: Record<string, unknown> = { ...live }
+            for (const key of body.unset ?? []) delete nextConfig[key]
+            for (const [key, value] of Object.entries(body.set ?? {})) nextConfig[key] = value
+            validateRowConfig(nextConfig)
+
+            // ② 意图落盘（运行期唯一安全的写面）
+            await writeRowConfigIntent(server, described, nextConfig)
+
+            // ① 立即生效（apply:false 可跳过，用于"只记意图、下次重启生效"）
+            const applied =
+              body.apply === false
+                ? { ok: false, error: 'skipped (apply:false)' }
+                : await applyRowConfigToLive(server, nextConfig)
+            invalidateMcp()
+            return { ok: true, server, applied, after: await describeRow(server) }
+          },
+        },
+      ]),
+    },
+    {
       // 0.7.0 取证用（只读）：读某 server 行的**全量挂载配置**（含 cwd/command/args/env）。
       //
       // 面板卡片只显示 serverName/transport/disabled，看不到 cwd 一类字段；而
@@ -909,7 +1049,7 @@ export function makeRoutes(
             const q = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams
             const server = (q.get('server') ?? '').trim()
             if (!server) throw new Error('server is required')
-            return describeRow(server)
+            return await describeRow(server)
           },
         },
         {
@@ -928,7 +1068,7 @@ export function makeRoutes(
             if (!server) throw new Error('server is required')
             const entry = findStandingEntryByServer(server)
             if (!entry) throw new Error(`standing 行未找到：${server}`)
-            const before = describeRow(server)
+            const before = await describeRow(server)
             const next = { ...((entry.options.config ?? {}) as Record<string, unknown>) }
             for (const key of body.unset ?? []) delete next[key]
             for (const [key, value] of Object.entries(body.set ?? {})) next[key] = value
@@ -945,7 +1085,7 @@ export function makeRoutes(
             // 等一拍让 fiber 重建，再回报现场（同 entryId 是否还在 standing 树里、
             // 是否仍在运行、配置是否已变）—— 这就是"能否热改配置"的判据。
             await new Promise((resolve) => setTimeout(resolve, 1200))
-            return { updateError, before, after: describeRow(server) }
+            return { updateError, before, after: await describeRow(server) }
           },
         },
       ]),

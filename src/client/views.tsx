@@ -217,6 +217,56 @@ const C = {
     fontSize: 12,
     alignSelf: 'flex-start' as const,
   },
+  // 0.7.0「更多配置」抽屉
+  modalMask: {
+    position: 'fixed' as const,
+    inset: 0,
+    background: 'rgba(0,0,0,0.45)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1000,
+  },
+  modal: {
+    background: 'var(--dsw-alias-bg-l1, #1b1b1f)',
+    border: '1px solid var(--dsw-alias-border-l2)',
+    borderRadius: 10,
+    padding: 16,
+    width: 'min(560px, 92vw)',
+    maxHeight: '86vh',
+    overflowY: 'auto' as const,
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: 8,
+  },
+  cfgField: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: 2,
+  },
+  cfgLabel: {
+    fontSize: 12,
+    color: 'var(--dsw-alias-label-tertiary)',
+  },
+  cfgInput: {
+    font: 'inherit',
+    fontSize: 13,
+    padding: '4px 6px',
+    borderRadius: 6,
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-alias-fill-l1)',
+    color: 'var(--dsw-alias-label-primary)',
+  },
+  cfgArea: {
+    font: 'inherit',
+    fontSize: 13,
+    padding: '4px 6px',
+    borderRadius: 6,
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-alias-fill-l1)',
+    color: 'var(--dsw-alias-label-primary)',
+    resize: 'vertical' as const,
+  },
   toolList: {
     marginTop: 4,
     borderTop: '1px solid var(--dsw-alias-border-l2)',
@@ -814,6 +864,8 @@ function McpPanel(props: {
   // 工具行禁用开关临时态（立即生效后由 loadMcp 校准）
   const [toolBusy, setToolBusy] = useState<Record<string, boolean>>({})
   const [toolErr, setToolErr] = useState<string | null>(null)
+  // 0.7.0「更多配置」：点开哪一行（null = 关闭）
+  const [cfgRow, setCfgRow] = useState<McpRow | null>(null)
 
   const toolToggle = useCallback(async (row: McpRow, tool: NonNullable<McpRow['toolList']>[number]) => {
     const key = `${row.entryId}:${tool.name}`
@@ -921,8 +973,7 @@ function McpPanel(props: {
               <>
                 <button type="button" style={C.toolToggleBtn} onClick={() => setExpanded((prev) => ({ ...prev, [row.entryId]: !prev[row.entryId] }))}>
                   {isOpen ? `▾ ${t('ri.toolListHide')} (${toolList.length})` : `▸ ${t('ri.toolListShow')} (${toolList.length})`}
-                </button>
-                {isOpen && (
+                </button>                {isOpen && (
                   <div style={C.toolList}>
                     {toolList.map((tool) => {
                       const tBusy = toolBusy[`${row.entryId}:${tool.name}`]
@@ -945,10 +996,235 @@ function McpPanel(props: {
                 )}
               </>
             )}
+            {/* 0.7.0：更多配置（cwd/command/args/env/url/headers…）。对 codegraph 这类
+                按 cwd 认项目的 MCP 是必需入口 —— 缺 cwd 时表现为"行在跑却零工具"。 */}
+            <button type="button" style={C.toolToggleBtn} onClick={() => setCfgRow(row)}>
+              {t('ri.moreConfig')}
+            </button>
           </div>
         )
       })}
+      {cfgRow && (
+        <RowConfigModal
+          t={t}
+          row={cfgRow}
+          applyMode={applyMode}
+          onClose={() => setCfgRow(null)}
+          onSaved={() => {
+            loadMcp()
+          }}
+        />
+      )}
     </>
+  )
+}
+
+/**
+ * 0.7.0「更多配置」抽屉：编辑某个 MCP 行的挂载配置。
+ *
+ * 形态取三种字段的**字符串编辑**（args 每行一项、env/headers 每行 k=v），
+ * 与后端 white-list（preset.EDITABLE_CONFIG_KEYS）一一对应：
+ * cwd 缺失是 codegraph 类 MCP"零工具"的典型根因，所以 cwd 单独给一行显眼位置。
+ *
+ * 保存语义由后端三段式决定：热应用（即时生效）+ 意图落盘（重启不丢）+ 启动物化。
+ */
+function RowConfigModal(props: {
+  t: Props['t']
+  row: McpRow
+  applyMode: 'immediate' | 'next-session'
+  onClose: () => void
+  onSaved: () => void
+}): React.ReactElement {
+  const { t, row, applyMode, onClose, onSaved } = props
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
+  const [transport, setTransport] = useState('stdio')
+  const [command, setCommand] = useState('')
+  const [argsText, setArgsText] = useState('')
+  const [cwd, setCwd] = useState('')
+  const [envText, setEnvText] = useState('')
+  const [url, setUrl] = useState('')
+  const [headersText, setHeadersText] = useState('')
+  const [timeoutMs, setTimeoutMs] = useState('')
+  const [failOnStartup, setFailOnStartup] = useState('')
+  const [liveMissingCwd, setLiveMissingCwd] = useState(false)
+
+  const authHeaders = useCallback(async (): Promise<Record<string, string>> => {
+    const h: Record<string, string> = { 'content-type': 'application/json' }
+    const token = await ensureToolToken()
+    if (token) h['x-panel-token'] = token
+    return h
+  }, [])
+
+  const applyConfig = useCallback((config: Record<string, unknown>, intent?: Record<string, unknown>) => {
+    const str = (v: unknown): string => (v === undefined || v === null ? '' : String(v))
+    setTransport(str(config.transport) || 'stdio')
+    setCommand(str(config.command))
+    setArgsText(Array.isArray(config.args) ? (config.args as unknown[]).map(str).join('\n') : '')
+    setCwd(str(config.cwd))
+    setUrl(str(config.url))
+    const mapText = (v: unknown): string =>
+      v && typeof v === 'object' && !Array.isArray(v)
+        ? Object.entries(v as Record<string, unknown>)
+            .map(([k, val]) => `${k}=${str(val)}`)
+            .join('\n')
+        : ''
+    setEnvText(mapText(config.env))
+    setHeadersText(mapText(config.headers))
+    setTimeoutMs(config.toolCallTimeoutMs === undefined ? '' : str(config.toolCallTimeoutMs))
+    setFailOnStartup(config.failOnStartupError === undefined ? '' : String(config.failOnStartupError))
+    // 缺 cwd 且是 stdio → 这是 codegraph 类故障的典型特征，给出针对性提示
+    const missing = (config.cwd === undefined || str(config.cwd) === '') && (str(config.transport) === 'stdio' || config.command !== undefined)
+    setLiveMissingCwd(missing)
+    void intent
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const headers = await authHeaders()
+        const res = await fetch(`/api/mcp-skill-panel/mcp/rowConfig?server=${encodeURIComponent(row.serverName)}`, { headers })
+        const body = (await res.json()) as { ok: boolean; error?: string; config?: Record<string, unknown> }
+        if (!body.ok) throw new Error(body.error ?? 'load failed')
+        if (cancelled) return
+        applyConfig(body.config ?? {})
+      } catch (e: unknown) {
+        if (!cancelled) setErr(e instanceof Error ? e.message : String(e))
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [row.serverName, authHeaders, applyConfig])
+
+  const parseMap = (text: string, label: string): Record<string, string> | undefined => {
+    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+    if (lines.length === 0) return undefined
+    const out: Record<string, string> = {}
+    for (const line of lines) {
+      const at = line.indexOf('=')
+      if (at <= 0) throw new Error(`${label} 的每一行需为 key=value：${line}`)
+      out[line.slice(0, at).trim()] = line.slice(at + 1).trim()
+    }
+    return out
+  }
+
+  const save = async (): Promise<void> => {
+    setSaving(true)
+    setErr(null)
+    setNote(null)
+    try {
+      const set: Record<string, unknown> = { transport }
+      const unset: string[] = []
+      if (transport === 'stdio') {
+        set.command = command.trim()
+        set.args = argsText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+        if (cwd.trim()) set.cwd = cwd.trim()
+        else unset.push('cwd')
+        unset.push('url', 'headers')
+      } else {
+        set.url = url.trim()
+        const h = parseMap(headersText, 'headers')
+        if (h) set.headers = h
+        else unset.push('headers')
+        unset.push('command', 'args', 'cwd')
+      }
+      const env = parseMap(envText, 'env')
+      if (env) set.env = env
+      else unset.push('env')
+      if (timeoutMs.trim()) {
+        const n = Number(timeoutMs.trim())
+        if (!Number.isFinite(n) || n <= 0) throw new Error('toolCallTimeoutMs 必须是正数')
+        set.toolCallTimeoutMs = n
+      } else {
+        unset.push('toolCallTimeoutMs')
+      }
+      if (failOnStartup === 'true' || failOnStartup === 'false') set.failOnStartupError = failOnStartup === 'true'
+      else unset.push('failOnStartupError')
+
+      const headers = await authHeaders()
+      const res = await fetch('/api/mcp-skill-panel/mcp/rowConfig', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ server: row.serverName, set, unset }),
+      })
+      const body = (await res.json()) as { ok: boolean; error?: string; applied?: { ok: boolean; error?: string } }
+      if (!body.ok) throw new Error(body.error ?? 'save failed')
+      const applied = body.applied
+      if (applied && !applied.ok) {
+        setNote(t('ri.cfgSavedRestart', { err: applied.error ?? '—' }))
+      } else {
+        setNote(t('ri.cfgSavedLive'))
+      }
+      onSaved()
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const field = (label: string, value: string, onChange: (v: string) => void, placeholder?: string): React.ReactElement => (
+    <label style={C.cfgField}>
+      <span style={C.cfgLabel}>{label}</span>
+      <input style={C.cfgInput} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
+    </label>
+  )
+  const area = (label: string, value: string, onChange: (v: string) => void, placeholder?: string): React.ReactElement => (
+    <label style={C.cfgField}>
+      <span style={C.cfgLabel}>{label}</span>
+      <textarea style={C.cfgArea} value={value} placeholder={placeholder} rows={3} onChange={(e) => onChange(e.target.value)} />
+    </label>
+  )
+
+  return (
+    <div style={C.modalMask} role="dialog" aria-modal="true">
+      <div style={C.modal}>
+        <div style={C.cardTop}>
+          <h3 style={C.cardTitle}>
+            {t('ri.cfgTitle')} · {row.serverName}
+          </h3>
+          <button type="button" style={C.toolToggleBtn} onClick={onClose}>
+            {t('ri.cfgClose')}
+          </button>
+        </div>
+        {loading && <div style={C.empty}>{t('ri.loading')}</div>}
+        {err && <div style={C.error}>{err}</div>}
+        {note && <div style={C.hint}>{note}</div>}
+        {!loading && (
+          <>
+            {liveMissingCwd && <div style={C.hint}>{t('ri.cfgMissingCwdHint')}</div>}
+            {applyMode === 'next-session' && <div style={C.hint}>{t('ri.cfgNextSessionHint')}</div>}
+            {field(t('ri.cfgTransport'), transport, (v) => setTransport(v.trim()), 'stdio')}
+            {transport === 'stdio' ? (
+              <>
+                {field(t('ri.cfgCommand'), command, setCommand, 'codegraph')}
+                {area(t('ri.cfgArgs'), argsText, setArgsText, 'serve\n--mcp')}
+                {field(t('ri.cfgCwd'), cwd, setCwd, 'D:\\path\\to\\project')}
+              </>
+            ) : (
+              <>
+                {field(t('ri.cfgUrl'), url, setUrl, 'http://127.0.0.1:12306/mcp')}
+                {area(t('ri.cfgHeaders'), headersText, setHeadersText, 'Authorization=Bearer …')}
+              </>
+            )}
+            {area(t('ri.cfgEnv'), envText, setEnvText, 'API_KEY=…')}
+            {field(t('ri.cfgTimeout'), timeoutMs, setTimeoutMs, '60000')}
+            {field(t('ri.cfgFailOnStartup'), failOnStartup, setFailOnStartup, 'true | false')}
+            <div style={C.cardTop}>
+              <button type="button" style={{ ...C.toggle(false), ...(saving ? C.toggleDisabled : {}) }} disabled={saving} onClick={() => void save()}>
+                {saving ? t('ri.pending') : t('ri.cfgSave')}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
   )
 }
 

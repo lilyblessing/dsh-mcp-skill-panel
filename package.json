@@ -38,7 +38,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
     "build": "node scripts/build.mjs",
     "verify": "node scripts/verify.mjs",
-    "prepublishOnly": "npm run build && npm run verify"
+    "selftest:rowconfig": "node scripts/selftest-rowconfig.mjs",
+    "prepublishOnly": "npm run build && npm run verify && npm run selftest:rowconfig"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

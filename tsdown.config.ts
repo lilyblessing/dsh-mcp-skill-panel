@@ -60,6 +60,22 @@ export default defineConfig([
     },
   },
   {
+    // 预设文本工具（纯逻辑）单独产物，供 scripts/selftest-rowconfig.mjs 自测。
+    // 必须独立入口：index.js 会连带加载 @deepseek-ai/* 宿主包，repo 里没有那些依赖。
+    entry: ['src/preset-text.ts'],
+    format: ['esm'],
+    outDir: 'lib',
+    target: 'node22',
+    platform: 'node',
+    external: [/^@deepseek-ai\//, /^node:/],
+    dts: false,
+    clean: false,
+    sourcemap: false,
+    outputOptions: {
+      entryFileNames: 'preset-text.js',
+    },
+  },
+  {
     entry: ['src/client/index.ts'],
     // cjs：ModuleLoader factory 提供 require/module/exports，import 必须转成 require 调用
     format: ['cjs'],
