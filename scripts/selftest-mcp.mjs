@@ -730,6 +730,27 @@ check('路由守卫：/mcp/toolBulk 必须带 guardPosts（handleAny([...], true
   assert.ok(/\],\s*true\)/.test(block), 'toolBulk 的 guardPosts 必须为 true（写端点不得裸奔）')
 })
 
+// 0.6.0：/models 是**读端点**（provider/模型目录）—— 必须 handle('GET') 且不加 guarded
+// （加了会让只读端点要求 token，面板拉不到目录 → 覆盖卡静默退回旧行为）；同时它必须带
+// TTL 缓存，否则每个无鉴权请求都会扇出到 adapter（见 routes.ts 的 modelsCatalog 注释）。
+check("路由守卫：/models 以 handle('GET') 注册（开放读端点）且带 MODELS_TTL_MS 目录缓存", () => {
+  const src = readFileSync(join(root, 'src', 'routes.ts'), 'utf8')
+  const at = src.indexOf('`${API_PREFIX}/models`')
+  assert.ok(at > 0, '/models 路由缺失')
+  const block = src.slice(at, src.indexOf('`${API_PREFIX}/token`', at))
+  assert.ok(/handle\(\s*'GET'/.test(block), "/models 必须走 handle('GET', ...)")
+  assert.ok(!/handle\(\s*'GET'[\s\S]*?,\s*true\s*\)/.test(block), '/models 不得带 guarded（读端点保持开放）')
+  assert.ok(/const MODELS_TTL_MS = 60_000/.test(src), 'MODELS_TTL_MS = 60_000 常量缺失')
+  assert.ok(/const MODELS_FETCH_TIMEOUT_MS = 8_000/.test(src), 'MODELS_FETCH_TIMEOUT_MS = 8_000 常量缺失')
+  assert.ok(/Promise\.race\(/.test(src), '抓取必须套 Promise.race 上界（卡住的 adapter 不得黏住端点）')
+  assert.ok(/\.unref\?\.\(\)/.test(src), '超时定时器必须 unref（长驻进程不能被它吊住）')
+  assert.ok(/modelsCacheFresh\(/.test(src), 'TTL 判定必须复用 model-route 的共享纯函数')
+  assert.ok(/\binflight\b/.test(src), '单飞字段（inflight）缺失：并发请求会重复扇出')
+  const modelRoute = readFileSync(join(root, 'src', 'model-route.ts'), 'utf8')
+  assert.ok(/export function modelsCacheFresh/.test(modelRoute), 'modelsCacheFresh 必须导出（自测入口）')
+  assert.ok(/export async function fetchProviderCatalog/.test(modelRoute), 'fetchProviderCatalog 必须导出')
+})
+
 // ── projectServerName：项目 MCP 的 serverName 加路径哈希前缀（同名不同路径拆成独立服务） ──
 check('projectServerName：不同工作区同名 server 得到不同 serverName（哈希后缀隔离）', () => {
   const a = index.projectServerName('C:\\ws-a', 'codegraph')
@@ -1326,6 +1347,180 @@ check('routeDecision：未解析出路由 → 保守回退总开关，不静默�
 check('routeKey：provider/model 拼接', () => {
   assert.equal(index.routeKey(grok), 'grok/grok-4.6')
 })
+
+// ── /models 数据源（0.6.0：面板按模型覆盖的 provider/模型目录）────────────────
+check('activeRouteView：/state 与 /models 共用的判定投影（route 缺失 → null 而非 undefined）', () => {
+  assert.deepEqual(index.activeRouteView({ on: true, source: 'model', route: grok }), {
+    on: true,
+    source: 'model',
+    provider: 'grok',
+    model: 'grok-4.6',
+  })
+  const none = index.activeRouteView({ on: false, source: 'no-route', route: undefined })
+  assert.deepEqual(none, { on: false, source: 'no-route', provider: null, model: null })
+  // 面板视图要过 JSON：undefined 字段会整个消失，前端拿到的形状就变了
+  assert.equal(JSON.parse(JSON.stringify(none)).provider, null)
+})
+
+check('modelsCacheFresh：TTL 判定（命中 / 边界过期 / 从未抓取）', () => {
+  const now = 1_000_000
+  assert.equal(index.modelsCacheFresh(now, now, 60_000), true)
+  assert.equal(index.modelsCacheFresh(now - 59_999, now, 60_000), true)
+  // 恰好到 TTL = 过期（不是「>= 才算过期」的差一错）
+  assert.equal(index.modelsCacheFresh(now - 60_000, now, 60_000), false)
+  assert.equal(index.modelsCacheFresh(null, now, 60_000), false)
+})
+
+await checkAsync('fetchProviderCatalog：llm 缺失 → 空目录（精简组合不抛错）', async () => {
+  assert.deepEqual(await index.fetchProviderCatalog(undefined), [])
+})
+
+await checkAsync('fetchProviderCatalog：listProviders 抛错 → 空目录（端点仍 200）', async () => {
+  const llm = {
+    listProviders: () => {
+      throw new Error('adapter down')
+    },
+    listModels: async () => [],
+  }
+  assert.deepEqual(await index.fetchProviderCatalog(llm), [])
+})
+
+await checkAsync('fetchProviderCatalog：单个 provider 的 listModels 抛错 → 该 provider 空表，其余保留 + 字典序排序', async () => {
+  const llm = {
+    // 故意乱序声明：输出必须按 provider 字典序（UI 折叠顺序 + 断言都不受扇出顺序影响）
+    listProviders: () => [
+      { id: 'zzz-bad', name: 'Bad' },
+      { id: 'aaa-ok', name: 'Ok' },
+    ],
+    listModels: async (provider) => {
+      if (provider === 'zzz-bad') throw new Error('network')
+      return [{ id: 'm1', name: 'M1' }]
+    },
+  }
+  assert.deepEqual(await index.fetchProviderCatalog(llm), [
+    { provider: 'aaa-ok', name: 'Ok', models: [{ id: 'm1', name: 'M1' }] },
+    { provider: 'zzz-bad', name: 'Bad', models: [] },
+  ])
+})
+
+await checkAsync('modelsCatalog：并发单飞共享一次抓取 + TTL 内命中缓存 + __resetModelsCache 失效出口', async () => {
+  index.__resetModelsCache()
+  const calls = { providers: 0, models: 0 }
+  const llm = {
+    listProviders: () => {
+      calls.providers += 1
+      return [{ id: 'p1', name: 'P1' }]
+    },
+    listModels: async () => {
+      calls.models += 1
+      // 抓取故意异步：两个并发请求必须共享同一个 in-flight promise
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      return [{ id: 'm1', name: 'M1' }]
+    },
+  }
+  const [a, b] = await Promise.all([index.modelsCatalog(llm), index.modelsCatalog(llm)])
+  assert.equal(calls.providers, 1, `listProviders 应只调 1 次，实际 ${calls.providers}`)
+  assert.equal(calls.models, 1, `listModels 应只调 1 次，实际 ${calls.models}`)
+  // 共享 in-flight 的两个请求都不是「从缓存拿到的」→ cached=false（与实现的语义一致）
+  assert.equal(a.cached, false)
+  assert.equal(b.cached, false)
+  assert.deepEqual(a.providers, [{ provider: 'p1', name: 'P1', models: [{ id: 'm1', name: 'M1' }] }])
+  // TTL 内再请求：直接吃缓存，不再打扰 adapter
+  const c = await index.modelsCatalog(llm)
+  assert.equal(c.cached, true)
+  assert.equal(calls.providers, 1)
+  assert.equal(typeof c.fetchedAt, 'number')
+  // 失效出口：清空后必须重新抓取
+  index.__resetModelsCache()
+  const d = await index.modelsCatalog(llm)
+  assert.equal(d.cached, false)
+  assert.equal(calls.providers, 2)
+  index.__resetModelsCache()
+})
+
+/** unref 过的定时器不计入「事件循环还有活干」：超时路径的断言里，唯一待触发的句柄就是那个
+ * 定时器本身，不挂保活的话 Node 会在它触发前判定空转并退出（exit 13：未 settle 的顶层 await）。
+ * 保活上限 5s：断言若真挂住，5s 后照常以 13 收场，不会把闸门永久拖死。 */
+const withKeepAlive = async (run) => {
+  const keepAlive = setTimeout(() => {}, 5_000)
+  try {
+    return await run()
+  } finally {
+    clearTimeout(keepAlive)
+  }
+}
+
+await checkAsync('modelsCatalog：抓取超时 → 本次空目录 + 不写缓存 + 清 inflight（下一个请求真的重新抓取）', () =>
+  withKeepAlive(async () => {
+    index.__resetModelsCache()
+    // 永不 settle 的 listModels：模拟「adapter 卡住」。超时上界由第二个参数注入（20ms），
+    // 不为一条自测干等 8s（生产默认值见 MODELS_FETCH_TIMEOUT_MS，另有源码守卫断言）。
+    let stuckCalls = 0
+    const stuck = {
+      listProviders: () => [{ id: 'stuck', name: 'Stuck' }],
+      listModels: () => {
+        stuckCalls += 1
+        return new Promise(() => {})
+      },
+    }
+    const out = await index.modelsCatalog(stuck, 20)
+    assert.deepEqual(out.providers, [], '超时必须按空目录返回（前端已有空态/降级文案）')
+    assert.equal(out.cached, false)
+    assert.equal(out.fetchedAt, null, '超时不得写 fetchedAt（没抓到东西就不许动缓存时间戳）')
+    assert.equal(stuckCalls, 1)
+
+    // 换一个正常 llm：必须触发**真实抓取**。若超时写了空表缓存、或没清 inflight，
+    // 这里会命中缓存（cached=true）或挂在同一个 pending promise 上（本断言永不返回）。
+    let okCalls = 0
+    const ok = {
+      listProviders: () => {
+        okCalls += 1
+        return [{ id: 'p1', name: 'P1' }]
+      },
+      listModels: async () => [{ id: 'm1', name: 'M1' }],
+    }
+    const next = await index.modelsCatalog(ok, 200)
+    assert.equal(okCalls, 1, `超时后必须重新抓取，实际 listProviders 调用 ${okCalls} 次`)
+    assert.equal(next.cached, false)
+    assert.deepEqual(next.providers, [{ provider: 'p1', name: 'P1', models: [{ id: 'm1', name: 'M1' }] }])
+    index.__resetModelsCache()
+  }),
+)
+
+await checkAsync('modelsCatalog：超时后迟到的真实抓取结果仍写缓存（后续请求命中，cached=true）', () =>
+  withKeepAlive(async () => {
+    index.__resetModelsCache()
+    let release
+    const gate = new Promise((resolve) => {
+      release = resolve
+    })
+    const slow = {
+      listProviders: () => [{ id: 'p1', name: 'P1' }],
+      listModels: async () => {
+        await gate
+        return [{ id: 'm1', name: 'M1' }]
+      },
+    }
+    const timedOut = await index.modelsCatalog(slow, 20)
+    assert.deepEqual(timedOut.providers, [], '超时那次仍按空目录返回')
+    release()
+    // 等迟到结果落盘：gate 之后的续体全是微任务，一个宏任务边界足够。
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    let calls = 0
+    const probe = {
+      listProviders: () => {
+        calls += 1
+        return []
+      },
+      listModels: async () => [],
+    }
+    const hit = await index.modelsCatalog(probe, 200)
+    assert.equal(calls, 0, '迟到结果应已写缓存（这次不该再扇出到 adapter）')
+    assert.equal(hit.cached, true)
+    assert.deepEqual(hit.providers, [{ provider: 'p1', name: 'P1', models: [{ id: 'm1', name: 'M1' }] }])
+    index.__resetModelsCache()
+  }),
+)
 
 // ── 中间层隐藏范围与覆盖表（P3b：state.ts 两个 getter）─────────────────
 check('stateMiddleLayerHides：缺省 disabled，只有显式 all 才切换', () => {

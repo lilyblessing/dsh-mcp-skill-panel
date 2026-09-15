@@ -65,7 +65,7 @@ interface DefaultModelLike {
 }
 
 /** llm 服务的最小契约（面板的 provider/模型目录用）。 */
-interface LlmLike {
+export interface LlmLike {
   listProviders(): Array<{ id: string; name: string }>
   listModels(provider: string): Promise<Array<{ id: string; name: string }>>
 }
@@ -186,4 +186,90 @@ export function routeDecision(
     if (typeof byProvider === 'boolean') return { on: byProvider, source: 'provider', route }
   }
   return { on: master, source: 'master', route }
+}
+
+/** 面板展示用的路由判定投影（/state 与 /models 必须逐字同源）。 */
+export interface ActiveRouteView {
+  on: boolean
+  source: RouteDecision['source']
+  provider: string | null
+  model: string | null
+}
+
+/**
+ * 把 {@link RouteDecision} 投影成面板视图（`autoManageActive` / `/models` 的 `active`）。
+ *
+ * 抽出来的理由：`/state`（collect.ts）与 `/models`（routes.ts）两处都要这份投影，
+ * 各自手写一遍 `decision.route?.provider ?? null` 就有了两套漂移点 —— 面板上「哪条
+ * 是当前路由」的高亮与实际生效依据必须来自同一个函数。`null`（不是 `undefined`）
+ * 是刻意的：这两个视图都要过 JSON，`undefined` 字段会整个消失。
+ * @param decision - `catalogRuntime.decisionFor(agent)` 或 `routeDecision(...)` 的结果。
+ */
+export function activeRouteView(decision: RouteDecision): ActiveRouteView {
+  return {
+    on: decision.on,
+    source: decision.source,
+    provider: decision.route?.provider ?? null,
+    model: decision.route?.model ?? null,
+  }
+}
+
+/** 目录里的一个 provider（`/models` 的 providers 元素）。 */
+export interface ProviderCatalogEntry {
+  provider: string
+  name: string
+  models: Array<{ id: string; name: string }>
+}
+
+/**
+ * 抓取 provider / 模型目录（`/models` 的唯一数据来源）。
+ *
+ * 三条降级路径都是刻意的，且都**不抛**（`/models` 是开放读端点，任何抛都会变成
+ * 500 把整张卡片打成错误态）：
+ * - `llm` 缺失（精简组合 / 服务未注册）→ 空目录；
+ * - `listProviders()` 抛错 → 空目录；
+ * - 单个 provider 的 `listModels()` 抛错 → **只**该 provider 空模型表，其余照常。
+ * `listModels` 可能触达 adapter 网络，故第三条是必需的（一个坏 adapter 不该拖垮整页）。
+ * 结果按 provider 字典序排序：UI 折叠顺序与 selftest 断言都不该受扇出完成顺序影响。
+ * @param llm - 经 ctx.inject 捕获的 llm 服务引用（直接读 ctx.llm 会抛）。
+ */
+export async function fetchProviderCatalog(llm: LlmLike | undefined): Promise<ProviderCatalogEntry[]> {
+  if (!llm) return []
+  let list: Array<{ id: string; name: string }>
+  try {
+    list = llm.listProviders()
+  } catch {
+    return []
+  }
+  const providers: ProviderCatalogEntry[] = []
+  await Promise.all(
+    list.map(async (entry) => {
+      let models: Array<{ id: string; name: string }> = []
+      try {
+        models = await llm.listModels(entry.id)
+      } catch {
+        models = []
+      }
+      providers.push({
+        provider: entry.id,
+        name: entry.name,
+        models: models.map((model) => ({ id: model.id, name: model.name })),
+      })
+    }),
+  )
+  providers.sort((a, b) => a.provider.localeCompare(b.provider))
+  return providers
+}
+
+/**
+ * 缓存新鲜度判定（纯函数：TTL 命中 / 过期由 selftest 直接断言，不必起 HTTP 服务）。
+ * @param fetchedAt - 上次**真实抓取**的时间戳；null = 从未抓取过。
+ * @param now - 当前时间戳。
+ * @param ttlMs - TTL 毫秒数（端点传 routes.ts 的 `MODELS_TTL_MS`）。
+ * @returns true = 可直接复用缓存，false = 必须重新抓取。
+ */
+export function modelsCacheFresh(fetchedAt: number | null, now: number, ttlMs: number): boolean {
+  // 时钟回拨（now < fetchedAt）也算新鲜：宁可多服一轮缓存，也不让开放读端点
+  // 因系统时间跳变而失去扇出上界（这是本端点存在的唯一理由，见 routes.ts 的注释）。
+  return fetchedAt !== null && now - fetchedAt < ttlMs
 }

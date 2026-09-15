@@ -178,6 +178,21 @@ export const en: Record<string, string> = {
   'ri.routePersistedHint':
     'This override is persisted in state.json but is not in effect: the middle layer failed to mount this time, so the runtime table (what the gate actually reads) was cleared while your intent was kept. You can delete or re-set it here. It is retried on the next start.',
   'ri.routeEmpty': 'No route to show yet (no session model and no override).',
+  // provider / model catalog (data source for the override table; GET /models)
+  // 措辞纪律：目录来自宿主的 llm 服务，是**进程级**读数，不是「本会话可用的模型」——
+  // 面板绑定的会话未必是用户当前看的那个（见 ri.routeActive 的注释），不得那样写。
+  'ri.routeCatalogHint':
+    'The catalog below comes from the host llm service: you can preset a rule for any provider or model without switching to it first.',
+  'ri.routeCatalogEmpty':
+    'The host llm service reported no providers (a reduced setup has no llm directory). Configured keys are still listed below.',
+  'ri.routeCatalogModels': '{n} models',
+  'ri.routeCatalogExpand': 'Expand / collapse this provider\u2019s models',
+  'ri.routeCatalogNoModels': 'This provider reported no models.',
+  'ri.routeCatalogFailed': 'Provider catalog unavailable: {error} — showing configured keys only.',
+  // 401/404 = 宿主进程还是旧代码（更新插件后未重启）：浏览器已加载新客户端，宿主没注册 /models。
+  // 措辞只说「端点未注册 + 重启」，不猜用户的操作顺序。
+  'ri.routeCatalogMissingEndpoint': 'endpoint not registered (restart DSH after updating the plugin)',
+  'ri.routeConfigured': 'Other keys (configured or resolved route)',
   // bulk tool control (property 1)
   'ri.toolFilter': 'Filter tools…',
   'ri.toolBulkDisableAll': 'Disable all',
@@ -365,6 +380,19 @@ export const zh: Record<string, string> = {
   'ri.routePersistedHint':
     '该覆盖项已持久化进 state.json，但当前不生效：本次中间层挂载失败，运行期表（gate 实际读的那张表）被清空，而你的意图被保留。可在此删除或重设，下次启动会重试挂载。',
   'ri.routeEmpty': '暂无可列出的路由（无会话模型且没有覆盖项）。',
+  // provider / 模型目录（覆盖表的数据源；GET /models）
+  // 措辞纪律：目录来自宿主的 llm 服务，是**进程级**读数，不是「本会话可用的模型」——
+  // 面板绑定的会话未必是用户当前看的那个（见 ri.routeActive 的注释），不得那样写。
+  'ri.routeCatalogHint': '下方目录来自宿主的 llm 服务：可为任意 provider 或模型预置规则，不必先切到该模型。',
+  'ri.routeCatalogEmpty': '宿主 llm 服务未提供 provider 目录（精简组合下没有 llm 目录）。下方仍列出已配置的键。',
+  'ri.routeCatalogModels': '{n} 个模型',
+  'ri.routeCatalogExpand': '展开 / 折叠该 provider 的模型列表',
+  'ri.routeCatalogNoModels': '该 provider 未返回模型。',
+  'ri.routeCatalogFailed': 'provider 目录不可用：{error} —— 已降级为只列出已配置的键。',
+  // 401/404 = 宿主进程还是旧代码（更新插件后未重启）：浏览器已加载新客户端，宿主没注册 /models。
+  // 措辞只说「端点未注册 + 重启」，不猜用户的操作顺序。
+  'ri.routeCatalogMissingEndpoint': '端点未注册（更新插件后需重启 DSH）',
+  'ri.routeConfigured': '其它键（已配置或当前解析到的路由）',
   // 工具批量控制（特性 1）
   'ri.toolFilter': '过滤工具…',
   'ri.toolBulkDisableAll': '全部禁用',

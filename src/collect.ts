@@ -20,6 +20,7 @@ import { pendingMcp } from './pending'
 import { listPresetMcpRows } from './preset-mcp'
 import { gatewayServerOfEntryId } from './gateway'
 import { computeStatus, modelVisibleScope, rowDisplay } from './row-display'
+import { activeRouteView } from './model-route'
 
 /** 分域缓存 TTL：事件驱动失效为主，TTL 只是兜底（事件丢失场景） */
 export const DOMAIN_TTL_MS = 60_000
@@ -587,12 +588,9 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
     // agent 缺省/服务缺失 → source='no-route'，此时 on 回退总开关（保守维持旧行为）。
     // 注意：/state 不带 session 参数，host 侧按 roots[0] 解析 —— 多会话并存时未必是
     // 用户当前会话，故文案不得断言「本会话 / 当前会话」（卡片同时显示 sessionId 供核对）。
-    autoManageActive: {
-      on: decision.on,
-      source: decision.source,
-      provider: decision.route?.provider ?? null,
-      model: decision.route?.model ?? null,
-    },
+    // 投影走 model-route.ts 的 activeRouteView：与 /models 的 active 是同一份实现
+    // （面板「当前路由」高亮必须与生效依据同源，两处不得各写一遍）。
+    autoManageActive: activeRouteView(decision),
     activeWorkspace: getActiveWorkspace(),
     errors,
   }

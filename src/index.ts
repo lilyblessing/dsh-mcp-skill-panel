@@ -124,6 +124,14 @@ export { parsePresetMcpText, findPresetRowByServerName, presetConfigOf } from '.
 export type { PresetMcpRow, PresetMcpClientConfig, PresetMcpParsed } from './preset-mcp'
 // 按模型分流（selftest 回归护栏：三级回退 + 查表优先级）
 export { resolveRoute, routeDecision, routeKey, type ModelRoute, type RouteDecision } from './model-route'
+// 面板 /models 数据源的纯逻辑（selftest 护栏：TTL 判定 + 三条降级路径）与
+// /state、/models 共用的判定投影。导出理由同 model-route：routes.ts 被 tsdown
+// 打进 index 的 bundle，selftest 只能经构建产物 index 取用。
+export { activeRouteView, fetchProviderCatalog, modelsCacheFresh, type ActiveRouteView, type ProviderCatalogEntry } from './model-route'
+// /models 的目录缓存实现（TTL + 单飞）在 routes.ts（与端点同文件、与 MODELS_TTL_MS
+// 同处）；导出它纯粹是为了 selftest 能断言「并发共享同一次抓取」——缓存是模块级
+// 状态，没有 Node 侧的第二个入口。__resetModelsCache 是它的失效出口（自测专用）。
+export { modelsCatalog, __resetModelsCache } from './routes'
 // 装配可见性过滤（selftest 回归护栏：G1 控制工具只投放给 gate 打开的模型 + G3 hideAll 语义）。
 // 导出理由：filter.ts 被 tsdown 打进带哈希的 chunk（lib/mcpcall-*.mjs），selftest 无法按路径 import，
 // 只能经构建产物 index 取用 —— 与 model-route 的导出同法。

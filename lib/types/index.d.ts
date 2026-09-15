@@ -68,6 +68,8 @@ export type { ToolBulkTargets } from './tool-disable';
 export { parsePresetMcpText, findPresetRowByServerName, presetConfigOf } from './preset-mcp';
 export type { PresetMcpRow, PresetMcpClientConfig, PresetMcpParsed } from './preset-mcp';
 export { resolveRoute, routeDecision, routeKey, type ModelRoute, type RouteDecision } from './model-route';
+export { activeRouteView, fetchProviderCatalog, modelsCacheFresh, type ActiveRouteView, type ProviderCatalogEntry } from './model-route';
+export { modelsCatalog, __resetModelsCache } from './routes';
 export { installMcpVisibilityFilter, type AssemblyGate } from './filter';
 export declare const name = "runtime-inventory";
 export declare const inject: string[];

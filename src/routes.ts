@@ -41,6 +41,7 @@ import { remountWorkspace, projectServerOwner, getActiveWorkspace } from './proj
 import { disabledToolsOf, setToolDisabled, setToolsDisabledBulk, resolveToolBulkTargets } from './tool-disable'
 import type { McpCallController } from './mcpcall'
 import type { CatalogRuntime, Config } from './index'
+import { activeRouteView, fetchProviderCatalog, modelsCacheFresh, type ProviderCatalogEntry, type RouteServices } from './model-route'
 import { messageOf } from './util'
 
 const API_PREFIX = '/api/mcp-skill-panel'
@@ -53,6 +54,11 @@ const SKILL_TOGGLE_CONFIRM_MS = 5_000
 const PANEL_TOKEN = randomBytes(32).toString('hex')
 /** readBody 体积上限：防无界 body 累积（本地 DoS 向量）。 */
 const MAX_BODY_BYTES = 64 * 1024
+/** `/models` 的 provider/模型目录 TTL（ms）。见 modelsCatalog 的取舍注释。 */
+const MODELS_TTL_MS = 60_000
+/** `/models` 单次抓取的时间上界（ms）。见 modelsCatalog 的超时注释：本端点是**开放读端点**，
+ * 不能被一个卡住的 adapter 永久黏住（无超时 + 单飞 = 该 adapter 恢复前对所有调用者不可用）。 */
+const MODELS_FETCH_TIMEOUT_MS = 8_000
 
 type Req = import('node:http').IncomingMessage
 type Res = import('node:http').ServerResponse
@@ -794,6 +800,108 @@ async function addSkill(
   return { path: file }
 }
 
+/* ── /models 目录缓存（TTL + 单飞 + 抓取时间上界）───────────────────────── */
+
+interface ModelsCatalog {
+  providers: ProviderCatalogEntry[]
+  cached: boolean
+  fetchedAt: number | null
+}
+
+/** 上一次真实抓取的目录 + 在飞的抓取（单飞）。进程级：目录与面板一样是进程全局读数。 */
+const modelsCache: {
+  fetchedAt: number | null
+  providers: ProviderCatalogEntry[] | null
+  inflight: Promise<ProviderCatalogEntry[]> | null
+} = { fetchedAt: null, providers: null, inflight: null }
+
+/** 清空目录缓存（**仅供自测**：TTL 命中 / 失效 / 超时三条路径在 Node 侧的唯一入口）。 */
+export function __resetModelsCache(): void {
+  modelsCache.fetchedAt = null
+  modelsCache.providers = null
+  modelsCache.inflight = null
+}
+
+/** 超时哨兵：`Promise.race` 无法把「超时」与「抓取真的返回空目录」区分开，故用唯一对象标记。 */
+const MODELS_FETCH_TIMEOUT = Symbol('modelsFetchTimeout')
+
+/** 抓取时间上界的 promise：到点用哨兵 resolve（**不取消**那次真实抓取，见 modelsCatalog）。 */
+function fetchDeadline(ms: number): Promise<typeof MODELS_FETCH_TIMEOUT> {
+  return new Promise((resolve) => {
+    const timer: ReturnType<typeof setTimeout> = setTimeout(() => resolve(MODELS_FETCH_TIMEOUT), ms)
+    // 本仓是长驻进程：这个定时器只是「上界」，绝不能把事件循环吊住。Node 的 Timeout 有
+    // unref，浏览器/DOM 类型下 setTimeout 返回 number（没有 unref），故用可选调用。
+    timer.unref?.()
+  })
+}
+
+/** 发起一次真实抓取并登记为在飞（单飞）。返回登记进 `modelsCache.inflight` 的那个 promise。 */
+function startModelsFetch(llm: RouteServices['llm']): Promise<ProviderCatalogEntry[]> {
+  const fetch = fetchProviderCatalog(llm).then((providers) => {
+    // **迟到结果也写缓存**：本次抓取可能已因超时被调用方放弃，但抓回来的目录仍是新鲜读数，
+    // 后续请求直接命中即可（超时只是一次请求的返回语义，不是「这次抓取作废」）。
+    // 若超时窗口内又发起了新抓取，则后完成者覆盖先完成者 —— 两者都是真实读数，
+    // 不构成竞态缺陷（不存在「写进过期数据」的路径：写缓存同时会刷新 fetchedAt）。
+    modelsCache.providers = providers
+    modelsCache.fetchedAt = Date.now()
+    return providers
+  })
+  // 只清自己那一份在飞标记：超时路径会先清空 inflight，下一个请求可能已经建了新的抓取，
+  // 这里若无条件置 null 会把后来者一并清掉（单飞失效 → 并发重复扇出）。
+  let inflight: Promise<ProviderCatalogEntry[]>
+  inflight = fetch.finally(() => {
+    if (modelsCache.inflight === inflight) modelsCache.inflight = null
+  })
+  modelsCache.inflight = inflight
+  return inflight
+}
+
+/**
+ * 取 provider/模型目录，带 TTL 缓存与单飞。
+ *
+ * 取舍（为什么必须缓存）：`listModels` 是逐个 provider 打到 adapter 的调用，可能
+ * 触达网络；而 `/models` 与其它读端点一样是**无鉴权 GET**（本仓「读端点开放、
+ * 写操作鉴权」的设计，见 handleAny 注释）。TTL 缓存把这条开放端点的扇出上界锁死
+ * 成**每 60s 至多一次**完整抓取 —— 这就是对「无鉴权读端点会放大到 adapter」的
+ * 缓解手段；单飞再保证并发请求共享同一个在飞 promise，不会因并发而乘上扇出。
+ *
+ * `cached` 的语义：本次响应**直接取自**已完成的 TTL 缓存（没有参与任何抓取）。
+ * 与别人共享在飞抓取的并发请求同样是 `false` —— 它们确实不是从缓存拿到的。
+ *
+ * 时间上界（为什么必须有）：单飞把「一个 adapter 卡住」从「一次慢响应」放大成「端点对外
+ * 不可用」—— `inflight` 一旦被一个**永不 settle** 的 `listModels` 钉住，之后每个 `/models`
+ * 请求都 await 同一个 pending promise（对外表现为「宿主 llm 服务未提供 provider 目录」，
+ * 连报错都没有）。故单次抓取套 `Promise.race` 上界 `MODELS_FETCH_TIMEOUT_MS`：
+ * 超时只改**本次请求**的返回（空目录 + `cached:false`），不写缓存、不动 `fetchedAt`，
+ * 并清掉 `inflight` 让下一个请求能重新发起抓取；迟到的真实结果照常写缓存。
+ *
+ * @param llm - 经 ctx.inject 捕获的 llm 服务引用（缺失时降级为空目录，不抛）。
+ * @param timeoutMs - 抓取时间上界（ms），**仅供自测注入**（默认 `MODELS_FETCH_TIMEOUT_MS`；
+ * 生产调用点不传，避免把一个「测试用的口子」变成第二个配置面）。
+ */
+export async function modelsCatalog(
+  llm: RouteServices['llm'],
+  timeoutMs: number = MODELS_FETCH_TIMEOUT_MS,
+): Promise<ModelsCatalog> {
+  const now = Date.now()
+  // 显式空判（不是真值判断）：`[]` 也是**已完成的抓取**（llm 缺失/全部 provider 失败），
+  // 用真值判断会让它被当成「没缓存」而每个请求重新扇出。
+  if (modelsCache.providers !== null && modelsCacheFresh(modelsCache.fetchedAt, now, MODELS_TTL_MS)) {
+    return { providers: modelsCache.providers, cached: true, fetchedAt: modelsCache.fetchedAt }
+  }
+  // 局部变量留引用：await 期间 finally / 超时路径都会把 modelsCache.inflight 置回 null。
+  const inflight = modelsCache.inflight ?? startModelsFetch(llm)
+  const raced = await Promise.race([inflight, fetchDeadline(timeoutMs)])
+  if (raced === MODELS_FETCH_TIMEOUT) {
+    // 超时：本次按「空目录」返回（前端已有空态/降级文案，无需改动），**不写缓存、不动
+    // fetchedAt**，并清掉在飞标记 —— 否则一次卡顿就把 60s 窗口钉成空目录，等于把
+    // 「无超时」换成「缓存了坏结果」。清理同样是身份守卫：若期间已有新抓取接手，别清它。
+    if (modelsCache.inflight === inflight) modelsCache.inflight = null
+    return { providers: [], cached: false, fetchedAt: modelsCache.fetchedAt }
+  }
+  return { providers: raced, cached: false, fetchedAt: modelsCache.fetchedAt }
+}
+
 /* ── 路由 ──────────────────────────────────────────────────────────────── */
 
 export function makeRoutes(
@@ -1060,6 +1168,38 @@ export function makeRoutes(
           },
         },
       ], true),
+    },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/models`,
+      handler: handle('GET', async (req) => {
+        // 按模型覆盖的**数据源补齐**：provider 目录 + 每个 provider 的模型目录。
+        // 此前覆盖卡只能列出「当前解析路由的键 ∪ 覆盖表现有键」，于是绑定的会话与
+        // 用户实际在用的模型不一致时（/state 不带 session → host 按 roots[0] 解析），
+        // 面板连为那个模型预置规则的入口都没有。目录让「任何 provider/模型」都可点。
+        // 读端点：不传 guarded（与 handleAny 的「读端点开放、写操作鉴权」一致）。
+        // 目录本身带 TTL 缓存 + 单飞（见 modelsCatalog）：无鉴权调用的扇出上界
+        // 锁死为 60s 一次，而不是每个请求一次；单次抓取另有 MODELS_FETCH_TIMEOUT_MS
+        // 上界，卡住的 adapter 不会把这条端点对所有人黏住。
+        const url = req.url ?? ''
+        const session = queryParam(url, 'session') ?? null
+        const catalog = await modelsCatalog(catalogRuntime.routeServices.llm)
+        // autoManage / autoManageByRoute / autoManageMounted 与 /config GET 逐字同源
+        // （same readState + 同一批 getter），面板两处读数不得漂移。
+        const state = await readState()
+        return {
+          providers: catalog.providers,
+          autoManage: catalogRuntime.autoManage,
+          autoManageByRoute: stateAutoManageByRoute(state),
+          autoManageMounted: catalogRuntime.autoManageMounted,
+          // active 走 model-route.ts 的 activeRouteView（与 /state 的 autoManageActive
+          // 同一份实现）：面板高亮的「当前路由」必须与生效依据同源。
+          active: activeRouteView(catalogRuntime.decisionFor(resolveAgent(ctx, session ?? undefined))),
+          session,
+          cached: catalog.cached,
+          fetchedAt: catalog.fetchedAt,
+        }
+      }),
     },
     {
       kind: 'exact',

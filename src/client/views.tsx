@@ -399,6 +399,29 @@ const C = {
     background: active ? 'var(--dsw-alias-button-ghost-active-fill)' : 'transparent',
     borderColor: active ? 'var(--dsw-alias-button-ghost-active-border)' : 'var(--dsw-alias-border-l2)',
   }),
+  // 「当前路由」小标注（覆盖卡的三处行共用：目录 provider 行 / 目录模型行 / 其它键行）。
+  routeMark: {
+    fontSize: 11,
+    fontWeight: 400,
+    color: 'var(--dsw-alias-label-tertiary)',
+  },
+  // provider 目录的展开/折叠开关（0.6.0 /models 数据源）
+  routeExpand: {
+    font: 'inherit',
+    cursor: 'pointer',
+    border: 0,
+    background: 'transparent',
+    color: 'var(--dsw-alias-label-tertiary)',
+    padding: '2px 2px',
+    fontSize: 11,
+    whiteSpace: 'nowrap' as const,
+  },
+  // 目录里「该 provider 无模型」的空态文案（与 routeName 同宽，保持行对齐）
+  routeModelEmpty: {
+    flex: '1 1 140px',
+    fontSize: 11,
+    color: 'var(--dsw-alias-label-tertiary)',
+  },
   // 批量动作结果回执（changed / ignoredToolNames）
   toolNote: {
     margin: 0,
@@ -904,14 +927,24 @@ function AutoManageCard(props: {
   )
 }
 
+/** `/models` 返回的 provider 目录项（前端只消费 providers；其余字段留给调用方/自测）。 */
+interface RouteProviderEntry {
+  provider: string
+  name: string
+  models: Array<{ id: string; name: string }>
+}
+
 /**
  * 0.6.0 特性 4：按模型覆盖表（三态：跟随总开关 / 强制开 / 强制关）→ `config.autoManageByRoute`。
  *
- * 数据来源说明（本仓**没有** `/models` 端点，/config 只回显覆盖表）：行集合 = 覆盖表现有键
- * ∪ 当前会话路由（`autoManageActive.provider` 与 `provider/model`）。因此面板只保证「当前
- * 模型」与「已配置的键」可编辑；要为一个当前会话之外的模型预置规则，需先切到该模型。
- * 这比 PR 原稿（拉 provider 目录、每个 provider 一次 listModels 网络调用）少一条无鉴权
- * GET，见评审 WARN-3。
+ * 行集合（2026-09-16 补齐数据源）= **宿主 llm 服务的 provider/模型目录**（本卡片挂载时拉一次
+ * `GET /models`）∪ 覆盖表现有键（运行期 ∪ **持久化**）∪ 面板绑定会话解析出的路由键。
+ * 目录的作用：面板绑定的会话未必是用户在用的那个（`/state` 不带 session → host 侧按
+ * `roots[0]` 解析），此前用户连「为那个模型预置规则」的入口都没有；有了目录，任意
+ * provider/模型都可点，不必先切到它。目录拉取失败时降级为「只列键」的旧行为，不阻断卡片。
+ *
+ * 措辞纪律：面板是**进程级全局** settings.section，绑定的是 `roots[0]`，多会话并存时
+ * 未必是用户当前正在看的会话 —— 文案只说「面板绑定会话」，不得断言「本会话 / 当前会话」。
  */
 function RouteOverridesCard(props: {
   state: McpView
@@ -919,8 +952,53 @@ function RouteOverridesCard(props: {
   loadMcp: () => void
 }): React.ReactElement {
   const { state, t, loadMcp } = props
+  const [providers, setProviders] = useState<RouteProviderEntry[]>([])
+  // provider 折叠状态：未交互过的 provider 跟随默认（当前路由那个展开），故用「?? 默认值」
+  // 而不是初始化时写死一份 map —— 面板会话/路由可能在下一次轮询后变化。
+  const [openProvider, setOpenProvider] = useState<Record<string, boolean>>({})
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
+
+  // provider/模型目录只在挂载时拉一次：listModels 是逐个 provider 打 adapter（可能触达
+  // 网络），不该跟着 60s 面板轮询跑。覆盖表本身仍来自 state（写完 loadMcp 即重新拉）。
+  useEffect(() => {
+    let alive = true
+    /** 目录拉取失败的分类文案：401/404 = 宿主没注册这个端点（客户端已更新、宿主进程未重启），
+     * 其它状态码只报 `HTTP <status>`（同 handle 的错误码口径：GET 服务错 500 / POST 400）。 */
+    const catalogFetchError = (status: number): string =>
+      status === 401 || status === 404
+        ? t('ri.routeCatalogMissingEndpoint')
+        : `HTTP ${status}`
+    fetch('/api/mcp-skill-panel/models')
+      .then(async (res) => {
+        // 先判 res.ok：4xx/5xx 的响应体不是本端点的契约形状（旧宿主返回的是 "not found" 之类的
+        // 纯文本），直接 res.json() 会把 SyntaxError 抛给用户 —— 那是噪音，不是诊断信息。
+        if (!res.ok) throw new Error(catalogFetchError(res.status))
+        // 再 text() + JSON.parse：端点存在但返回非 JSON（代理/旧宿主）同样归入上面的分类，
+        // 解析异常只作内部信号，原始 SyntaxError 不进卡片文案（对用户没有诊断价值）。
+        let body: { ok?: unknown; providers?: RouteProviderEntry[]; error?: string }
+        try {
+          body = JSON.parse(await res.text()) as typeof body
+        } catch {
+          throw new Error(catalogFetchError(res.status))
+        }
+        if (body.ok !== true) throw new Error(body.error ?? catalogFetchError(res.status))
+        return body
+      })
+      .then((body) => {
+        if (!alive) return
+        setProviders(body.providers ?? [])
+      })
+      .catch((error: unknown) => {
+        if (!alive) return
+        // 降级而不是阻断：目录没有时卡片仍按覆盖表 ∪ 路由键渲染（= 加目录之前的行为）。
+        setErr(t('ri.routeCatalogFailed', { error: error instanceof Error ? error.message : String(error) }))
+      })
+    return () => {
+      alive = false
+    }
+    // 依赖故意留空：目录只拉这一次（t 的标识变化不该重打 adapter；本仓无 lint 规则强制补全）。
+  }, [])
 
   const setOverride = useCallback(
     async (key: string, value: boolean | null) => {
@@ -986,15 +1064,23 @@ function RouteOverridesCard(props: {
   const activeKeys = [active.provider, active.provider && active.model ? `${active.provider}/${active.model}` : null].filter(
     (key): key is string => typeof key === 'string' && key.length > 0,
   )
-  // 行集合 = 当前路由键 ∪ 运行期覆盖表 ∪ **持久化**覆盖表。加最后一项是为了让
-  // 「已配置但本次未生效」的键仍然可见、可删（否则挂载失败后用户既看不到也删不掉）。
-  const keys = [
+  // 目录里已列出的键（provider 与 provider/model 两级）：它们由目录行承载三态控件，
+  // 不在下面「其它键」区重复出现（同一个键两处可改是 UI 事故）。
+  const catalogKeys = new Set<string>()
+  for (const entry of providers) {
+    catalogKeys.add(entry.provider)
+    for (const model of entry.models) catalogKeys.add(`${entry.provider}/${model.id}`)
+  }
+  // 「其它键」= 当前路由键 ∪ 运行期覆盖表 ∪ **持久化**覆盖表，去掉目录已列出者。保留
+  // 后两项是为了让「已配置但本次未生效」的键仍然可见、可删（否则挂载失败后用户既看不到
+  // 也删不掉）；目录不可用（未返回/拉取失败）时这里等价于旧行为的完整键集合。
+  const otherKeys = [
     ...new Set([
       ...activeKeys,
       ...Object.keys(state.autoManageByRoute),
       ...Object.keys(state.autoManageByRoutePersisted),
     ]),
-  ]
+  ].filter((key) => !catalogKeys.has(key))
   const sourceLabel =
     active.source === 'model'
       ? t('ri.routeSourceModel')
@@ -1007,7 +1093,24 @@ function RouteOverridesCard(props: {
   // 诊断装配（无 agent）时 source='no-route'：必须显式说出来，否则用户看到
   // 「强制开」却没生效会以为是 bug（评审 §6-2 的隐藏风险）。
   const noRoute = active.source === 'no-route'
-
+  // 「当前路由」小标注：目录两级行与「其它键」行的同一份标记，避免三处各写一遍。
+  const currentMark = (): React.ReactElement => <span style={C.routeMark}> · {t('ri.routeCurrent')}</span>
+  // 「已持久化但本次未生效」标记（挂载失败时运行期表被清空，只有持久化表还有该键）。
+  // 三处行都要挂：目录里出现的键若只在持久化表，同样必须看得见这个警告（否则用户会
+  // 以为它生效了 —— 574c9dd 修的就是「看不见也删不掉」这一类）。
+  const persistedMark = (key: string): React.ReactElement | null =>
+    persistedOnly(key) ? (
+      <>
+        {' '}
+        <Badge
+          color="var(--dsw-alias-state-warn-primary)"
+          bg="var(--dsw-alias-state-warn-tertiary)"
+          title={t('ri.routePersistedHint')}
+        >
+          {t('ri.routePersistedOnly')}
+        </Badge>
+      </>
+    ) : null
   return (
     <div style={C.card}>
       <div style={C.cardTop}>
@@ -1036,36 +1139,74 @@ function RouteOverridesCard(props: {
         {' · '}
         {t('ri.session')}: {state.sessionId ?? '—'}
       </p>
+      {providers.length > 0 && <p style={C.cardMeta}>{t('ri.routeCatalogHint')}</p>}
       {err && <div style={C.error}>{err}</div>}
-      {keys.length === 0 && !err && <p style={C.cardMeta}>{t('ri.routeEmpty')}</p>}
-      {keys.map((key, index) => (
+      {/* 空态互斥（两行不同时出现）：目录为空且**还有其它键**时只提示目录缺，下面仍会有
+          「其它键」区；目录与其它键都为空时只说「暂无可列出的路由」，不再叠一句「已配置的键
+          仍列在下方」—— 下面什么也没有。 */}
+      {providers.length === 0 && otherKeys.length > 0 && !err && <p style={C.cardMeta}>{t('ri.routeCatalogEmpty')}</p>}
+      {providers.map((entry) => {
+        const isOpen = openProvider[entry.provider] ?? entry.provider === active.provider
+        const entryCurrent = activeKeys.includes(entry.provider)
+        return (
+          <React.Fragment key={entry.provider}>
+            <div style={C.routeRow}>
+              <span style={{ ...C.routeName, fontWeight: entryCurrent ? 700 : 500 }} title={entry.provider}>
+                {entry.name || entry.provider} ({entry.provider})
+                {entryCurrent && currentMark()}
+                {persistedMark(entry.provider)}
+              </span>
+              {/* 模型数 + 展开开关：行内只在目录里出现（键 = provider，右侧三态控件给该
+                  provider 下所有模型预置规则；单独的模型行可再逐条覆盖）。 */}
+              <button
+                type="button"
+                style={C.routeExpand}
+                onClick={() => setOpenProvider((prev) => ({ ...prev, [entry.provider]: !isOpen }))}
+                title={t('ri.routeCatalogExpand')}
+              >
+                {isOpen ? '▾' : '▸'} {t('ri.routeCatalogModels', { n: entry.models.length })}
+              </button>
+              {segment(entry.provider)}
+            </div>
+            {isOpen && entry.models.length === 0 && (
+              <div style={{ ...C.routeRow, borderTop: 0, paddingLeft: 16 }}>
+                <span style={C.routeModelEmpty}>{t('ri.routeCatalogNoModels')}</span>
+              </div>
+            )}
+            {isOpen &&
+              entry.models.map((model) => {
+                const key = `${entry.provider}/${model.id}`
+                const modelCurrent = activeKeys.includes(key)
+                return (
+                  <div key={key} style={{ ...C.routeRow, borderTop: 0, paddingLeft: 16 }}>
+                    <span
+                      style={{ ...C.routeName, fontWeight: modelCurrent ? 700 : 400, color: 'var(--dsw-alias-label-secondary)' }}
+                      title={key}
+                    >
+                      {model.name || model.id} ({model.id})
+                      {modelCurrent && currentMark()}
+                      {persistedMark(key)}
+                    </span>
+                    {segment(key)}
+                  </div>
+                )
+              })}
+          </React.Fragment>
+        )
+      })}
+      {otherKeys.length > 0 && <p style={C.cardMeta}>{t('ri.routeConfigured')}</p>}
+      {otherKeys.map((key, index) => (
         <div key={key} style={{ ...C.routeRow, ...(index === 0 ? { borderTop: 0 } : {}) }}>
           <span style={C.routeName} title={key}>
             {key}
-            {activeKeys.includes(key) && (
-              <>
-                {' '}
-                <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--dsw-alias-label-tertiary)' }}>
-                  · {t('ri.routeCurrent')}
-                </span>
-              </>
-            )}
-            {persistedOnly(key) && (
-              <>
-                {' '}
-                <Badge
-                  color="var(--dsw-alias-state-warn-primary)"
-                  bg="var(--dsw-alias-state-warn-tertiary)"
-                  title={t('ri.routePersistedHint')}
-                >
-                  {t('ri.routePersistedOnly')}
-                </Badge>
-              </>
-            )}
+            {activeKeys.includes(key) && currentMark()}
+            {persistedMark(key)}
           </span>
           {segment(key)}
         </div>
       ))}
+      {/* 真的什么都没有时才出这一行（与上面的 ri.routeCatalogEmpty 互斥）。 */}
+      {providers.length === 0 && otherKeys.length === 0 && !err && <p style={C.cardMeta}>{t('ri.routeEmpty')}</p>}
     </div>
   )
 }
