@@ -137,6 +137,11 @@ function handle(method: 'GET' | 'POST', run: (req: Req) => Promise<object>, guar
  * guardPosts 对 GET 也生效，/config 读取被锁 → 面板生效时机恒显示默认值）。
  */
 function handleAny(entries: Array<{ method: 'GET' | 'POST'; run: (req: Req) => Promise<object> }>, guardPosts = false): (req: Req, res: Res) => void {
+  // 2026-09-15 修复：含 POST 的合并路由漏传 guardPosts=true 会让写端点静默裸奔
+  // （/mcp/rowConfig、/debug/rowConfig 即此漏）。这里 fail-fast，新增路由不会再漏。
+  if (!guardPosts && entries.some((e) => e.method === 'POST')) {
+    throw new Error('handleAny: POST entries require guardPosts=true')
+  }
   return (req, res) => {
     const entry = entries.find((e) => e.method === req.method)
     if (!entry) {
@@ -1055,7 +1060,7 @@ export function makeRoutes(
             return { ok: true, server, applied, after: await describeRow(server) }
           },
         },
-      ]),
+      ], true),
     },
     {
       // 0.7.0 取证用（只读）：读某 server 行的**全量挂载配置**（含 cwd/command/args/env）。
@@ -1112,7 +1117,7 @@ export function makeRoutes(
             return { updateError, before, after: await describeRow(server) }
           },
         },
-      ]),
+      ], true),
     },
     {
       kind: 'exact',

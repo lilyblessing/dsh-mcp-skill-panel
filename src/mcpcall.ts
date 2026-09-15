@@ -821,6 +821,14 @@ async function restoreGateway(
   serverName: string,
   entryId: string,
 ): Promise<void> {
+  // 与 restore() 同构的竞态守卫：用户中途手动打开（markUserEnabled 清掉 aiEnabled）时，
+  // 该 server 已转交用户管理，失败的这次 AI 调用不得再回关它（否则会关掉用户刚开的行）。
+  // 引用计数等残留一并清掉。
+  if (!state.aiEnabled.has(serverName)) {
+    state.refCounts.delete(serverName)
+    state.lastUsed.delete(serverName)
+    return
+  }
   try {
     const entry = control.resolveEntry(serverName)
     if (entry && entry.id === entryId && !entry.disabled) {
