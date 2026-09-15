@@ -60,7 +60,7 @@ export declare function inventoryTraceForDebug(): unknown;
 export declare function ensureOpenMountsForDebug(): Promise<unknown>;
 export { readState, writeState } from './state';
 export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending';
-export { loadDisabledTools, setToolDisabled, isToolDisabled, disabledToolsOf } from './tool-disable';
+export { loadDisabledTools, setToolDisabled, setToolsDisabledBulk, isToolDisabled, disabledToolsOf } from './tool-disable';
 export { parsePresetMcpText, findPresetRowByServerName, presetConfigOf } from './preset-mcp';
 export type { PresetMcpRow, PresetMcpClientConfig, PresetMcpParsed } from './preset-mcp';
 export declare const name = "runtime-inventory";

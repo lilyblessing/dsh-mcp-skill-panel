@@ -35,6 +35,22 @@ export declare function isToolDisabled(fullName: string, workspace?: string): bo
  */
 export declare function setToolDisabled(serverName: string, fullName: string, disabled: boolean, persist?: boolean): Promise<void>;
 /**
+ * 批量切换某 server 上一组工具的禁用状态（面板「全部禁用 / 全部启用 / 按过滤」）。
+ *
+ * 与逐个调用 {@link setToolDisabled} 的区别只在 IO：这里对 state.json 只做
+ * **一次** 读-改-写。prompthelper 这种 450 工具的 server 逐个写会是 450 次
+ * 合并写盘 + 450 次面板失效，实际不可用。
+ *
+ * 语义与单个开关完全一致（同一张表、同一套项目/全局作用域分派），所以批量与
+ * 单点操作可以任意交替，不存在「批量模式」这种隐藏状态。
+ * @param serverName - 目标 MCP server。
+ * @param toolNames - 工具全名（mcp__<server>__<tool>）列表；非本 server 的条目忽略。
+ * @param disabled - true=禁用这批，false=启用这批。
+ * @param persist - false 时只改内存不落盘（selftest）。
+ * @returns 实际发生变化的工具数。
+ */
+export declare function setToolsDisabledBulk(serverName: string, toolNames: readonly string[], disabled: boolean, persist?: boolean): Promise<number>;
+/**
  * 常开装配过滤：把用户禁用的 MCP 工具从模型工具目录剔除。
  * 项目表按当前会话工作区匹配（context.agent.session.header.cwd），
  * 会话工作区不等于项目所属区时该项目工具本就不会挂载可见（由 project-mcp 过滤），

@@ -583,6 +583,73 @@ await checkAsync('setToolDisabled：未注册 owner 的 server 视为全局（�
   assert.ok(!index.isToolDisabled('mcp__projsrv__x'))
 })
 
+// ── 工具级批量禁用（setToolsDisabledBulk：一次读-改-写，与单点同表同源） ─────────
+// persist=false 只动内存：用例不碰 ~/.dsh/dsh-mcp-skill-panel/state.json
+await checkAsync('setToolsDisabledBulk：一次禁用整组，再整组启用（persist=false 只动内存）', async () => {
+  const names = ['mcp__bulk__a', 'mcp__bulk__b', 'mcp__bulk__c']
+  const changed = await index.setToolsDisabledBulk('bulk', names, true, false)
+  assert.equal(changed, 3)
+  for (const name of names) assert.equal(index.isToolDisabled(name), true)
+  const back = await index.setToolsDisabledBulk('bulk', names, false, false)
+  assert.equal(back, 3)
+  for (const name of names) assert.equal(index.isToolDisabled(name), false)
+})
+
+await checkAsync('setToolsDisabledBulk：忽略其他 server 的全名，不污染禁用表', async () => {
+  const changed = await index.setToolsDisabledBulk('bulk2', ['mcp__other__x', 'mcp__bulk2__y'], true, false)
+  assert.equal(changed, 1)
+  assert.equal(index.isToolDisabled('mcp__other__x'), false)
+  assert.equal(index.isToolDisabled('mcp__bulk2__y'), true)
+  await index.setToolsDisabledBulk('bulk2', ['mcp__bulk2__y'], false, false)
+})
+
+await checkAsync('setToolsDisabledBulk：重复名去重，批量与单点开关可交替', async () => {
+  await index.setToolDisabled('bulk3', 'mcp__bulk3__a', true, false)
+  // a 已禁用：整组禁用只新增 b，changed 反映集合实际增量
+  const changed = await index.setToolsDisabledBulk('bulk3', ['mcp__bulk3__a', 'mcp__bulk3__a', 'mcp__bulk3__b'], true, false)
+  assert.equal(changed, 1)
+  assert.equal(index.disabledToolsOf('bulk3').size, 2)
+  await index.setToolsDisabledBulk('bulk3', ['mcp__bulk3__a', 'mcp__bulk3__b'], false, false)
+  assert.equal(index.disabledToolsOf('bulk3').size, 0)
+})
+
+// E1：changed 是「本次实际翻转条数」，面板据此报「已改动 N 条」——no-op 必须记 0
+await checkAsync('setToolsDisabledBulk：changed = 实际翻转条数（重复禁用为 no-op 记 0）', async () => {
+  const names = ['mcp__bulka__a', 'mcp__bulka__b']
+  assert.equal(await index.setToolsDisabledBulk('bulka', names, true, false), 2)
+  assert.equal(await index.setToolsDisabledBulk('bulka', names, true, false), 0)
+  assert.equal(await index.setToolsDisabledBulk('bulka', [...names, 'mcp__bulka__c'], true, false), 1)
+  assert.equal(index.disabledToolsOf('bulka').size, 3)
+  assert.equal(await index.setToolsDisabledBulk('bulka', [...names, 'mcp__bulka__c'], false, false), 3)
+  assert.equal(index.disabledToolsOf('bulka').size, 0)
+})
+
+// E2：scope 分派必须与 setToolDisabled 同源（同一张表、同一 projectServerOwner 判据），
+// 否则「批量禁用 → 单点启用」会各自看不见对方，留下永不生效的幽灵条目。
+await checkAsync('setToolsDisabledBulk：与单点开关同表同源（未注册 owner → 全局表，可任意交替）', async () => {
+  assert.equal(index.projectServerOwner('bulk-src'), undefined)
+  await index.setToolsDisabledBulk('bulk-src', ['mcp__bulk-src__a', 'mcp__bulk-src__b'], true, false)
+  assert.ok(index.disabledToolsOf('bulk-src').has('mcp__bulk-src__a'))
+  assert.ok(index.isToolDisabled('mcp__bulk-src__a', 'C:\\ws-a'))
+  // 单点启用其中一条：批量入口看到的同一张表必须同步少一条
+  await index.setToolDisabled('bulk-src', 'mcp__bulk-src__a', false, false)
+  assert.equal(index.disabledToolsOf('bulk-src').size, 1)
+  assert.ok(!index.isToolDisabled('mcp__bulk-src__a'))
+  await index.setToolsDisabledBulk('bulk-src', ['mcp__bulk-src__b'], false, false)
+  assert.equal(index.disabledToolsOf('bulk-src').size, 0)
+})
+
+// F1 写端点鉴权：/mcp/toolBulk 走 handleAny([...], true)（漏传 → routes.ts 的
+// fail-fast 断言在 makeRoutes 期抛错，整块面板不可用，故此处以源码守卫兜底）
+check('路由守卫：/mcp/toolBulk 必须带 guardPosts（handleAny([...], true)）', () => {
+  const src = readFileSync(join(root, 'src', 'routes.ts'), 'utf8')
+  const at = src.indexOf('`${API_PREFIX}/mcp/toolBulk`')
+  assert.ok(at > 0, 'toolBulk 路由缺失')
+  const block = src.slice(at, src.indexOf('/mcp/preview', at))
+  assert.ok(/handleAny\(\s*\[/.test(block), 'toolBulk 必须走 handleAny([...])')
+  assert.ok(/\],\s*true\)/.test(block), 'toolBulk 的 guardPosts 必须为 true（写端点不得裸奔）')
+})
+
 // ── projectServerName：项目 MCP 的 serverName 加路径哈希前缀（同名不同路径拆成独立服务） ──
 check('projectServerName：不同工作区同名 server 得到不同 serverName（哈希后缀隔离）', () => {
   const a = index.projectServerName('C:\\ws-a', 'codegraph')

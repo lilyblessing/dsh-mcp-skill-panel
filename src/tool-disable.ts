@@ -119,6 +119,64 @@ export async function setToolDisabled(serverName: string, fullName: string, disa
   }
 }
 
+/**
+ * 批量切换某 server 上一组工具的禁用状态（面板「全部禁用 / 全部启用 / 按过滤」）。
+ *
+ * 与逐个调用 {@link setToolDisabled} 的区别只在 IO：这里对 state.json 只做
+ * **一次** 读-改-写。prompthelper 这种 450 工具的 server 逐个写会是 450 次
+ * 合并写盘 + 450 次面板失效，实际不可用。
+ *
+ * 语义与单个开关完全一致（同一张表、同一套项目/全局作用域分派），所以批量与
+ * 单点操作可以任意交替，不存在「批量模式」这种隐藏状态。
+ * @param serverName - 目标 MCP server。
+ * @param toolNames - 工具全名（mcp__<server>__<tool>）列表；非本 server 的条目忽略。
+ * @param disabled - true=禁用这批，false=启用这批。
+ * @param persist - false 时只改内存不落盘（selftest）。
+ * @returns 实际发生变化的工具数。
+ */
+export async function setToolsDisabledBulk(
+  serverName: string,
+  toolNames: readonly string[],
+  disabled: boolean,
+  persist = true,
+): Promise<number> {
+  const prefix = `mcp__${serverName}__`
+  // 只接受本 server 的注册全名：跨 server 的误传会污染禁用表且永不生效。
+  const names = [...new Set(toolNames.filter((name) => typeof name === 'string' && name.startsWith(prefix)))]
+  if (names.length === 0) return 0
+  const owner = projectServerOwner(serverName)
+  const before = disabledToolsOf(serverName, owner).size
+
+  if (owner !== undefined) {
+    let perServer = projectDisabledTools.get(owner)
+    if (disabled && !perServer) {
+      perServer = new Map()
+      projectDisabledTools.set(owner, perServer)
+    }
+    if (perServer) {
+      for (const name of names) toggleInSet(perServer, serverName, name, disabled)
+      if (perServer.size === 0) projectDisabledTools.delete(owner)
+    }
+    if (persist) {
+      const state = await readState()
+      state.projectToolDisabled ??= {}
+      const serverMap = (state.projectToolDisabled[owner] ??= {})
+      for (const name of names) toggleInList(serverMap, serverName, name, disabled)
+      if (Object.keys(serverMap).length === 0) delete state.projectToolDisabled[owner]
+      await writeState(state)
+    }
+  } else {
+    for (const name of names) toggleInSet(disabledTools, serverName, name, disabled)
+    if (persist) {
+      const state = await readState()
+      state.toolDisabled ??= {}
+      for (const name of names) toggleInList(state.toolDisabled, serverName, name, disabled)
+      await writeState(state)
+    }
+  }
+  return Math.abs(disabledToolsOf(serverName, owner).size - before)
+}
+
 /** 内存 Set 表的开关（serverName → Set<fullName>）。 */
 function toggleInSet(table: Map<string, Set<string>>, serverName: string, fullName: string, disabled: boolean): void {
   let set = table.get(serverName)
