@@ -33,6 +33,23 @@ const REGISTER_POLL_MS = 50
 const DEFAULT_TOOL_TIMEOUT_MS = 60_000
 
 /**
+ * 中间层两个模型工具的注册名。
+ *
+ * 命名前缀铁律（2026-09-15，claude 400 取证）：**不得以 `mcp_` 开头**。
+ * 实测 claude.ai 订阅网关把 `mcp_` 前缀的工具名当作 MCP connector 保留名，
+ * 整个请求被拒为 HTTP 400 `invalid_request_error`，且错误文案被改写成
+ * 「You're out of extra usage」（与配额无关，极具误导性）。
+ * 证据：同一会话 16 秒内 486 工具（含本组）→400、484 工具（不含）→正常、
+ * 486 →400；32 工具的最小集同样复现，与工具数量/体积无关。
+ * 全部 session 统计：含本组 0/5 成功，不含本组 111/111 成功。
+ */
+// 旧名 mcp_search / mcp_call 自 0.6.0 起更名（claude 订阅网关保留 mcp_ 前缀致整体 400）
+export const MCP_SEARCH_TOOL = 'dsh_mcp_search'
+export const MCP_CALL_TOOL = 'dsh_mcp_call'
+/** 两个控制工具的名字集合（装配过滤按模型路由决定是否投放）。 */
+export const CONTROL_TOOL_NAMES: ReadonlySet<string> = new Set([MCP_SEARCH_TOOL, MCP_CALL_TOOL])
+
+/**
  * 归一化 mcp_call 的 tool 参数（2026-08-22 修补）：模型可能把 mcp_search 返回的
  * 注册全名（mcp__<server>__<tool>）直接填入 tool，无条件拼接会生成双重前缀。
  * 规则：以 mcp__ 开头视为注册全名形态 → 循环剥离本 server 前缀（兼容嵌套重复）；
@@ -47,7 +64,7 @@ export function normalizeToolName(serverName: string, toolName: string): string 
     while (name.startsWith(prefix)) name = name.slice(prefix.length)
     if (name.startsWith('mcp__')) {
       throw new Error(
-        `mcp_call: tool 参数疑似其他 MCP server 的注册全名（${JSON.stringify(toolName)}，server="${serverName}"）；请传该 server 上的裸名（如 understand_image，不带 mcp__ 前缀）`,
+        `${MCP_CALL_TOOL}: tool 参数疑似其他 MCP server 的注册全名（${JSON.stringify(toolName)}，server="${serverName}"）；请传该 server 上的裸名（如 understand_image，不带 mcp__ 前缀）`,
       )
     }
   }
@@ -601,7 +618,7 @@ async function callViaPresetViews(
     const text = contentText(result ? (result as { content?: unknown }).content : undefined)
     return text.length > 0 ? text : `MCP ${serverName}.${bareTool} 无返回内容`
   } catch (error) {
-    return `MCP ${serverName}.${bareTool} 调用异常：${msgOf(error)}（提示：tool 参数应传该 server 上的裸名；server/tool 是否存在可先 mcp_search 确认）`
+    return `MCP ${serverName}.${bareTool} 调用异常：${msgOf(error)}（提示：tool 参数应传该 server 上的裸名；server/tool 是否存在可先 ${MCP_SEARCH_TOOL} 确认）`
   } finally {
     const next = (state.refCounts.get(serverName) ?? 1) - 1
     if (next <= 0) state.refCounts.delete(serverName)
@@ -1055,7 +1072,7 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
     },
 
     async fetchInventory(serverName, waitMs) {
-      return collectInventory(ctx, caches, state, serverName, 'mcp_search', waitMs)
+      return collectInventory(ctx, caches, state, serverName, MCP_SEARCH_TOOL, waitMs)
     },
 
     async call(serverName, toolName, args, agent, signal, explicitTimeoutMs) {
@@ -1133,7 +1150,7 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
         return text.length > 0 ? text : `MCP ${serverName}.${bareTool} 无返回内容`
       } catch (error) {
         failed = true
-        return `MCP ${serverName}.${bareTool} 调用异常：${msgOf(error)}（提示：tool 参数应传该 server 上的裸名；server/tool 是否存在可先 mcp_search 确认）`
+        return `MCP ${serverName}.${bareTool} 调用异常：${msgOf(error)}（提示：tool 参数应传该 server 上的裸名；server/tool 是否存在可先 ${MCP_SEARCH_TOOL} 确认）`
       } finally {
         const next = (state.refCounts.get(serverName) ?? 1) - 1
         if (next <= 0) state.refCounts.delete(serverName)
@@ -1211,9 +1228,9 @@ function buildSummary(control: McpControlCtx): Array<{ server: string; summary: 
 
 function registerMcpSearchTool(ctx: Context, control: McpControlCtx, controller: McpCallController): () => void {
   const definition = defineTool({
-    name: 'mcp_search',
+    name: MCP_SEARCH_TOOL,
     description:
-      '检索可用的 MCP 服务器与工具目录（只读，不执行）。四种用法：① 空参数 → server 清单（含已关闭的，标注开/关）；② server=X → 该 server 的**能力摘要**（工具总数 + 前 5 个名字预览，不返回全表，避免上下文膨胀）；③ query + server → 在 X 内按需检索，返回 top-K 命中（含完整 schema），**想找某个 server 上的具体工具就用这个**；④ query → 全目录关键词检索。查到工具名后用 mcp_call(server, tool, arguments) 调用；不知道工具名先用 ②/③，不要用 ② 拉全表（工具多时传 all:true 才会返回全表）。中文连写请用空格分词（如“搜索 网页”）。',
+      `检索可用的 MCP 服务器与工具目录（只读，不执行）。四种用法：① 空参数 → server 清单（含已关闭的，标注开/关）；② server=X → 该 server 的**能力摘要**（工具总数 + 前 5 个名字预览，不返回全表，避免上下文膨胀）；③ query + server → 在 X 内按需检索，返回 top-K 命中（含完整 schema），**想找某个 server 上的具体工具就用这个**；④ query → 全目录关键词检索。查到工具名后用 ${MCP_CALL_TOOL}(server, tool, arguments) 调用；不知道工具名先用 ②/③，不要用 ② 拉全表（工具多时传 all:true 才会返回全表）。中文连写请用空格分词（如“搜索 网页”）。`,
     parameters: {
       query: { type: 'string', description: '检索关键词，按工具名/描述/参数名打分（缺省 top-K 8，上限 10）；与 server 同传即在该 server 内检索' },
       server: { type: 'string', description: '目标 MCP server 名（见空查清单）。单独传 = 返回该 server 的能力摘要 + 前 5 个工具名预览' },
@@ -1255,7 +1272,7 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx, controller:
           count: hits.length,
           limit: topK,
           hits,
-          hint: '命中即用 mcp_call（server + 裸工具名）调用；不够准就换关键词再搜，中文连写请用空格分词。',
+          hint: `命中即用 ${MCP_CALL_TOOL}（server + 裸工具名）调用；不够准就换关键词再搜，中文连写请用空格分词。`,
         })
       }
 
@@ -1285,7 +1302,7 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx, controller:
             offset,
             limit: pageLimit,
             tools: [],
-            hint: `未知 server "${server}"，空查 mcp_search 看 server 清单；中文连写请用空格分词。`,
+            hint: `未知 server "${server}"，空查 ${MCP_SEARCH_TOOL} 看 server 清单；中文连写请用空格分词。`,
           })
         }
         const all = page.tools.filter((tool) => keep(tool.name))
@@ -1309,7 +1326,7 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx, controller:
             preview,
             hint: page.hasSnapshot
               ? `共 ${page.totalCount} 个工具，此处只预览 ${preview.length} 个。用 query + server 检索具体能力（推荐，按需且不占上下文）；确需完整清单请传 all: true。`
-              : `该 server 已安装但当前没有工具（未运行或采集未成功）。可直接 mcp_call 调用它——中间层会临时拉起；若持续失败请在面板打开它后重试。`,
+              : `该 server 已安装但当前没有工具（未运行或采集未成功）。可直接 ${MCP_CALL_TOOL} 调用它——中间层会临时拉起；若持续失败请在面板打开它后重试。`,
           })
         }
         return toJson({
@@ -1338,7 +1355,7 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx, controller:
       const servers = buildSummary(control)
       const openCount = servers.filter((s) => s.open).length
       const text = [
-        `已安装 ${servers.length} 个 MCP server（${openCount} 个已打开并对模型可见，${servers.length - openCount} 个已关闭——关闭的对模型不可见，但可经 mcp_call 按需临时拉起）。`,
+        `已安装 ${servers.length} 个 MCP server（${openCount} 个已打开并对模型可见，${servers.length - openCount} 个已关闭——关闭的对模型不可见，但可经 ${MCP_CALL_TOOL} 按需临时拉起）。`,
         ...servers.map((s) => `- ${s.server} [${s.open ? '开' : '关'}]${s.tools === null ? '' : ` (${s.tools} 工具)`}: ${s.summary}`),
       ].join('\n')
       return toJson({ ok: true, kind: 'summary', summary: text, servers, count: servers.length })
@@ -1356,13 +1373,16 @@ function toJson(value: unknown): JsonValue {
 
 function registerMcpCallTool(ctx: Context, controller: McpCallController): () => void {
   const definition = defineTool({
-    name: 'mcp_call',
+    name: MCP_CALL_TOOL,
     description:
-      '调用一个 MCP 服务器上的工具。知道工具名直接调（server + 裸 tool 名），不知道先用 mcp_search 关键词搜。参数透传给远端工具。',
+      `调用一个 MCP 服务器上的工具。知道工具名直接调（server + 裸 tool 名），不知道先用 ${MCP_SEARCH_TOOL} 关键词搜。参数透传给远端工具。`,
     parameters: {
-      server: { type: 'string', required: true, description: 'MCP 服务器名（见 mcp_search 摘要）' },
+      server: { type: 'string', required: true, description: `MCP 服务器名（见 ${MCP_SEARCH_TOOL} 摘要）` },
       tool: { type: 'string', required: true, description: '该 server 上的工具名（裸名，如 understand_image；误传注册全名 mcp__<server>__<tool> 会自动归一化）' },
-      arguments: { type: 'json', description: '传给远端工具的参数字典；必须传 JSON 对象本身，不要传 JSON 字符串（兼容：误传字符串会自动解析）' },
+      // type:'object' 而非 'json'：'json' 的编译产物是**无 type 标注**的属性节点，
+      // 对严格校验 input_schema 的 provider 是不必要的风险面（2026-09-15 claude 取证期排查）。
+      // 代价：字符串形态的 arguments 会被 defineTool 前置拒绝（normalizeArguments 仍服务直调/内部路径）。
+      arguments: { type: 'object', additionalProperties: true, description: '传给远端工具的参数字典；必须传 JSON 对象本身，不要传 JSON 字符串（字符串形态会被参数校验直接拒绝）' },
     },
     output: {
       schema: { type: 'string' },

@@ -4,6 +4,21 @@ import type { Entry } from '@deepseek-ai/cordis-plugin-loader';
 import type { Catalog } from './catalog';
 import type { PresetMcpRow, PresetMcpClientConfig } from './preset-mcp';
 /**
+ * 中间层两个模型工具的注册名。
+ *
+ * 命名前缀铁律（2026-09-15，claude 400 取证）：**不得以 `mcp_` 开头**。
+ * 实测 claude.ai 订阅网关把 `mcp_` 前缀的工具名当作 MCP connector 保留名，
+ * 整个请求被拒为 HTTP 400 `invalid_request_error`，且错误文案被改写成
+ * 「You're out of extra usage」（与配额无关，极具误导性）。
+ * 证据：同一会话 16 秒内 486 工具（含本组）→400、484 工具（不含）→正常、
+ * 486 →400；32 工具的最小集同样复现，与工具数量/体积无关。
+ * 全部 session 统计：含本组 0/5 成功，不含本组 111/111 成功。
+ */
+export declare const MCP_SEARCH_TOOL = "dsh_mcp_search";
+export declare const MCP_CALL_TOOL = "dsh_mcp_call";
+/** 两个控制工具的名字集合（装配过滤按模型路由决定是否投放）。 */
+export declare const CONTROL_TOOL_NAMES: ReadonlySet<string>;
+/**
  * 归一化 mcp_call 的 tool 参数（2026-08-22 修补）：模型可能把 mcp_search 返回的
  * 注册全名（mcp__<server>__<tool>）直接填入 tool，无条件拼接会生成双重前缀。
  * 规则：以 mcp__ 开头视为注册全名形态 → 循环剥离本 server 前缀（兼容嵌套重复）；

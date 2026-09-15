@@ -1119,9 +1119,9 @@ await checkAsync('gatewayCall：loader行禁用时ensureEnabled开启后执行�
 })
 
 check('checkChildVisible：恒为双工具才 PASS', () => {
-  assert.ok(index.checkChildVisible(['mcp_search', 'mcp_call']).ok)
-  assert.ok(!index.checkChildVisible(['mcp_call']).ok)
-  assert.ok(!index.checkChildVisible(['mcp_call', 'mcp_search', 'mcp__exa__web_search_exa']).ok)
+  assert.ok(index.checkChildVisible([index.MCP_SEARCH_TOOL, index.MCP_CALL_TOOL]).ok)
+  assert.ok(!index.checkChildVisible([index.MCP_CALL_TOOL]).ok)
+  assert.ok(!index.checkChildVisible([index.MCP_CALL_TOOL, index.MCP_SEARCH_TOOL, 'mcp__exa__web_search_exa']).ok)
 })
 
 check('isolateChildScope：deny 转调 restrict 并回 disposer', () => {
@@ -1130,6 +1130,15 @@ check('isolateChildScope：deny 转调 restrict 并回 disposer', () => {
   const lift = index.isolateChildScope(childTools, ['mcp__exa__web_search_exa'])
   assert.deepEqual(got, { deny: ['mcp__exa__web_search_exa'] })
   assert.equal(lift(), 'lifted')
+})
+
+// 控制工具命名前缀铁律（2026-09-15 claude 400 取证）
+check('控制工具名不得以 mcp_ 开头（claude.ai 网关保留前缀 → HTTP 400）', () => {
+  for (const name of index.CONTROL_TOOL_NAMES) {
+    assert.ok(!/^mcp_(?!_)/.test(name), `控制工具名 ${name} 命中保留前缀 mcp_`)
+  }
+  assert.equal(index.MCP_SEARCH_TOOL, 'dsh_mcp_search')
+  assert.equal(index.MCP_CALL_TOOL, 'dsh_mcp_call')
 })
 
 if (failed) {

@@ -44,6 +44,8 @@ import { createGatewayState, disposeGatewayState, disposeGatewayStateSync, ensur
 
 export { normalizeToolName, normalizeArguments, msgOf, gatewayCall } from './mcpcall'
 export type { GatewayCallOpts, GatewayCallState } from './mcpcall'
+// 中间层控制工具名（命名前缀铁律见 mcpcall.ts：不得以 mcp_ 开头）
+export { MCP_SEARCH_TOOL, MCP_CALL_TOOL, CONTROL_TOOL_NAMES } from './mcpcall'
 import type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
 import { createDomainCaches, getSchemasView, resolveCollectScopeKey, type DomainCaches } from './collect'
 import { findPresetRowByServerName, type PresetMcpRow } from './preset-mcp'

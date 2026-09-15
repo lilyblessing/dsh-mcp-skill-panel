@@ -17,6 +17,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { McpControlCtx } from './mcpcall'
+import { MCP_SEARCH_TOOL, MCP_CALL_TOOL } from './mcpcall'
 import { messageOf } from './util'
 
 /** 网关行 entryId 前缀（连字符；冒号是 EntryTree.sep 不可用，见 B4）。 */
@@ -94,10 +95,10 @@ export function decideMount(
  */
 export function checkChildVisible(visibleNames: readonly string[]): { ok: boolean; detail: string } {
   const sorted = [...visibleNames].sort()
-  const ok = sorted.length === 2 && sorted[0] === 'mcp_call' && sorted[1] === 'mcp_search'
+  const ok = sorted.length === 2 && sorted[0] === MCP_CALL_TOOL && sorted[1] === MCP_SEARCH_TOOL
   return {
     ok,
-    detail: ok ? 'child visible == [mcp_call, mcp_search]' : `child visible unexpected: ${JSON.stringify(sorted)}`,
+    detail: ok ? `child visible == [${MCP_CALL_TOOL}, ${MCP_SEARCH_TOOL}]` : `child visible unexpected: ${JSON.stringify(sorted)}`,
   }
 }
 

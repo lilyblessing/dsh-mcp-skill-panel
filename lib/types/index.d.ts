@@ -31,6 +31,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Catalog } from './catalog';
 export { normalizeToolName, normalizeArguments, msgOf, gatewayCall } from './mcpcall';
 export type { GatewayCallOpts, GatewayCallState } from './mcpcall';
+export { MCP_SEARCH_TOOL, MCP_CALL_TOOL, CONTROL_TOOL_NAMES } from './mcpcall';
 import type { McpView, SkillsView } from './shared-types';
 export type { McpView, SkillsView, McpRow, SkillRow } from './shared-types';
 export type { DomainCaches } from './collect';
