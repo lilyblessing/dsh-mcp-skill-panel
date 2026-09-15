@@ -133,6 +133,40 @@ export function setRowConfigKeys(
     return -1
   }
 
+  /**
+   * 一个键的**值区间**占几行：标题行 + 其后所有更深缩进的续行
+   * （块映射 / 块序列 / 块标量的子行都属于这个键）。
+   *
+   * 2026-09-15 实测事故：早先覆盖时只替换标题行，`env:` 的 4 行块映射被遗留成孤儿 ——
+   *   env: { MIMO_API_KEY: ... }      ← 新写的单行 flow
+   *     MIMO_API_KEY: !!js "..."      ← 旧子行没人管
+   * 整个组合文件就此变成非法 YAML（`bad indentation of a mapping entry (389:7)`），
+   * 预设挂载失败 → 所有旧会话 resume 报错、新会话也建不出来。
+   * 覆盖/删除都必须连着值区间一起动。
+   */
+  const keyValueSpan = (at: number, limit: number, keyIndent: number): number => {
+    let span = 1
+    let i = at + 1
+    while (i < limit) {
+      if (lines[i].trim().length === 0) {
+        // 块内空行：仅当后面还有更深缩进的兄弟行时才并入（否则它是块外分隔行）
+        let j = i
+        while (j < limit && lines[j].trim().length === 0) j += 1
+        if (j >= limit) break
+        const nextIndent = /^(\s*)/.exec(lines[j])?.[1].length ?? 0
+        if (nextIndent <= keyIndent) break
+        span += j - i
+        i = j
+        continue
+      }
+      const indent = /^(\s*)/.exec(lines[i])?.[1].length ?? 0
+      if (indent <= keyIndent) break
+      span += 1
+      i += 1
+    }
+    return span
+  }
+
   /** config 块的最后一个内容行之后（空行不并入，避免把新键插到块外）。 */
   function configBlockEnd(from: number, limit: number): number {
     let last = from + 1
@@ -148,13 +182,15 @@ export function setRowConfigKeys(
 
   // 删除：config 块存在才可能删得掉
   if (configAt >= 0) {
-    const blockEnd = configBlockEnd(configAt, end)
-    const keyIndent = configKeyIndent(configAt, blockEnd)
     for (const key of remove) {
+      // 每删一个键后块形态都会变，故每轮重算块尾与键缩进
+      const blockEnd = configBlockEnd(configAt, end)
+      const keyIndent = configKeyIndent(configAt, blockEnd)
       const at = findKey(key, configAt, blockEnd, keyIndent)
       if (at < 0) continue
-      lines.splice(at, 1)
-      end -= 1
+      const span = keyValueSpan(at, blockEnd, keyIndent)
+      lines.splice(at, span)
+      end -= span
     }
   }
 
@@ -168,7 +204,10 @@ export function setRowConfigKeys(
       const at = findKey(key, configAt, blockEnd, keyIndent)
       const line = `${' '.repeat(keyIndent)}${key}: ${value}`
       if (at >= 0) {
-        lines[at] = line
+        // 覆盖：连同旧值区间一起替换，否则块映射/块序列的子行会成为孤儿（见 keyValueSpan）
+        const span = keyValueSpan(at, blockEnd, keyIndent)
+        lines.splice(at, span, line)
+        end += 1 - span
       } else {
         lines.splice(blockEnd, 0, line)
         end += 1
@@ -212,13 +251,39 @@ const PLAIN_SCALAR = /^[A-Za-z0-9_./\\:-]+$/
 const SAFE_FIRST = /^[A-Za-z0-9_./\\]/
 
 /**
+ * 裸写后会被解析成**非字符串**的标量形态。
+ *
+ * 预设组合按 `yaml.JSON_SCHEMA.extend(!!js)` 解析（cordis-plugin-include 的
+ * entryListSchema），于是 `300` 是 number、`true` 是 boolean、`~` 是 null、
+ * `.inf` 是 Infinity。env 这类值必须是字符串，裸写会**静默改类型**
+ * （实测：原始 `MIMO_TIMEOUT: '300'` 被物化成 `300`）。
+ * JSON_SCHEMA 不认 YAML 1.1 的 `yes/no/on/off`（实测仍为字符串），故无需为其加引号。
+ */
+const NON_STRING_SCALAR =
+  /^(?:~|true|false|null|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?|[-+]?0[xX][0-9a-fA-F]+|[-+]?0[oO][0-7]+|[-+]?0[bB][01]+|[-+]?\.(?:inf|nan))$/i
+
+/** 运行态的 `!!js` 表达式载体（cordis-plugin-include 的 construct 产物）。 */
+function isJsExprObject(value: unknown): value is { __jsExpr: string } {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    typeof (value as { __jsExpr?: unknown }).__jsExpr === 'string'
+  )
+}
+
+/**
  * 0.7.0：把配置值序列化成**单行 YAML**（写入预设文件用）。
  *
  * 保守策略：只在确认安全时才裸写，其余一律单引号包裹（YAML 单引号里 `'` 需写成 `''`）。
  * 数组/对象用 flow 风格（与预设里既有的 `args: ['serve', '--mcp']` 一致）。
+ * `!!js` 表达式写回**标签形态**（与 dsh 自己的 `represent` 一致），不退化成
+ * `{ __jsExpr: ... }`：两者求值等价（`interpolate` 认 `__jsExpr` 键），但标签形态
+ * 保住文件原有写法，改配置不会把用户的表达式写成另一种方言。
  */
 export function configValueToYaml(value: unknown): string {
   if (typeof value === 'boolean' || typeof value === 'number') return String(value)
+  if (isJsExprObject(value)) return `!!js ${JSON.stringify(value.__jsExpr)}`
   if (Array.isArray(value)) {
     const items = value.map((v) => configValueToYaml(v))
     return `[${items.join(', ')}]`
@@ -228,7 +293,7 @@ export function configValueToYaml(value: unknown): string {
     return `{ ${entries.join(', ')} }`
   }
   const s = String(value ?? '')
-  if (s.length > 0 && PLAIN_SCALAR.test(s) && SAFE_FIRST.test(s)) return s
+  if (s.length > 0 && PLAIN_SCALAR.test(s) && SAFE_FIRST.test(s) && !NON_STRING_SCALAR.test(s)) return s
   return `'${s.replace(/'/g, "''")}'`
 }
 

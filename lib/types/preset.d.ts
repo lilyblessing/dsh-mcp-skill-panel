@@ -42,6 +42,9 @@ export type EditableConfigKey = (typeof EDITABLE_CONFIG_KEYS)[number];
  *
  * 保守策略：只在确认安全时才裸写，其余一律单引号包裹（YAML 单引号里 `'` 需写成 `''`）。
  * 数组/对象用 flow 风格（与预设里既有的 `args: ['serve', '--mcp']` 一致）。
+ * `!!js` 表达式写回**标签形态**（与 dsh 自己的 `represent` 一致），不退化成
+ * `{ __jsExpr: ... }`：两者求值等价（`interpolate` 认 `__jsExpr` 键），但标签形态
+ * 保住文件原有写法，改配置不会把用户的表达式写成另一种方言。
  */
 export declare function configValueToYaml(value: unknown): string;
 /** 把一组配置键/值转成 setRowConfigKeys 需要的「已序列化标量」形态。 */

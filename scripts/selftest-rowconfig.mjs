@@ -111,8 +111,103 @@ check('⑦d 数组 flow（`--` 开头的项单独加引号，其余裸写）', c
 check('⑦d2 无特殊字符的数组项裸写', configValueToYaml(['serve', 'mcp']), '[serve, mcp]')
 check('⑦e 布尔', configValueToYaml(true), 'true')
 check('⑦f 数字', configValueToYaml(30000), '30000')
-check('⑦g 对象 flow', configValueToYaml({ A: '1', B: 2 }), '{ A: 1, B: 2 }')
+// ⑦g 对象 flow。注意 A 是**字符串** '1' → 必须加引号保住类型：
+// 裸写 `1` 会被 JSON_SCHEMA 解析成 number，正是本次修的「静默改类型」缺陷。
+check('⑦g 对象 flow（字符串数字加引号保类型）', configValueToYaml({ A: '1', B: 2 }), "{ A: '1', B: 2 }")
 check('⑦h 稳定性（键排序）', configKeysToYamlText({ b: 1, a: 2 }), 'a: 2\nb: 1')
+
+// ⑧ 覆盖「块映射值」的键：旧子行必须一起替换，不能留孤儿。
+//    2026-09-15 实测事故：早先只替换标题行，`env:` 的块映射子行被遗留 →
+//    组合文件变成非法 YAML（bad indentation of a mapping entry (389:7)）→
+//    预设挂载失败 → 所有旧会话 resume 报错、新会话也建不出来。
+const fixture3 = [
+  '- id: mcp-mimo-image',
+  '  disabled: true',
+  '  config:',
+  '    serverName: mimo-image',
+  '    transport: stdio',
+  '    command: python.exe',
+  "    args: ['-u', server.py]",
+  '    env:',
+  "      MIMO_API_KEY: !!js \"process.env.MIMO_API_KEY || ''\"",
+  '      MIMO_MODEL: mimo-v2.5',
+  '    toolCallTimeoutMs: 300000',
+  '',
+  '- id: mcp-next',
+  '  config:',
+  '    serverName: next',
+  '',
+].join('\n')
+
+const replaced = setRowConfigKeys(fixture3, 'mcp-mimo-image', { env: '{ A: 1 }' })
+check(
+  '⑧ 覆盖块映射值 → 子行一并替换（无孤儿）',
+  replaced,
+  [
+    '- id: mcp-mimo-image',
+    '  disabled: true',
+    '  config:',
+    '    serverName: mimo-image',
+    '    transport: stdio',
+    '    command: python.exe',
+    "    args: ['-u', server.py]",
+    '    env: { A: 1 }',
+    '    toolCallTimeoutMs: 300000',
+    '',
+    '- id: mcp-next',
+    '  config:',
+    '    serverName: next',
+    '',
+  ].join('\n'),
+)
+check('⑧b 无遗留子行', /MIMO_API_KEY/.test(replaced), false)
+check('⑧c 相邻行未被误伤', replaced.includes('  config:\n    serverName: next'), true)
+check('⑨ 覆盖块映射后幂等', setRowConfigKeys(replaced, 'mcp-mimo-image', { env: '{ A: 1 }' }), replaced)
+
+// ⑩ 删除带块映射值的键 → 子行一起删（原实现只删标题行，同类事故）
+const removed = setRowConfigKeys(fixture3, 'mcp-mimo-image', {}, ['env'])
+check(
+  '⑩ 删除块映射值键 → 子行一并删除',
+  removed,
+  [
+    '- id: mcp-mimo-image',
+    '  disabled: true',
+    '  config:',
+    '    serverName: mimo-image',
+    '    transport: stdio',
+    '    command: python.exe',
+    "    args: ['-u', server.py]",
+    '    toolCallTimeoutMs: 300000',
+    '',
+    '- id: mcp-next',
+    '  config:',
+    '    serverName: next',
+    '',
+  ].join('\n'),
+)
+check('⑩b 删除后无残留', /!!js|MIMO_MODEL/.test(removed), false)
+
+// ⑪ `!!js` 表达式写回标签形态（与 dsh 自己的 represent 一致），不降级成 { __jsExpr: ... }
+check('⑪a !!js 标签保留', configValueToYaml({ __jsExpr: "process.env.K || ''" }), '!!js "process.env.K || \'\'"')
+check('⑪b 嵌套 !!js 不降级', configValueToYaml({ env: { K: { __jsExpr: 'x' } } }), '{ env: { K: !!js "x" } }')
+check(
+  '⑪c 真实 env 往返（!!js + 数字串保字符串）',
+  configValueToYaml({
+    MIMO_API_KEY: { __jsExpr: "process.env.MIMO_API_KEY || process.env.XIAOMI_API_KEY || ''" },
+    MIMO_MODEL: 'mimo-v2.5',
+    MIMO_TIMEOUT: '300',
+  }),
+  '{ MIMO_API_KEY: !!js "process.env.MIMO_API_KEY || process.env.XIAOMI_API_KEY || \'\'", MIMO_MODEL: mimo-v2.5, MIMO_TIMEOUT: \'300\' }',
+)
+
+// ⑫ 歧义标量必须加引号：组合按 JSON_SCHEMA 解析，裸写会静默改类型
+check('⑫a 数字串加引号', configValueToYaml('300'), "'300'")
+check('⑫b 布尔串加引号', configValueToYaml('true'), "'true'")
+check('⑫c null 串加引号', configValueToYaml('null'), "'null'")
+check('⑫d 真布尔仍裸写', configValueToYaml(true), 'true')
+check('⑫e 真数字仍裸写', configValueToYaml(300), '300')
+check('⑫f 路径仍裸写', configValueToYaml('D:\\a\\b'), 'D:\\a\\b')
+check('⑫g 普通字符串仍裸写', configValueToYaml('mimo-v2.5'), 'mimo-v2.5')
 
 if (failed > 0) {
   console.error(`\nrowconfig selftest FAILED: ${failed} check(s)`)
