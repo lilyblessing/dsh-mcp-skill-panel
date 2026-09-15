@@ -27,12 +27,29 @@ A settings-page panel that turns your **MCP servers** and **Skill catalog** into
 | 🟢 **Real-time MCP toggle** | Disable → loader entry is disposed (connection closed + all `mcp__<server>__*` tools unregistered), tools disappear from the model catalog immediately and their schema tokens are freed; enable → reconnect + tools restored, **no restart** |
 | 🧠 **Skill toggle** | Injects/removes `disable-model-invocation: true` in SKILL.md frontmatter; the model catalog updates in real time |
 | 📊 **Backfill while disabled** | Disabled MCP cards still show "N tools / ~N tokens in catalog" (last-good snapshot from the private catalog), so you can decide whether re-enabling is worth the context cost |
-| 🤖 **AI middle layer (optional switch)** | With `autoManage` on: **disabled MCP servers are hidden from the model** and used on demand via `mcp_search` (top-K catalog search with exact schemas) and `mcp_call` (keep-alive enable → in-plugin execute → idle 30s auto reaping); **servers you enabled stay visible** (e.g. memory for high-sensitivity recall, filesystem for direct IO); AI-temporarily-enabled servers never pollute context |
+| 🤖 **AI middle layer (optional switch)** | With `autoManage` on: **disabled MCP servers are hidden from the model** and used on demand via `dsh_mcp_search` (top-K catalog search with exact schemas) and `dsh_mcp_call` (keep-alive enable → in-plugin execute → idle 30s auto reaping); **servers you enabled stay visible** (e.g. memory for high-sensitivity recall, filesystem for direct IO); AI-temporarily-enabled servers never pollute context |
 | 🔒 **Your toggles are never overridden by the model** | The reaper only reclaims servers that *AI* enabled from a disabled state; servers you manually enabled are never auto-disabled (toggle clears AI marks) |
 | 💾 **Survives restarts** | MCP state is materialized into the preset composition file via the plugin state file (`~/.dsh/dsh-mcp-skill-panel/state.json`); catalog snapshots persist (`catalog.json`) and backfill after restart |
 | ⚡ **Fast** | Toggles flip instantly (optimistic UI + server confirmation); domain caches with event-driven invalidation (`tools/change` / `skills/change`); the MCP tab never triggers skill discovery |
+| 🧮 **Tool-level bulk toggle** | `POST /mcp/toolBulk` writes a whole batch in one read-modify-write (never N writes): `toolNames` is **three-state** — omitted = every tool in that server's current catalog / array = exact set (`[]` is a legal no-op) / non-array, or non-empty but matching nothing = 400 (never silently degrades to "all", never silently no-ops). The response carries `ignoredToolNames` for names that no longer exist in the catalog view |
+| 📈 **Effective stats** | Tool and token counts are shown twice: catalog total and **tool-level enabled count** (recomputed with the same predicate as the assembly filter — `isToolDisabled` + session workspace), so disabling 400 tools no longer still shows 450. **Boundary**: only tool-level disables are subtracted; server-level hiding (AI-temporary / `middleLayerHides='all'`) and the project-mcp workspace filter are not |
+| 🎯 **Tool budget** | `toolBudget` draws a red line (e.g. 350) on the **all-tools** count (including read/edit/bash/skill); the source is the request face first — `toolsAllSource='request'` (the assembled tool list of the session's last persisted request) — falling back to the registry figure `'registry'`, with the source **labeled on the card** (the registry figure is an approximation) |
+| 🧭 **Per-model middle layer** | `autoManageByRoute` enables the middle layer per `provider` or `provider/model`; lookup order is `provider/model` → `provider` → the `autoManage` master switch. If any override is true the middle layer is mounted even with the master switch off (that model gets `dsh_mcp_search` / `dsh_mcp_call`), other models keep the direct form |
+| 🙈 **`middleLayerHides`** | Hidden range for the middle layer, default `'disabled'` (hide disabled servers only); `'all'` hides **even enabled servers** from the model's assembly face so the model takes everything through the middle layer — it only changes this turn's visibility, never the tool registry or the `dsh_mcp_call` execution path |
 | 🌐 **Bilingual UI** | All copy zh/en, follows the DSH UI language; light/dark theme aware |
 | 🪶 **Zero context footprint** | The plugin itself registers no model tools and consumes no injection surface (with the switch off it behaves like it isn't installed) |
+
+## 🧾 Config items
+
+Panel-writable config lives in `~/.dsh/dsh-mcp-skill-panel/state.json` (it takes precedence over the cordis `config` block) and is read/written via `GET/POST /config`:
+
+| Config | Values | Description |
+| --- | --- | --- |
+| `autoManage` | `false` (default) / `true` | Master switch for the AI middle layer (mode 1 ↔ mode 2) |
+| `applyMode` | `immediate` (default) / `next-session` | When manual toggles take effect (see below) |
+| `toolBudget` | positive integer / empty | Tool-count red line over **all tools** (including read/edit/bash/skill); empty = no warning. The number is only a configurable default — see Known limitations |
+| `autoManageByRoute` | `{ "<provider>": bool, "<provider>/<model>": bool }` | **Per-model** middle layer; lookup order `provider/model` → `provider` → `autoManage`. Edited one key at a time via `POST /config`'s `routeOverride: { key, value }` (`value: null` deletes the key); any true override mounts the middle layer |
+| `middleLayerHides` | `'disabled'` (default) / `'all'` | Hidden range: `'disabled'` hides disabled servers only; `'all'` hides enabled servers too |
 
 ## 🏗️ Two modes (the "AI Middle Layer" switch in the panel)
 
@@ -51,7 +68,7 @@ stateDiagram-v2
     state Mode2Middle {
         direction LR
         M2: Disabled MCP servers hidden from model
-        M2a: Model calls them on demand via mcp_search / mcp_call
+        M2a: Model calls them on demand via dsh_mcp_search / dsh_mcp_call
         M2b: Servers you enabled stay visible
         M2c: AI-temporarily-enabled servers never pollute context
     }
@@ -68,8 +85,8 @@ flowchart TD
     C -- ok --> D{server state?}
     D -- user-enabled disabled=false and not AI-enabled --> K
     D -- user-disabled disabled=true --> F[filter out: hidden from model]
-    D -- AI-temporary mcp_call keep-alive --> F
-    F --> G[when needed: mcp_search / mcp_call on demand]
+    D -- AI-temporary dsh_mcp_call keep-alive --> F
+    F --> G[when needed: dsh_mcp_search / dsh_mcp_call on demand]
 ```
 
 ## 📦 Install
@@ -98,9 +115,10 @@ Prebuilt artifacts are committed (`lib/`), so the git-source one-liner installs 
 | --- | --- | --- |
 | GET | `/api/mcp-skill-panel/state?session=<id>&part=<mcp\|skills\|all>` | Catalog snapshot; `part` scopes the fetch (the UI lazy-loads per tab), defaults to `all`; without session, the first root agent is used |
 | POST | `/api/mcp-skill-panel/mcp/toggle` | `{ entryId, disabled }` |
+| POST | `/api/mcp-skill-panel/mcp/toolBulk` | `{ serverName, disabled, toolNames?, session? }` tool-level **bulk** toggle. `toolNames` is **three-state**: omitted = all tools in the server's current catalog; array = exact set (`[]` is a legal no-op → 200 + `changed: 0`); **non-array**, or non-empty but matching **nothing**, → 400 (never silently treated as "all"). No catalog at all (never started, no snapshot) → 400 too. Response `{ serverName, disabled, disabledTools, disabledCount, changed, ignoredToolNames }`, where `ignoredToolNames` are names you listed that are not in the current catalog view (the 60s cache may be stale — this exposes "thought I changed N, actually changed an intersection") |
 | POST | `/api/mcp-skill-panel/skill/toggle` | `{ name, disabled }` |
-| GET | `/api/mcp-skill-panel/config` | Read the AI middle layer switch state |
-| POST | `/api/mcp-skill-panel/config` | `{ autoManage: boolean }` toggle the AI middle layer (persisted to state.json) |
+| GET | `/api/mcp-skill-panel/config` | Read panel config: `autoManage` / `applyMode` / `autoManageByRoute` / `autoManageMounted` (is the middle layer mounted right now) / `middleLayerHides` / `toolBudget` |
+| POST | `/api/mcp-skill-panel/config` | `{ autoManage?, applyMode?, toolBudget?, middleLayerHides?, routeOverride? }`, persisted to state.json. `toolBudget`: `null` clears, only finite values > 0 accepted; `middleLayerHides`: `'disabled'` \| `'all'`; `routeOverride`: `{ key: '<provider>' \| '<provider>/<model>', value: boolean \| null }` to add/remove one per-model override (`null` deletes). Only `autoManage` / `middleLayerHides` / `routeOverride` remount the middle layer (`tools/change` → that turn's prefix cache misses) |
 | GET | `/api/mcp-skill-panel/debug` | Catalog collection diagnostics (event counters / snapshot telemetry / in-memory catalog summary) |
 | POST | `/api/mcp-skill-panel/debug/collect` | Trigger one catalog snapshot manually |
 | GET | `/api/mcp-skill-panel/token` | Per-process random token (the panel fetches it and attaches `x-panel-token` on every POST) |
@@ -117,7 +135,7 @@ flowchart LR
         C[catalog collector<br/>tools/change incremental + last-good persistence]
         L[loader toggle<br/>resolve + update disabled]
         F[assembly filter<br/>system-prompt/assemble]
-        T[mcp_search / mcp_call<br/>keep-alive enable + idle reaping]
+        T[dsh_mcp_search / dsh_mcp_call<br/>keep-alive enable + idle reaping]
         R --> L
         C --> R
         F --> C
@@ -134,16 +152,16 @@ flowchart LR
 
 **Why persistence takes two steps**: the preset tree's `write()` is an explicit no-op, and `dsh-agent-presets` detects preset-file changes via a `{mtimeMs, size}` stamp — writing that file at runtime triggers a standing remount without disposing old instances (serverName conflicts, session creation failures — a 0.1.0 incident). So toggles only write the plugin state file, and the intent is materialized into the preset file during `apply` (early startup, before the standing mount).
 
-**Middle-layer call chain** (`mcp_call` against a disabled server):
+**Middle-layer call chain** (`dsh_mcp_call` against a disabled server):
 
 ```mermaid
 sequenceDiagram
     participant M as Model
-    participant P as Plugin (mcp_call)
+    participant P as Plugin (dsh_mcp_call)
     participant L as loader
     participant S as MCP server
 
-    M->>P: mcp_call(server, tool, args)
+    M->>P: dsh_mcp_call(server, tool, args)
     P->>L: entry.update({disabled:false}) (record AI owner)
     L->>S: spawn / reconnect
     P->>P: wait for registration (poll tools.get + tools/change)
@@ -152,6 +170,8 @@ sequenceDiagram
     P-->>M: text result
     Note over P: refcount -1; idle 30s then reap (AI-enabled only)
 ```
+
+> **Control tool names (since 0.6.0)**: the two control tools are **`dsh_mcp_search`** / **`dsh_mcp_call`** (the old `mcp_search` / `mcp_call` are deprecated — the upstream gateway parses an `mcp_` prefix as an MCP tool and returns 400). Old names in this page's changelog entries and in historical archives such as `decisions/` and `docs/*patch-notes*.md` are records of their time and are left as-is.
 
 **Catalog collection**: `tools/change` (root listener, 150ms debounce) incrementally snapshots enabled servers; when `agents` is unavailable in the apply context it falls back to `agentPresets.standingKeyFor()` to resolve the scope (v0.4.1 fix); empty snapshots never overwrite the on-disk last-good; `catalog.json` is written atomically (tmp + rename, 0600).
 
@@ -165,7 +185,7 @@ sequenceDiagram
 | Persistence | Disable, restart dsh | Server stays disabled |
 | Skill toggle | Flip a skill | Card flips instantly without bouncing; model catalog updated |
 | External change | Session A disables an MCP, session B opens the panel | Fresh state without manual refresh |
-| AI middle layer | Turn autoManage on in the panel | Disabled servers hidden from the model, `mcp_search`/`mcp_call` available; user-enabled servers show the "visible" badge |
+| AI middle layer | Turn autoManage on in the panel | Disabled servers hidden from the model, `dsh_mcp_search`/`dsh_mcp_call` available; user-enabled servers show the "visible" badge |
 | Reaper safety | Let a model-called server idle 30s | AI-temporarily-enabled server auto-disables; user-enabled servers are never reclaimed |
 
 ## ⚠️ Known limitations
@@ -177,7 +197,10 @@ sequenceDiagram
 - **Persistence lag**: toggles take effect live; surviving a restart depends on materialization at next startup — if the plugin is hot-updated while sessions are running, this process does not materialize; the next restart applies it.
 - **Manually editing MCP rows in the preset file** (e.g. removing `disabled: true` by hand) removes that row from the plugin's management (your edit is respected at next startup).
 - Writing SKILL.md at runtime is safe (the skill-filesystem watcher expects edits); writing the preset composition file at runtime triggers the stamp-remount incident, which the plugin deliberately never does.
-- The capability summary (`mcp_search` with no args) only covers servers that have a catalog snapshot or a configured `serverSummary`; servers that never started successfully (e.g. codegraph) are not listed.
+- The capability summary (`dsh_mcp_search` with no args) only covers servers that have a catalog snapshot or a configured `serverSummary`; servers that never started successfully (e.g. codegraph) are not listed. **Caliber note**: with `middleLayerHides='all'` the summary is worded as "taken through the middle layer" and no longer claims a server is "visible to the model" — visibility follows the actual assembly result (with `'all'`, even enabled servers are hidden from the model face).
+- **"Effective stats" means tool-level enabled count, not "what actually enters the context"**: it only subtracts tool-level disables (same predicate as the assembly filter). **Boundary**: it does not subtract server-level hiding (servers kept alive by `dsh_mcp_call`, or every server under `middleLayerHides='all'`) nor the project-mcp workspace filter — it answers "how many tools this server has enabled", not "how many the model sees this turn".
+- **The tool budget cap is a configurable default / example only**: `toolBudget` and the number in the panel placeholder (e.g. Grok 350) are examples/defaults, not an assertion or hard limit for any provider (caps vary by model and account — fill in your own measurement). The "all tools" number prefers the **request face** (`toolsAllSource='request'`, the assembled tool list of the session's last persisted request, one turn behind); when unavailable it falls back to the registry figure (`'registry'`) and the card states the source — the registry figure does not subtract server-level hiding or the project workspace filter, so it is an approximation.
+- **Control tool `arguments` must be a JSON object**: `dsh_mcp_call`'s `arguments` is declared as an object, so **a string form is rejected up front by argument validation** (`invalid arguments: "arguments" must be an object`). This tightening is intentional (since 0.6.0) — older versions transparently parsed a JSON string; now pass the object form the tool description asks for.
 - **Control-endpoint auth**: writes are gated by a per-process random token (`x-panel-token`), auto-attached by the same-origin panel; GET reads stay open. The host webServer has no auth layer of its own — if you expose the listener on `0.0.0.0`, rely on external network isolation.
 
 ## 🛠️ Development
