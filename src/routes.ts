@@ -5,6 +5,7 @@
  * defineHandler 统一 method 校验 / 异步错误响应 / {ok:true,...} 包装。
  */
 import { randomBytes } from 'node:crypto'
+import { StringDecoder } from 'node:string_decoder'
 import type { Context } from '@deepseek-ai/cordis'
 import { mkdir, readFile, writeFile, rename, access } from 'node:fs/promises'
 import { basename, dirname, join, parse as parsePath } from 'node:path'
@@ -72,17 +73,38 @@ function ok(res: Res, data: object): void {
   json(res, 200, { ok: true, ...data })
 }
 
+/**
+ * 读请求体（上限 MAX_BODY_BYTES 字节）。
+ *
+ * P1-2 修复（2026-09-15）：
+ *  ① 拼串改走 StringDecoder：原先 `body += String(chunk)`，多字节字符正好跨 chunk 边界时
+ *     两个半个字符各自被 String(chunk) 解成 U+FFFD（乱码）——任何含中文的 body
+ *     （例如中文 cwd / 中文 args / skill 描述）在多包到达下都会损坏。
+ *     长度同理改按字节计（Buffer.byteLength），不再按「解码后字符数」估。
+ *  ② 超限分支先解绑监听器再 destroy：原先只 destroy，request 上仍挂着 data/end/error
+ *     三个闭包（闭包持有已 reject 的 promise 与 body 累积串）→ 每个被拒请求泄漏一份。
+ *     正常结束同样显式解绑（同一 cleanup 路径）。
+ */
 function readBody(req: Req): Promise<string> {
   return new Promise((resolve, reject) => {
+    const decoder = new StringDecoder('utf8')
+    let bytes = 0
     let body = ''
     const onData = (chunk: Buffer | string) => {
-      body += String(chunk)
-      if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) {
+      bytes += Buffer.byteLength(chunk, 'utf8')
+      if (bytes > MAX_BODY_BYTES) {
+        // 先清理再 destroy：只移除本函数挂的监听器（不用 removeAllListeners，
+        // 避免误删宿主/其它插件挂在同一请求上的监听器）。
+        cleanup()
         req.destroy()
         reject(new Error(`body exceeds ${MAX_BODY_BYTES} bytes`))
+        return
       }
+      body += typeof chunk === 'string' ? chunk : decoder.write(chunk)
     }
     const onEnd = () => {
+      // decoder.end() 冲掉解码器里未凑齐的尾字节（截断的多字节序列在此处才成型）
+      body += decoder.end()
       cleanup()
       resolve(body)
     }
@@ -507,6 +529,76 @@ async function describeRow(server: string): Promise<Record<string, unknown>> {
     }
   }
   return out
+}
+
+/**
+ * GET 回传脱敏占位（P1-1，2026-09-15）。
+ *
+ * 问题：/mcp/rowConfig 与 /debug/rowConfig 的 GET 经 describeRow 回传 **求值后** 的
+ * env/headers（里面通常就是 token / API key），而这两个 GET 端点按设计**不要求**
+ * x-panel-token（「读端点开放、写操作鉴权」）——于是任何本地页面/脚本一发起 GET
+ * 就能把 secrets 原样取走，写侧却要令牌，防线是反的。
+ *
+ * 边界：脱敏**只发生在 GET/POST 响应体的组装处**，describeRow 内部仍返回真值
+ * （POST 的「live 现值 → set/unset」合并必须基于真值，否则改 cwd 会把 env 一并
+ * 写成占位符）；存储、live 配置、意图落盘一律不动，POST 写侧照收真值。
+ */
+const MASKED_VALUE = '***MASKED***'
+const MASK_KEYS = ['env', 'headers'] as const
+
+/** 浅拷 + 置换敏感段：键名保留（面板要能看出「有哪些 key」），值一律换成固定占位。 */
+function maskSecrets(config: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...config }
+  for (const key of MASK_KEYS) {
+    const value = out[key]
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) continue
+    const masked: Record<string, string> = {}
+    for (const name of Object.keys(value as Record<string, unknown>)) masked[name] = MASKED_VALUE
+    out[key] = masked
+  }
+  return out
+}
+
+/**
+ * F3b（2026-09-15）哨兵：**占位符即「保留原值」**。
+ *
+ * 问题：F3 让 GET 回传把 env/headers 的值换成 MASKED_VALUE，而面板 client
+ * （views.tsx RowConfigModal）是「读回显 → 进文本框 → 整体 POST 回写」结构：
+ * 用户打开弹窗只改 cwd 就点保存，也会把占位符当真值写回 → 真 token 被抹掉。
+ *
+ * 修法（纯后端，client 不动）：写侧把占位符解释成"这一条保持 live 现值"——
+ *   · 占位值 + live 有对应键 → 恢复 live 真值；
+ *   · 占位值 + live 无对应键 → **丢弃该条**（绝不把占位符本身存进去）；
+ *   · 非占位值 → 照收（真轮换 token 必须生效）；被 unset 删掉的键不会出现在 next 里。
+ * next[key] 非对象（字符串/数组/null）原样放过，交给 validateRowConfig 判错。
+ */
+function unmaskEcho(next: Record<string, unknown>, live: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...next }
+  for (const key of MASK_KEYS) {
+    const incoming = out[key]
+    if (incoming === null || typeof incoming !== 'object' || Array.isArray(incoming)) continue
+    const base = live[key]
+    const liveMap =
+      base !== null && typeof base === 'object' && !Array.isArray(base) ? (base as Record<string, unknown>) : {}
+    const merged: Record<string, unknown> = {}
+    for (const name of Object.keys(incoming as Record<string, unknown>)) {
+      const value = (incoming as Record<string, unknown>)[name]
+      if (value !== MASKED_VALUE) {
+        merged[name] = value
+        continue
+      }
+      if (Object.prototype.hasOwnProperty.call(liveMap, name)) merged[name] = liveMap[name]
+    }
+    out[key] = merged
+  }
+  return out
+}
+
+/** describeRow 回传体的脱敏包装（GET 回传与 POST 的 before/after/willWrite 回显共用）。 */
+function maskDescribed(described: Record<string, unknown>): Record<string, unknown> {
+  const config = described.config
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) return described
+  return { ...described, config: maskSecrets(config as Record<string, unknown>) }
 }
 
 /**
@@ -1020,7 +1112,8 @@ export function makeRoutes(
             const server = (q.get('server') ?? '').trim()
             if (!server) throw new Error('server is required')
             const described = await describeRow(server)
-            return { ...described, editableKeys: EDITABLE_CONFIG_KEYS }
+            // P1-1：GET 无令牌即回传 → 回传体脱敏（真值只在写侧与服务端内部流转）
+            return { ...maskDescribed(described), editableKeys: EDITABLE_CONFIG_KEYS }
           },
         },
         {
@@ -1042,10 +1135,14 @@ export function makeRoutes(
             if (badKeys.length > 0) throw new Error(`不允许的配置键：${badKeys.join(', ')}`)
 
             // 合并成新的完整配置：live 现值 → 应用 set/unset
+            // （described 在此必须是**未脱敏的真值**，否则一次只改 cwd 的保存会把
+            //   env/headers 整体写成占位符 → 真 secrets 被抹掉）
             const live = (described.config ?? {}) as Record<string, unknown>
-            const nextConfig: Record<string, unknown> = { ...live }
+            let nextConfig: Record<string, unknown> = { ...live }
             for (const key of body.unset ?? []) delete nextConfig[key]
             for (const [key, value] of Object.entries(body.set ?? {})) nextConfig[key] = value
+            // F3b：回显里的占位符 = 「保留原值」（面板整表单回写时不许抹掉真 secrets）
+            nextConfig = unmaskEcho(nextConfig, live)
             validateRowConfig(nextConfig)
 
             // ② 意图落盘（运行期唯一安全的写面）
@@ -1057,7 +1154,8 @@ export function makeRoutes(
                 ? { ok: false, error: 'skipped (apply:false)' }
                 : await applyRowConfigToLive(server, nextConfig)
             invalidateMcp()
-            return { ok: true, server, applied, after: await describeRow(server) }
+            // P1-1：after 回显同样脱敏（能证明「写入生效」而不把 secrets 回吐给调用方）
+            return { ok: true, server, applied, after: maskDescribed(await describeRow(server)) }
           },
         },
       ], true),
@@ -1078,7 +1176,7 @@ export function makeRoutes(
             const q = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams
             const server = (q.get('server') ?? '').trim()
             if (!server) throw new Error('server is required')
-            return await describeRow(server)
+            return maskDescribed(await describeRow(server))
           },
         },
         {
@@ -1098,13 +1196,17 @@ export function makeRoutes(
             const entry = findStandingEntryByServer(server)
             if (!entry) throw new Error(`standing 行未找到：${server}`)
             const before = await describeRow(server)
-            const next = { ...((entry.options.config ?? {}) as Record<string, unknown>) }
+            const live = (entry.options.config ?? {}) as Record<string, unknown>
+            let next: Record<string, unknown> = { ...live }
             for (const key of body.unset ?? []) delete next[key]
             for (const [key, value] of Object.entries(body.set ?? {})) next[key] = value
+            // F3b：同 /mcp/rowConfig —— 基底是 live 真值，占位符即「保留原值」
+            // （dry-run 的 willWrite 仍走 maskSecrets，不回吐真值：F3 已定边界不动）
+            next = unmaskEcho(next, live)
             const allowed = ['serverName', 'transport', 'command', 'args', 'env', 'cwd', 'url', 'headers', 'toolCallTimeoutMs', 'failOnStartupError']
             const rejected = Object.keys(next).filter((k) => !allowed.includes(k))
             if (rejected.length > 0) throw new Error(`不允许的配置键：${rejected.join(', ')}`)
-            if (body.update === false) return { dryRun: true, before, willWrite: next }
+            if (body.update === false) return { dryRun: true, before: maskDescribed(before), willWrite: maskSecrets(next) }
             let updateError: string | null = null
             try {
               await entry.update({ config: next })
@@ -1114,7 +1216,7 @@ export function makeRoutes(
             // 等一拍让 fiber 重建，再回报现场（同 entryId 是否还在 standing 树里、
             // 是否仍在运行、配置是否已变）—— 这就是"能否热改配置"的判据。
             await new Promise((resolve) => setTimeout(resolve, 1200))
-            return { updateError, before, after: await describeRow(server) }
+            return { updateError, before: maskDescribed(before), after: maskDescribed(await describeRow(server)) }
           },
         },
       ], true),
