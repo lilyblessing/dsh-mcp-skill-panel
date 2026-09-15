@@ -51,6 +51,7 @@ import { createDomainCaches, getSchemasView, resolveCollectScopeKey, type Domain
 import { findPresetRowByServerName, type PresetMcpRow } from './preset-mcp'
 import { makeRoutes, setRowConfigApplyHook } from './routes'
 import { readState, writeState, setStateAiOwner, clearStateAiOwner } from './state'
+import { installRouteServices, type RouteDecision, type RouteServices } from './model-route'
 import { syncPresetFiles } from './preset'
 import { applyPendingMcp } from './pending'
 import { installProjectMcp, rebuildOwnersFromState } from './project-mcp'
@@ -118,6 +119,8 @@ export { loadDisabledTools, setToolDisabled, setToolsDisabledBulk, isToolDisable
 // rc.1 standing 组合 preset 行解析（selftest 回归护栏：parsePresetMcpText 文本抽取 + mcp-anki 例外）
 export { parsePresetMcpText, findPresetRowByServerName, presetConfigOf } from './preset-mcp'
 export type { PresetMcpRow, PresetMcpClientConfig, PresetMcpParsed } from './preset-mcp'
+// 按模型分流（selftest 回归护栏：三级回退 + 查表优先级）
+export { resolveRoute, routeDecision, routeKey, type ModelRoute, type RouteDecision } from './model-route'
 
 export const name = 'runtime-inventory'
 
@@ -172,6 +175,20 @@ export interface CatalogRuntime {
   autoManage: boolean
   /** 动态切换 AI 中间层（过滤 + mcp_search/mcp_call + 回收器）。 */
   applyAutoManage: (on: boolean) => void
+  /**
+   * 某 agent（缺省=当前解析不到）当前的中间层判定，面板与诊断共用。
+   *
+   * C1（P3a 接线）：本批**恒返回总开关** `{on: autoManage, source: 'master'}` ——
+   * 行为与现状逐字一致，便于独立验证「零行为变化」。按模型判定的落地在 P3b
+   * （届时改为 `routeDecision(resolveRoute(routeServices, agent), autoManage, autoManageByRoute)`）。
+   */
+  decisionFor: (agent: Agent | undefined) => RouteDecision
+  /**
+   * 可选服务 holder（sessionProjections / agentDefaultModel / llm），路由解析用。
+   * 漏掉任一服务时 resolveRoute 静默降级（只走剩下的回退级），故到位情况必须
+   * 可见 —— 见 diag.routeServices（/debug 原样回显）。
+   */
+  routeServices: RouteServices
   /** 最近一次成功写盘时间（防抖合并用）。 */
   lastPersistAt: number | null
   /** 防抖挂起的写盘 timer（ctx.timeout 创建，ctx 销毁自动清理）。 */
@@ -191,6 +208,12 @@ export interface CatalogRuntime {
     lastAgentList: number | null
     loadedAt: number | null
     loadedServers: number | null
+    /**
+     * C1（评审风险 1）：路由服务（sessionProjections / agentDefaultModel / llm）
+     * 是否**已到位**。三者任一缺失时按模型分流会静默降级为只看总开关（无报错），
+     * 所以必须在 /debug 的返回里显式回显（/debug 的 `diag` 段原样回传本对象）。
+     */
+    routeServices: { projections: boolean; defaultModel: boolean; llm: boolean }
   }
 }
 
@@ -526,6 +549,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     // 初始值由下方 applyAutoManage 赋值（control/controller 构建后）
     autoManage: false,
     applyAutoManage: () => {},
+    // 初始值由下方 installRouteServices / decisionFor 赋值（服务 holder 建立后）
+    decisionFor: () => ({ on: false, source: 'master', route: undefined }),
+    routeServices: {},
     lastPersistAt: null,
     persistTimer: undefined,
     tokenCache: new Map(),
@@ -541,6 +567,16 @@ export function apply(ctx: Context, config: Config = {}): void {
       lastAgentList: null,
       loadedAt: null,
       loadedServers: null,
+      // getter 而非快照：ctx.inject 的回调可能晚于 apply 落地（服务随宿主插件
+      // 注册才出现），/debug 每次读都要看到**当下**的到位情况。
+      get routeServices() {
+        const holder = catalogRuntime.routeServices
+        return {
+          projections: holder.projections !== undefined,
+          defaultModel: holder.defaultModel !== undefined,
+          llm: holder.llm !== undefined,
+        }
+      },
     },
   }
   // 启动早期加载持久化 catalog（last-good 兜底）；失败置空不阻塞。
@@ -643,6 +679,16 @@ export function apply(ctx: Context, config: Config = {}): void {
     for (const entry of standingMcpEntries()) put(entry)
     return map
   }
+  // 按模型分流（P3a 接线）：可选服务 holder + 每次装配的判定入口。
+  // 服务缺失（三个字段任一 undefined）时静默降级 —— 到位情况见 diag.routeServices。
+  catalogRuntime.routeServices = installRouteServices(ctx)
+  // C1：本批 decisionFor **恒返回总开关**，与现状逐字一致（挂载/过滤/可见性
+  // 全部仍由 catalogRuntime.autoManage 单点决定）；P3b 才把路由判定接进来。
+  catalogRuntime.decisionFor = (): RouteDecision => ({
+    on: catalogRuntime.autoManage,
+    source: 'master',
+    route: undefined,
+  })
   let autoDisposers: Array<() => void> = []
   // P4 网关常驻态：随 autoManage 开关创建/释放（restrict lift + mounts 清理，
   // 不碰 standing 本体，靠 fiber unwind）。

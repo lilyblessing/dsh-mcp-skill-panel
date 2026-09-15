@@ -28,11 +28,13 @@
  */
 import Schema from '@deepseek-ai/schemastery';
 import type { Context } from '@deepseek-ai/cordis';
+import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { Catalog } from './catalog';
 export { normalizeToolName, normalizeArguments, msgOf, gatewayCall } from './mcpcall';
 export type { GatewayCallOpts, GatewayCallState } from './mcpcall';
 export { MCP_SEARCH_TOOL, MCP_CALL_TOOL, CONTROL_TOOL_NAMES } from './mcpcall';
 import type { McpView, SkillsView } from './shared-types';
+import { type RouteDecision, type RouteServices } from './model-route';
 export type { McpView, SkillsView, McpRow, SkillRow } from './shared-types';
 export type { DomainCaches } from './collect';
 export { mergeSchemas, computeStatus, rowDisplay } from './collect';
@@ -63,6 +65,7 @@ export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } fr
 export { loadDisabledTools, setToolDisabled, setToolsDisabledBulk, isToolDisabled, disabledToolsOf } from './tool-disable';
 export { parsePresetMcpText, findPresetRowByServerName, presetConfigOf } from './preset-mcp';
 export type { PresetMcpRow, PresetMcpClientConfig, PresetMcpParsed } from './preset-mcp';
+export { resolveRoute, routeDecision, routeKey, type ModelRoute, type RouteDecision } from './model-route';
 export declare const name = "runtime-inventory";
 export declare const inject: string[];
 export interface Config {
@@ -94,6 +97,20 @@ export interface CatalogRuntime {
     autoManage: boolean;
     /** 动态切换 AI 中间层（过滤 + mcp_search/mcp_call + 回收器）。 */
     applyAutoManage: (on: boolean) => void;
+    /**
+     * 某 agent（缺省=当前解析不到）当前的中间层判定，面板与诊断共用。
+     *
+     * C1（P3a 接线）：本批**恒返回总开关** `{on: autoManage, source: 'master'}` ——
+     * 行为与现状逐字一致，便于独立验证「零行为变化」。按模型判定的落地在 P3b
+     * （届时改为 `routeDecision(resolveRoute(routeServices, agent), autoManage, autoManageByRoute)`）。
+     */
+    decisionFor: (agent: Agent | undefined) => RouteDecision;
+    /**
+     * 可选服务 holder（sessionProjections / agentDefaultModel / llm），路由解析用。
+     * 漏掉任一服务时 resolveRoute 静默降级（只走剩下的回退级），故到位情况必须
+     * 可见 —— 见 diag.routeServices（/debug 原样回显）。
+     */
+    routeServices: RouteServices;
     /** 最近一次成功写盘时间（防抖合并用）。 */
     lastPersistAt: number | null;
     /** 防抖挂起的写盘 timer（ctx.timeout 创建，ctx 销毁自动清理）。 */
@@ -116,6 +133,16 @@ export interface CatalogRuntime {
         lastAgentList: number | null;
         loadedAt: number | null;
         loadedServers: number | null;
+        /**
+         * C1（评审风险 1）：路由服务（sessionProjections / agentDefaultModel / llm）
+         * 是否**已到位**。三者任一缺失时按模型分流会静默降级为只看总开关（无报错），
+         * 所以必须在 /debug 的返回里显式回显（/debug 的 `diag` 段原样回传本对象）。
+         */
+        routeServices: {
+            projections: boolean;
+            defaultModel: boolean;
+            llm: boolean;
+        };
     };
 }
 export declare function apply(ctx: Context, config?: Config): void;

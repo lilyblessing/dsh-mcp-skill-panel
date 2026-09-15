@@ -1208,6 +1208,45 @@ check('控制工具名不得以 mcp_ 开头（claude.ai 网关保留前缀 → H
   assert.equal(index.MCP_CALL_TOOL, 'dsh_mcp_call')
 })
 
+// ── 按模型分流的查表优先级（C1：接线批，本批 decisionFor 恒走总开关）────────
+const grok = { provider: 'grok', model: 'grok-4.6' }
+const claude = { provider: 'claude', model: 'claude-sonnet-5' }
+
+check('routeDecision：空覆盖表 = 旧行为（只看总开关）', () => {
+  assert.deepEqual(index.routeDecision(grok, true, {}), { on: true, source: 'master', route: grok })
+  assert.deepEqual(index.routeDecision(grok, false, undefined), { on: false, source: 'master', route: grok })
+})
+
+check('routeDecision：provider 项覆盖总开关', () => {
+  const table = { claude: false }
+  assert.equal(index.routeDecision(claude, true, table).on, false)
+  assert.equal(index.routeDecision(claude, true, table).source, 'provider')
+  // 未列出的 provider 不受影响
+  assert.equal(index.routeDecision(grok, true, table).on, true)
+  assert.equal(index.routeDecision(grok, true, table).source, 'master')
+})
+
+check('routeDecision：provider/model 精确项优先于 provider 项', () => {
+  const table = { claude: false, 'claude/claude-haiku-4-5-20251001': true }
+  assert.equal(index.routeDecision(claude, true, table).on, false)
+  const haiku = { provider: 'claude', model: 'claude-haiku-4-5-20251001' }
+  assert.equal(index.routeDecision(haiku, true, table).on, true)
+  assert.equal(index.routeDecision(haiku, true, table).source, 'model')
+})
+
+check('routeDecision：总开关关 + 覆盖项开 → 该模型仍启用（挂载条件的依据）', () => {
+  assert.equal(index.routeDecision(grok, false, { grok: true }).on, true)
+})
+
+check('routeDecision：未解析出路由 → 保守回退总开关，不静默改变工具集', () => {
+  const decision = index.routeDecision(undefined, true, { claude: false })
+  assert.deepEqual(decision, { on: true, source: 'no-route', route: undefined })
+})
+
+check('routeKey：provider/model 拼接', () => {
+  assert.equal(index.routeKey(grok), 'grok/grok-4.6')
+})
+
 if (failed) {
   console.log(`\nselftest: FAILED (${passed} passed)`)
   process.exit(1)
