@@ -200,6 +200,15 @@ export interface McpControlCtx {
 
   /** 0.6.0：已安装（配置里存在该行）的 MCP server 清单，含用户关闭的。 */
   installedInventory?(): Array<{ server: string; open: boolean }>
+
+  /**
+   * P3b（G3 / 评审风险 7）：中间层隐藏范围的**当下值**（函数式读取，非快照）。
+   *
+   * 空查能力摘要表要按它换口径：`'all'` 时命中中间层的模型看不到任何 mcp__ 工具，
+   * 摘要再宣称「N 个已打开并对模型可见」就与本次装配的实际可见性矛盾（模型据此
+   * 误判可用工具面）。取值来源 = index.ts 的 catalogRuntime.middleLayerHides。
+   */
+  middleLayerHides?(): 'disabled' | 'all'
 }
 
 /** 控制层共享状态：调用链（call / gatewayCall）与空闲回收器**是同一个对象**。
@@ -1224,16 +1233,44 @@ function buildSummary(control: McpControlCtx): Array<{ server: string; summary: 
     }
     lines.push({ server, summary, open: installed.get(server) ?? true, tools })
   }
-  // 开着（模型已可见）的排前面，其余按名字
+  // 开着（已挂载）的排前面，其余按名字
   lines.sort((a, b) => Number(b.open) - Number(a.open) || a.server.localeCompare(b.server))
   return lines
+}
+
+/**
+ * 空查（能力摘要表）的首行文案 —— 必须与本次装配的**实际可见性**同口径（G3）。
+ *
+ * - `hidesAll=false`（隐藏范围 = 仅手动停用）：手动启用的 server 确实对模型可见，
+ *   旧文案成立；
+ * - `hidesAll=true`（隐藏范围 = 全部）：命中中间层的模型一个 mcp__ 工具都拿不到，
+ *   此时 `[开]` 只表示「server 已挂载在跑」，**不代表对模型可见**。旧文案在这里
+ *   直接说谎（评审风险 7），故换口径。
+ *
+ * 抽成纯函数只为 selftest 能直接断言这条文案契约（不留「改完没人守」的窗口）。
+ * @param total - 已安装 server 数。
+ * @param openCount - 其中处于打开（已挂载）状态的数量。
+ * @param hidesAll - 中间层隐藏范围是否为 'all'。
+ */
+export function buildSummaryHeader(total: number, openCount: number, hidesAll: boolean): string {
+  if (hidesAll) {
+    return (
+      `已安装 ${total} 个 MCP server（本会话的中间层隐藏范围=全部：MCP 工具一律不直连模型，` +
+      `全部经 ${MCP_SEARCH_TOOL} 检索 + ${MCP_CALL_TOOL} 按需取用；下表 [开]/[关] 只表示 server ` +
+      `是否已挂载在跑，与模型可见性无关 —— ${total} 个都可经 ${MCP_CALL_TOOL} 按需临时拉起）。`
+    )
+  }
+  return (
+    `已安装 ${total} 个 MCP server（${openCount} 个已打开并对模型可见，` +
+    `${total - openCount} 个已关闭——关闭的对模型不可见，但可经 ${MCP_CALL_TOOL} 按需临时拉起）。`
+  )
 }
 
 function registerMcpSearchTool(ctx: Context, control: McpControlCtx, controller: McpCallController): () => void {
   const definition = defineTool({
     name: MCP_SEARCH_TOOL,
     description:
-      `检索可用的 MCP 服务器与工具目录（只读，不执行）。四种用法：① 空参数 → server 清单（含已关闭的，标注开/关）；② server=X → 该 server 的**能力摘要**（工具总数 + 前 5 个名字预览，不返回全表，避免上下文膨胀）；③ query + server → 在 X 内按需检索，返回 top-K 命中（含完整 schema），**想找某个 server 上的具体工具就用这个**；④ query → 全目录关键词检索。查到工具名后用 ${MCP_CALL_TOOL}(server, tool, arguments) 调用；不知道工具名先用 ②/③，不要用 ② 拉全表（工具多时传 all:true 才会返回全表）。中文连写请用空格分词（如“搜索 网页”）。`,
+      `检索可用的 MCP 服务器与工具目录（只读，不执行）。四种用法：① 空参数 → server 清单（含已关闭的，按挂载态标开/关，并说明本会话的可见性口径）；② server=X → 该 server 的**能力摘要**（工具总数 + 前 5 个名字预览，不返回全表，避免上下文膨胀）；③ query + server → 在 X 内按需检索，返回 top-K 命中（含完整 schema），**想找某个 server 上的具体工具就用这个**；④ query → 全目录关键词检索。查到工具名后用 ${MCP_CALL_TOOL}(server, tool, arguments) 调用；不知道工具名先用 ②/③，不要用 ② 拉全表（工具多时传 all:true 才会返回全表）。中文连写请用空格分词（如“搜索 网页”）。`,
     parameters: {
       query: { type: 'string', description: '检索关键词，按工具名/描述/参数名打分（缺省 top-K 8，上限 10）；与 server 同传即在该 server 内检索' },
       server: { type: 'string', description: '目标 MCP server 名（见空查清单）。单独传 = 返回该 server 的能力摘要 + 前 5 个工具名预览' },
@@ -1358,7 +1395,8 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx, controller:
       const servers = buildSummary(control)
       const openCount = servers.filter((s) => s.open).length
       const text = [
-        `已安装 ${servers.length} 个 MCP server（${openCount} 个已打开并对模型可见，${servers.length - openCount} 个已关闭——关闭的对模型不可见，但可经 ${MCP_CALL_TOOL} 按需临时拉起）。`,
+        // G3：hides='all' 时不得宣称「已打开并对模型可见」（与装配期 gateFor 同口径）
+        buildSummaryHeader(servers.length, openCount, control.middleLayerHides?.() === 'all'),
         ...servers.map((s) => `- ${s.server} [${s.open ? '开' : '关'}]${s.tools === null ? '' : ` (${s.tools} 工具)`}: ${s.summary}`),
       ].join('\n')
       return toJson({ ok: true, kind: 'summary', summary: text, servers, count: servers.length })

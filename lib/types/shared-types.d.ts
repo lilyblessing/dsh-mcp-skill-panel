@@ -109,8 +109,28 @@ export interface McpView {
     toolsAllSource: 'request' | 'registry';
     /** 工具预算（如 grok 的 350）；null = 未设置，不提示。 */
     toolBudget: number | null;
-    /** AI 中间层当前是否生效（面板开关）。 */
+    /** AI 中间层总开关（面板开关）。 */
     autoManage: boolean;
+    /** 按模型覆盖表（运行期当前值）：键为 provider 或 provider/model，值 true=启用中间层。 */
+    autoManageByRoute: Record<string, boolean>;
+    /**
+     * 中间层是否已实际挂载（总开关关但存在 true 覆盖项时也会挂载）。
+     * 与 {@link autoManageByRoute} 合看：任一模型判定 on ⇒ 本字段为 true（G2 不变量）。
+     */
+    autoManageMounted: boolean;
+    /** 中间层生效时隐藏哪些 server：'disabled'=仅手动停用的；'all'=全部 MCP。 */
+    middleLayerHides: 'disabled' | 'all';
+    /**
+     * 当前会话（或缺省 agent）实际生效的判定与依据 —— 面板顶部徽标用它显示
+     * 「本会话：开启 · grok/grok-4.6（provider 项）」这类信息。
+     * source='no-route' = 本次解析不出模型（诊断装配/服务缺失），已保守回退总开关。
+     */
+    autoManageActive: {
+        on: boolean;
+        source: 'model' | 'provider' | 'master' | 'no-route';
+        provider: string | null;
+        model: string | null;
+    };
     errors: string[];
 }
 export interface SkillRow {

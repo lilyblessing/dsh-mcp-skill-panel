@@ -10,7 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { mkdir, readFile, writeFile, rename, access } from 'node:fs/promises'
 import { basename, dirname, join, parse as parsePath } from 'node:path'
 import { homedir } from 'node:os'
-import { readState, writeState, stateApplyMode, stateToolBudget, type ApplyMode } from './state'
+import { readState, writeState, stateApplyMode, stateAutoManageByRoute, stateMiddleLayerHides, stateToolBudget, type ApplyMode } from './state'
 import { setSkillFlag, rowDisabledState, isValidSkillName, buildSkillMd, EDITABLE_CONFIG_KEYS } from './preset'
 import { pendingMcp, applyPendingMcp } from './pending'
 import { findPresetRowByEntryId, findPresetRowByServerName } from './preset-mcp'
@@ -985,6 +985,11 @@ export function makeRoutes(
             const state = await readState()
             return {
               autoManage: catalogRuntime.autoManage,
+              // P3b：按模型分流的回显。autoManageMounted = 中间层**已实际挂载**
+              // （总开关关但覆盖表有 true 项时为 true，与 autoManage 不是一回事）。
+              autoManageByRoute: stateAutoManageByRoute(state),
+              autoManageMounted: catalogRuntime.autoManageMounted,
+              middleLayerHides: stateMiddleLayerHides(state),
               applyMode: stateApplyMode(state),
               configAutoManage: config.autoManage ?? null,
               toolBudget: stateToolBudget(state) ?? null,
@@ -996,13 +1001,28 @@ export function makeRoutes(
           run: async (req) => {
             const parsed = JSON.parse((await readBody(req)) || '{}') as {
               autoManage?: boolean
+              /** 单条覆盖项：key 为 provider 或 provider/model；value null=删除该项（继承总开关）。 */
+              routeOverride?: { key?: string; value?: boolean | null }
               applyMode?: ApplyMode
+              middleLayerHides?: 'disabled' | 'all'
               toolBudget?: number | null
             }
             const state = await readState()
             state.config ??= {}
             if (typeof parsed.autoManage === 'boolean') {
               state.config.autoManage = parsed.autoManage
+            }
+            if (parsed.routeOverride && typeof parsed.routeOverride.key === 'string' && parsed.routeOverride.key.length > 0) {
+              const table = (state.config.autoManageByRoute ??= {})
+              const value = parsed.routeOverride.value
+              // null / 非布尔 = 「继承总开关」，即从表里删掉这一项（而不是写 false）
+              if (typeof value === 'boolean') table[parsed.routeOverride.key] = value
+              else delete table[parsed.routeOverride.key]
+              // 空表即删：state.json 里不留空对象（空表 == 旧行为，见 state.ts 注释）
+              if (Object.keys(table).length === 0) delete state.config.autoManageByRoute
+            }
+            if (parsed.middleLayerHides === 'disabled' || parsed.middleLayerHides === 'all') {
+              state.config.middleLayerHides = parsed.middleLayerHides
             }
             if (parsed.applyMode === 'immediate' || parsed.applyMode === 'next-session') {
               state.config.applyMode = parsed.applyMode
@@ -1014,11 +1034,29 @@ export function makeRoutes(
               state.config.toolBudget = Math.round(parsed.toolBudget)
             }
             await writeState(state)
-            if (typeof parsed.autoManage === 'boolean') catalogRuntime.applyAutoManage(parsed.autoManage)
-            // 预算与中间层无关（不触发 tools/change），但面板视图是 60s 缓存 ——
-            // 不失效的话用户点了「设置」要等一轮轮询才看到红线变化。
-            if (parsed.toolBudget !== undefined) invalidateMcp()
-            return { autoManage: catalogRuntime.autoManage, applyMode: stateApplyMode(state), toolBudget: stateToolBudget(state) ?? null }
+            // 只有中间层相关字段变化才重挂：applyAutoManage 会 dispose/register 控制工具，
+            // 触发 tools/change → 整段前缀缓存失效。改 applyMode / toolBudget 与中间层
+            // 无关，不能顺带让用户付一次 miss。
+            const middlewareTouched =
+              typeof parsed.autoManage === 'boolean' ||
+              parsed.routeOverride !== undefined ||
+              parsed.middleLayerHides !== undefined
+            if (middlewareTouched) {
+              // 总开关与覆盖表任一变化都要重算挂载（覆盖表出现 true 项时即便总开关关也要挂）
+              const master = typeof state.config.autoManage === 'boolean' ? state.config.autoManage : catalogRuntime.autoManage
+              catalogRuntime.applyAutoManage(master, stateAutoManageByRoute(state), stateMiddleLayerHides(state))
+            }
+            // 面板视图是 60s 缓存：不失效的话用户点了「设置」要等一轮轮询才看到变化
+            // （工具预算同理，与中间层无关但同批失效）。
+            invalidateMcp()
+            return {
+              autoManage: catalogRuntime.autoManage,
+              autoManageByRoute: stateAutoManageByRoute(state),
+              autoManageMounted: catalogRuntime.autoManageMounted,
+              middleLayerHides: stateMiddleLayerHides(state),
+              applyMode: stateApplyMode(state),
+              toolBudget: stateToolBudget(state) ?? null,
+            }
           },
         },
       ], true),

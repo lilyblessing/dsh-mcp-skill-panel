@@ -49,6 +49,26 @@ export type StateFile = {
      * 与其它面板可写值一样只落 state.json（**不**进 cordis Config）。
      */
     toolBudget?: number
+    /**
+     * AI 中间层的按模型覆盖表（P3b）。键为 `provider`（整个 provider）或
+     * `provider/model`（精确到模型）；值 true=启用中间层、false=禁用。
+     * 查表顺序 provider/model → provider → autoManage 总开关。
+     * 空表 = 旧行为（只看总开关），所以升级零配置零行为变化。
+     *
+     * 挂载条件（评审 §3-I / §3-G 第 5 条）：总开关 on **或**表里存在 true 项。
+     * 否则「总开关关 + grok:true」的配置永远不会挂载，覆盖项形同虚设。
+     */
+    autoManageByRoute?: Record<string, boolean>
+    /**
+     * 中间层生效时隐藏哪些 MCP server（P3b）：
+     * - 'disabled'（默认，旧行为）：只隐藏用户手动停用的 server。手动启用的
+     *   server 仍直接可见（memory 高灵敏召回、filesystem 直接读写的用法）。
+     * - 'all'：对命中中间层的模型隐藏**全部** MCP server 的工具，一律经
+     *   dsh_mcp_search / dsh_mcp_call 按需取用。server 保持挂载运行 ——
+     *   这正是「grok 走中间层、claude 直连全部工具」能同时成立的原因：
+     *   停用 server 会连 claude 一起看不到，而这里只改装配可见性。
+     */
+    middleLayerHides?: 'disabled' | 'all'
   }
 }
 
@@ -64,6 +84,29 @@ export function stateApplyMode(state: StateFile): ApplyMode {
 export function stateToolBudget(state: StateFile): number | undefined {
   const value = state.config?.toolBudget
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+/**
+ * 按模型覆盖表（缺省空表 = 只看总开关）。
+ * 非布尔值/空键一律丢弃：损坏的 state.json 不得把某个模型静默切到中间层。
+ */
+export function stateAutoManageByRoute(state: StateFile): Record<string, boolean> {
+  const table = state.config?.autoManageByRoute
+  if (!table || typeof table !== 'object') return {}
+  const out: Record<string, boolean> = {}
+  for (const [key, value] of Object.entries(table)) {
+    if (typeof value === 'boolean' && key.length > 0) out[key] = value
+  }
+  return out
+}
+
+/**
+ * 中间层隐藏范围（缺省 'disabled' = 旧行为）。
+ * 只有显式 'all' 才切换：非法值不得变成 all —— 那会让所有命中中间层的模型
+ * 突然失去全部 MCP 直连工具（静默的大范围行为变化）。
+ */
+export function stateMiddleLayerHides(state: StateFile): 'disabled' | 'all' {
+  return state.config?.middleLayerHides === 'all' ? 'all' : 'disabled'
 }
 
 let stateCache: StateFile | null = null

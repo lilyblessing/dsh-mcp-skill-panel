@@ -1302,6 +1302,150 @@ check('routeKey：provider/model 拼接', () => {
   assert.equal(index.routeKey(grok), 'grok/grok-4.6')
 })
 
+// ── 中间层隐藏范围与覆盖表（P3b：state.ts 两个 getter）─────────────────
+check('stateMiddleLayerHides：缺省 disabled，只有显式 all 才切换', () => {
+  assert.equal(index.stateMiddleLayerHides({}), 'disabled')
+  assert.equal(index.stateMiddleLayerHides({ config: {} }), 'disabled')
+  assert.equal(index.stateMiddleLayerHides({ config: { middleLayerHides: 'all' } }), 'all')
+  // 非法值不得静默变成 all（会让所有模型突然失去全部 MCP 直连工具）
+  assert.equal(index.stateMiddleLayerHides({ config: { middleLayerHides: 'nonsense' } }), 'disabled')
+})
+
+check('stateAutoManageByRoute：非布尔值与空键一律丢弃，缺省空表', () => {
+  assert.deepEqual(index.stateAutoManageByRoute({}), {})
+  assert.deepEqual(index.stateAutoManageByRoute({ config: {} }), {})
+  assert.deepEqual(
+    index.stateAutoManageByRoute({ config: { autoManageByRoute: { grok: true, claude: false } } }),
+    { grok: true, claude: false },
+  )
+  // 损坏的 state.json 不得把某个模型静默切到中间层
+  assert.deepEqual(
+    index.stateAutoManageByRoute({ config: { autoManageByRoute: { grok: 'yes', '': true, ok: true } } }),
+    { ok: true },
+  )
+})
+
+// ── G2：挂载条件（needed）与「按模型判定」的一致性 ─────────────────────
+check('autoManageNeeded：总开关或任一 true 覆盖项 ⇒ 需要挂载', () => {
+  assert.equal(index.autoManageNeeded(true, {}), true)
+  assert.equal(index.autoManageNeeded(false, {}), false)
+  // 总开关关 + 覆盖项开：仍必须挂（否则覆盖项永远无法生效）
+  assert.equal(index.autoManageNeeded(false, { grok: true }), true)
+  assert.equal(index.autoManageNeeded(true, { grok: false }), true)
+  // 全是 false 项 = 没有任何模型会用到 → 不挂（与旧行为一致）
+  assert.equal(index.autoManageNeeded(false, { grok: false, claude: false }), false)
+})
+
+check('G2：任一会话判定 on ⇒ needed 必为 true（穷举 master × 覆盖表 × 模型）', () => {
+  const agents = [
+    grok,
+    claude,
+    { provider: 'claude', model: 'claude-haiku-4-5-20251001' },
+    { provider: 'gemini', model: 'gemini-3-pro' },
+    undefined, // 诊断装配 / agent 缺席
+    { provider: '', model: 'x' }, // 半条路由
+    { provider: 'grok', model: '' },
+  ]
+  const tables = [
+    {},
+    { grok: false },
+    { grok: true },
+    { claude: false },
+    { claude: false, 'claude/claude-haiku-4-5-20251001': true },
+    { 'grok/grok-4.6': true },
+    { claude: true, gemini: false },
+    { 'unknown/provider': true },
+  ]
+  for (const master of [true, false]) {
+    for (const table of tables) {
+      const needed = index.autoManageNeeded(master, table)
+      for (const agent of agents) {
+        const decision = index.routeDecision(agent, master, table)
+        if (decision.on) {
+          assert.ok(
+            needed,
+            `判定 on 但 needed=false：master=${master} table=${JSON.stringify(table)} agent=${JSON.stringify(agent)}`,
+          )
+        }
+      }
+    }
+  }
+})
+
+// ── G1：装配过滤按模型 gate 投放控制工具 ───────────────────────────────
+/** 假 assembly 上下文：抓 system-prompt/assemble 监听器，直接喂一次装配。 */
+const assembleHarness = (visibility, gateFor) => {
+  let listener = null
+  const ctx = {
+    root: {
+      on: (event, fn) => {
+        if (event === 'system-prompt/assemble') listener = fn
+        return () => {
+          listener = null
+        }
+      },
+    },
+    effect: (fn) => fn(),
+  }
+  const dispose = index.installMcpVisibilityFilter(ctx, () => visibility, gateFor)
+  return {
+    dispose,
+    run: async (names, agent) => {
+      assert.ok(listener, 'system-prompt/assemble 监听未注册')
+      const assembly = { tools: names.map((name) => ({ name })) }
+      const out = await listener(assembly, { agent }, async () => assembly)
+      return out.tools.map((tool) => tool.name)
+    },
+  }
+}
+
+await checkAsync('G1：控制工具只投放给 gate 打开的模型（gate 命中的必须是新名常量）', async () => {
+  const visibility = new Map([
+    ['exa', true],
+    ['closed', false],
+  ])
+  const h = assembleHarness(visibility, (agent) => ({ on: agent?.id === 'gated-on', hideAll: false }))
+  const tools = ['mcp__exa__web_search', 'mcp__closed__x', 'dsh_mcp_search', 'dsh_mcp_call', 'read']
+  // gate 开：控制工具投放；可见 server 留、停用 server 去
+  assert.deepEqual(await h.run(tools, { id: 'gated-on' }), ['mcp__exa__web_search', 'dsh_mcp_search', 'dsh_mcp_call', 'read'])
+  // gate 关：控制工具一个不投放
+  assert.deepEqual(await h.run(tools, { id: 'gated-off' }), ['mcp__exa__web_search', 'read'])
+  // 无 agent（诊断装配）：gateFor 收 undefined → 与 gate 关同侧
+  assert.deepEqual(await h.run(tools, undefined), ['mcp__exa__web_search', 'read'])
+  // 反面证据：旧名字面量不在 CONTROL_TOOL_NAMES 里 → 不受 gate 约束，会漏给 gate 关的模型。
+  // 这正是「控制工具改名必须与 gate 同批原子落地」的原因（G1）。
+  assert.deepEqual(await h.run(['mcp_search', 'mcp_call'], { id: 'gated-off' }), ['mcp_search', 'mcp_call'])
+  h.dispose()
+})
+
+await checkAsync('G1/hideAll：hideAll 只对 gate 打开的模型生效（gate 关的模型照常直连）', async () => {
+  const visibility = new Map([
+    ['exa', true],
+    ['closed', false],
+  ])
+  const h = assembleHarness(visibility, (agent) => ({ on: agent?.id === 'gated-on', hideAll: true }))
+  const tools = ['mcp__exa__web_search', 'mcp__closed__x', 'dsh_mcp_search', 'dsh_mcp_call', 'read']
+  // gate 开 + hideAll：一个 mcp__ 都不直连，但控制工具必须在（否则模型无路取用）
+  assert.deepEqual(await h.run(tools, { id: 'gated-on' }), ['dsh_mcp_search', 'dsh_mcp_call', 'read'])
+  // gate 关：hideAll 不生效（B 会话不被 A 会话的中间层配置波及）
+  assert.deepEqual(await h.run(tools, { id: 'gated-off' }), ['mcp__exa__web_search', 'read'])
+  h.dispose()
+})
+
+// ── G3：能力摘要表口径必须与 hideAll 一致（评审风险 7）──────────────────
+check('G3：hideAll 下空查摘要不再宣称 server「对模型可见」', () => {
+  const normal = index.buildSummaryHeader(10, 4, false)
+  const hidesAll = index.buildSummaryHeader(10, 4, true)
+  assert.ok(normal.includes('已打开并对模型可见'), '默认口径（hides=disabled）应保留旧的可见措辞')
+  assert.ok(!hidesAll.includes('对模型可见'), `hideAll 文案不得宣称对模型可见：${hidesAll}`)
+  assert.ok(
+    hidesAll.includes(index.MCP_SEARCH_TOOL) && hidesAll.includes(index.MCP_CALL_TOOL),
+    'hideAll 文案必须给出按需取用路径（两个控制工具名）',
+  )
+  assert.ok(hidesAll.includes('10'), '数量仍需如实给出')
+  assert.ok(hidesAll.includes('挂载'), 'hideAll 下 [开] 的语义应被说明为挂载态，而非模型可见')
+})
+
 if (failed) {
   console.log(`\nselftest: FAILED (${passed} passed)`)
   process.exit(1)

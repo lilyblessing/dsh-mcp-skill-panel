@@ -566,6 +566,23 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
     toolsAllSource,
     toolBudget: stateToolBudget(state ?? {}) ?? null,
     autoManage: deps.catalogRuntime.autoManage,
+    // P3b：按模型分流的三个运行期读数（**取运行时而非 state.json** —— 面板要与
+    // 装配期 gate 读的是同一份值：hides 由 gateFor 直接读 runtime.middleLayerHides，
+    // 覆盖表由 decisionFor 读 runtime.autoManageByRoute）。
+    autoManageByRoute: { ...deps.catalogRuntime.autoManageByRoute },
+    autoManageMounted: deps.catalogRuntime.autoManageMounted,
+    middleLayerHides: deps.catalogRuntime.middleLayerHides,
+    // 当前会话实际生效的判定（面板顶部徽标：「本会话：开启 · grok/grok-4.6」）。
+    // agent 缺省/服务缺失 → source='no-route'，此时 on 回退总开关（保守维持旧行为）。
+    autoManageActive: (() => {
+      const decision = deps.catalogRuntime.decisionFor(agent)
+      return {
+        on: decision.on,
+        source: decision.source,
+        provider: decision.route?.provider ?? null,
+        model: decision.route?.model ?? null,
+      }
+    })(),
     activeWorkspace: getActiveWorkspace(),
     errors,
   }

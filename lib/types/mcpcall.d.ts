@@ -126,6 +126,14 @@ export interface McpControlCtx {
         server: string;
         open: boolean;
     }>;
+    /**
+     * P3b（G3 / 评审风险 7）：中间层隐藏范围的**当下值**（函数式读取，非快照）。
+     *
+     * 空查能力摘要表要按它换口径：`'all'` 时命中中间层的模型看不到任何 mcp__ 工具，
+     * 摘要再宣称「N 个已打开并对模型可见」就与本次装配的实际可见性矛盾（模型据此
+     * 误判可用工具面）。取值来源 = index.ts 的 catalogRuntime.middleLayerHides。
+     */
+    middleLayerHides?(): 'disabled' | 'all';
 }
 /** 控制层共享状态：调用链（call / gatewayCall）与空闲回收器**是同一个对象**。
  * 0.5.9 教训：`aiEnabled` 曾一度只有 `call()` 分支登记，而 `mcp_call` 实际走
@@ -300,6 +308,21 @@ export declare function reaperDiagnostics(): ReaperDiag & {
  * 在 apply 里构建并封闭所有 IO。
  */
 export declare function createMcpCallController(ctx: Context, caches: McpControlCtx): McpCallController;
+/**
+ * 空查（能力摘要表）的首行文案 —— 必须与本次装配的**实际可见性**同口径（G3）。
+ *
+ * - `hidesAll=false`（隐藏范围 = 仅手动停用）：手动启用的 server 确实对模型可见，
+ *   旧文案成立；
+ * - `hidesAll=true`（隐藏范围 = 全部）：命中中间层的模型一个 mcp__ 工具都拿不到，
+ *   此时 `[开]` 只表示「server 已挂载在跑」，**不代表对模型可见**。旧文案在这里
+ *   直接说谎（评审风险 7），故换口径。
+ *
+ * 抽成纯函数只为 selftest 能直接断言这条文案契约（不留「改完没人守」的窗口）。
+ * @param total - 已安装 server 数。
+ * @param openCount - 其中处于打开（已挂载）状态的数量。
+ * @param hidesAll - 中间层隐藏范围是否为 'all'。
+ */
+export declare function buildSummaryHeader(total: number, openCount: number, hidesAll: boolean): string;
 /**
  * 注册 mcp_search + mcp_call 两个模型工具。`controller` 必须是调用方持有的唯一
  * 控制层实例（与空闲回收器共享同一引用计数/owner 状态），否则回收与调用不同步。
