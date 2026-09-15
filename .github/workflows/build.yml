@@ -62,6 +62,25 @@ jobs:
       - name: Verify artifacts
         run: npm run verify
 
+      - name: Module identity gate (plugin == host agent-presets instance)
+        # 0.5.7 闸门：本插件与宿主必须解析到**同一份** @deepseek-ai/dsh-agent-presets，否则
+        # preset 行句柄静默失联（无任何报错）。基准口径同 scripts/deploy-link.mjs /
+        # check-module-identity.mjs 默认值：装机侧 `…\profiles\web\node_modules\@deepseek-ai`
+        # （旧的 `profiles\node_modules` 扁平层在 junction 事故后已断链，勿用）。
+        #
+        # CI 是 registry-only（无 DSH 闭包），故基准取**检出物自己**：A/B 同源 → identity
+        # 判据必然同份；此时本步只能证明「闸门脚本可用 + 导出面齐」，装机同一性仍须在真机带
+        # 两个基线跑（PLUGIN_BASIS=…\profiles\web\node_modules\dsh-mcp-skill-panel、
+        # DSH_MODULE_BASIS=…\profiles\web\node_modules\@deepseek-ai）。
+        # 无 web 侧真闭包（CI 就是这种）时本步**允许失败**，但基准缺失/宿主闭包不完整会打印
+        # 一行明错，不静默跳过、不静默按开发副本下结论。
+        continue-on-error: true
+        env:
+          PLUGIN_BASIS: ${{ github.workspace }}
+          DSH_MODULE_BASIS: ${{ github.workspace }}/node_modules
+          DSH_HOST_SCOPE: ${{ github.workspace }}/node_modules/@deepseek-ai
+        run: node scripts/check-module-identity.mjs
+
       - name: Selftest (catalog / preset logic)
         run: node scripts/selftest-mcp.mjs
 

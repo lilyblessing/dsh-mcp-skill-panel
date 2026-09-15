@@ -1,7 +1,7 @@
 // 临时 Node 自测：验证 MCP 中间层控制的纯逻辑（构建产物 lib/*.js）。
 // eslint-disable-next-line no-console
 // 用法：node scripts/selftest-mcp.mjs （在包根目录运行）
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -10,16 +10,69 @@ import assert from 'node:assert/strict'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
+/* ── 宿主闭包回填（P0-3）─────────────────────────────────────────────────────
+ * lib/index.js → @deepseek-ai/dsh-agent-presets 的 **peerDependencies** 里有三个
+ * 本仓 devDependencies 未列、npm 安装也不会装的真实包：
+ *   @deepseek-ai/dsh-home-paths / @deepseek-ai/cordis-plugin-include / @deepseek-ai/dsh-atomic-write
+ * 缺它们时 import lib/index.js 直接 ERR_MODULE_NOT_FOUND → 全部断言零执行（本次修复的故障现场）。
+ * 三个里只有 dsh-home-paths 是纯路径解析（可以零依赖等价），另两个是宿主真逻辑包 ——
+ * 拿等价实现顶替等于自我欺骗，故改为**回填宿主真闭包**，口径与 scripts/deploy-link.mjs 一致
+ * （默认 ~/.dsh/profiles/web/node_modules/@deepseek-ai，可用 DSH_HOST_SCOPE 覆盖）。
+ * 只在本地解析失败时回填，故装机/完整安装环境下本段完全不介入。
+ */
+const HOST_SCOPE = (process.env.DSH_HOST_SCOPE ?? 'C:/Users/lily/.dsh/profiles/web/node_modules/@deepseek-ai').replace(/\\/g, '/')
+const hostFilled = []
+let hostScopeUsable = false
+if (existsSync(HOST_SCOPE)) {
+  const { createRequire, registerHooks } = await import('node:module')
+  if (typeof registerHooks === 'function') {
+    const hostRequire = createRequire(join(dirname(HOST_SCOPE), '__host_basis__.js'))
+    registerHooks({
+      resolve(specifier, context, nextResolve) {
+        try {
+          return nextResolve(specifier, context)
+        } catch (error) {
+          if (error?.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('@deepseek-ai/')) throw error
+          const resolved = hostRequire.resolve(specifier)
+          hostFilled.push(specifier)
+          return { url: pathToFileURL(resolved).href, shortCircuit: true }
+        }
+      },
+    })
+    hostScopeUsable = true
+  }
+}
+
+/** 宿主闭包不完整时硬失败：打印缺什么 + 怎么修，绝不静默跳过断言。 */
+const loadHostDependent = async (url, label) => {
+  try {
+    return await import(url)
+  } catch (error) {
+    console.error('FATAL: 宿主闭包不完整，无法加载构建产物 —— 拒绝静默跳过（断言不执行即不算通过）。')
+    console.error(`       产物：${label}`)
+    console.error(`       原因：${error && error.message ? error.message : String(error)}`)
+    console.error(`       宿主闭包：DSH_HOST_SCOPE=${HOST_SCOPE}（存在=${existsSync(HOST_SCOPE)}${existsSync(HOST_SCOPE) && !hostScopeUsable ? '，但当前 Node 无 module.registerHooks → 无法回填' : ''}）`)
+    console.error('       修法：把缺失的 @deepseek-ai/* 宿主 peer 装进 devDependencies（并同步 package-lock.json），')
+    console.error('             或用 DSH_HOST_SCOPE 指向宿主真闭包（装机侧 profiles/web/node_modules/@deepseek-ai）。')
+    process.exit(1)
+  }
+}
+
 const catalog = await import(pathToFileURL(join(root, 'lib', 'catalog.js')).href)
-const index = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+const index = await loadHostDependent(pathToFileURL(join(root, 'lib', 'index.js')).href, 'lib/index.js')
+if (hostFilled.length > 0) {
+  console.log(`NOTICE 宿主闭包回填 ${new Set(hostFilled).size} 个 devDep 缺口：${[...new Set(hostFilled)].join(', ')}（源自 ${HOST_SCOPE}）`)
+}
 const convert = await import(pathToFileURL(join(root, 'lib', 'mcp-convert.js')).href)
 // 0.7.1：行级读数判定拆成零宿主依赖模块，纯逻辑护栏不再受宿主包解析环境影响。
 const rowDisplayMod = await import(pathToFileURL(join(root, 'lib', 'row-display.js')).href)
 
 let failed = false
+let passed = 0
 const check = (label, fn) => {
   try {
     fn()
+    passed += 1
     console.log(`ok   ${label}`)
   } catch (error) {
     failed = true
@@ -30,6 +83,7 @@ const check = (label, fn) => {
 const checkAsync = async (label, fn) => {
   try {
     await fn()
+    passed += 1
     console.log(`ok   ${label}`)
   } catch (error) {
     failed = true
@@ -156,7 +210,7 @@ check('listServer 分页上限钳制 200（W4）', () => {
   assert.equal(page.totalCount, 1)
 })
 
-check('listServer 返回精简名+描述；未知 server undefined；分页 offset/limit（P3）', () => {
+check('listServer 返回精简名+描述；未知 server found:false 信封；分页 offset/limit（P3）', () => {
   const c = buildCatalog()
   const chrome = catalog.listServer(c, 'chrome')
   assert.ok(chrome)
@@ -164,7 +218,12 @@ check('listServer 返回精简名+描述；未知 server undefined；分页 offs
   assert.equal(chrome.tools.length, 1)
   assert.equal(chrome.tools[0].name, 'mcp__chrome__navigate')
   assert.equal(chrome.tools[0].description, '导航到 URL')
-  assert.equal(catalog.listServer(c, 'nope'), undefined)
+  // 未知 server：现契约是 found:false 信封（不再返回 undefined）
+  const miss = catalog.listServer(c, 'nope')
+  assert.equal(miss.found, false)
+  assert.equal(miss.hasSnapshot, false)
+  assert.deepEqual(miss.tools, [])
+  assert.equal(miss.totalCount, 0)
   // P3 分页：超界 offset 返回空页但 totalCount 保留
   const page = catalog.listServer(c, 'chrome', 10, 20)
   assert.equal(page.totalCount, 1)
@@ -830,7 +889,7 @@ const makeGatewayHarness = (presetRow, toolsImpl) => {
     root: { on: () => () => true },
     effect: () => () => undefined,
   }
-  const state = { refCounts: new Map(), lastUsed: new Map() }
+  const state = { refCounts: new Map(), lastUsed: new Map(), aiEnabled: new Set() }
   return { ctx, control, state }
 }
 const gatewayToolsOk = (text) => ({
@@ -866,7 +925,7 @@ await checkAsync('gatewayCall：禁用行/停用行/miss 均 throw（非文本�
     const tools = gatewayToolsOk('x')
     const control = { serverTimeoutMs: () => 60_000, resolveEntry: () => undefined, resolvePresetRow: async () => undefined }
     const ctx = { tools, logger: {}, timeout: (fn) => { fn(); return () => undefined }, root: { on: () => () => true }, effect: () => () => undefined }
-    const state = { refCounts: new Map(), lastUsed: new Map() }
+    const state = { refCounts: new Map(), lastUsed: new Map(), aiEnabled: new Set() }
     await assert.rejects(
       () => index.gatewayCall(ctx, control, state, 'ghost', 'x', {}, { signal: AbortSignal.timeout(5000), agent: undefined }),
       /未知 MCP server/,
@@ -1035,7 +1094,7 @@ await checkAsync('gatewayCall：loader行走callViaLoaderEntry分支（B1，不�
     clearAiOwner: async () => undefined,
   }
   const ctx = { tools, logger: {}, timeout: (fn) => { fn(); return () => undefined }, root: { on: () => () => true }, effect: () => () => undefined }
-  const state = { refCounts: new Map(), lastUsed: new Map() }
+  const state = { refCounts: new Map(), lastUsed: new Map(), aiEnabled: new Set() }
   const out = await index.gatewayCall(ctx, control, state, 'proj', 'do_thing', {}, { signal: AbortSignal.timeout(5000), agent: undefined })
   assert.equal(out, 'via-loader')
   assert.equal(state.refCounts.size, 0)
@@ -1053,7 +1112,7 @@ await checkAsync('gatewayCall：loader行禁用时ensureEnabled开启后执行�
     clearAiOwner: async () => undefined,
   }
   const ctx = { tools, logger: {}, timeout: (fn) => { fn(); return () => undefined }, root: { on: () => () => true }, effect: () => () => undefined }
-  const state = { refCounts: new Map(), lastUsed: new Map() }
+  const state = { refCounts: new Map(), lastUsed: new Map(), aiEnabled: new Set() }
   const out = await index.gatewayCall(ctx, control, state, 'proj2', 'do_thing', {}, { signal: AbortSignal.timeout(5000), agent: undefined })
   assert.equal(out, 'opened')
   assert.deepEqual(updated, { disabled: false })
@@ -1074,7 +1133,7 @@ check('isolateChildScope：deny 转调 restrict 并回 disposer', () => {
 })
 
 if (failed) {
-  console.log('\nselftest: FAILED')
+  console.log(`\nselftest: FAILED (${passed} passed)`)
   process.exit(1)
 }
-console.log('\nselftest-mcp: all checks passed')
+console.log(`\nselftest-mcp: all checks passed (${passed} checks)`)
