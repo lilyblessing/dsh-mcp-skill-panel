@@ -140,6 +140,8 @@ dsh plugin --profile web add "github:lilyblessing/dsh-mcp-skill-panel#main"
 > 📦 已发布到 **npm**：`dsh-mcp-skill-panel`（[npm 页面](https://www.npmjs.com/package/dsh-mcp-skill-panel)）。npm 版为预构建产物，安装可跳过 `allowBuilds` 构建授权，也可直接以包名安装；git 源方式始终可用。
 >
 > ⬆️ **升级**：git 源用户请在 DSH profile 目录执行 `pnpm update dsh-mcp-skill-panel`（`pnpm add` 对相同 spec 不会重解析 git 分支）；npm 用户 `pnpm add dsh-mcp-skill-panel@latest`（当前 npm latest = **0.5.3**）即可。npm 发版**滞后于仓库**（0.5.4 / 0.5.5 已下架），最新代码以**仓库**（git 源）为准。
+>
+> 🔁 **更新插件后必须重启 DSH**（与安装同理，bundle 层只在启动时合成）：只 `pnpm update` 而不重启时，浏览器已加载新客户端、宿主进程仍是旧代码（没有 `/models` 路由 → 404），覆盖卡会显示「端点未注册（更新插件后需重启 DSH）」的降级提示。**这是预期状态**，重启即恢复，不必排查网络或面板令牌。
 
 ## 🚀 使用
 
@@ -171,6 +173,7 @@ dsh plugin --profile web add "github:lilyblessing/dsh-mcp-skill-panel#main"
 | POST | `/skill/toggle` | `{ name, disabled }` |
 | POST | `/skill/add` | `{ name, description, body, target: global\|project, workspace? }` 创建技能 |
 | GET | `/config` | 读取中间层与面板配置：`autoManage` / `applyMode` / `autoManageByRoute`（按模型覆盖表）/ `autoManageMounted`（中间层当前是否挂载）/ `middleLayerHides` / `toolBudget` |
+| GET | `/models` | provider/模型目录（数据源 = 宿主 llm 服务）+ `active` 路由投影：`providers`（`{ provider, name, models[] }`，按 provider 字典序）/ `autoManage` / `autoManageByRoute` / `autoManageMounted` / `active`（`on` + `source` 四取值 `'model'`\|`'provider'`\|`'master'`\|`'no-route'` + `provider`/`model`）/ `session` / `cached`（本次直接取自 TTL 缓存）/ `fetchedAt`。`listModels` 会逐个 provider 打到 adapter（可能触达网络），故 **60s TTL + 单飞**（`MODELS_TTL_MS = 60_000`；并发请求共享同一在飞抓取）把这条**无鉴权读端点**的扇出上界锁死为 60s 一次；三条降级路径都不抛（`llm` 缺失 / `listProviders()` 抛错 → `providers: []`；单个 `listModels()` 抛错 → 只该 provider `models: []`） |
 | POST | `/config` | `{ autoManage?, applyMode?, toolBudget?, middleLayerHides?, routeOverride? }` 写配置并持久化到 state.json。`toolBudget`：`null`=清除，只接受 >0 的有限数；`middleLayerHides`：`'disabled'`\|`'all'`；`routeOverride`：`{ key: '<provider>' \| '<provider>/<model>', value: boolean \| null }` 单条增删按模型覆盖（`null`=删除该键）。仅 `autoManage` / `middleLayerHides` / `routeOverride` 触发中间层重挂（`tools/change` → 该轮前缀缓存 miss） |
 | GET | `/debug` | catalog 采集诊断 + scope 解析现场（scopeDiag），运维排障用 |
 | POST | `/debug/collect` | 手动触发一次 catalog 采集 |
@@ -263,7 +266,7 @@ sequenceDiagram
 - **控制工具的 `arguments` 必须是 JSON 对象**：`dsh_mcp_call` 的 `arguments` 声明为对象类型，**字符串形态会被参数校验前置拒绝**（报 `invalid arguments: "arguments" must be an object`）。这是有意的收紧（0.6.0 起）—— 旧版会把 JSON 字符串透明解析，现在按工具描述要求的对象形态传入即可。
 - 运行期写 SKILL.md 安全（skill-filesystem 的 watcher 本就预期文件被改）；运行期写预设组合文件会触发 dsh-agent-presets 的 stamp 重挂事故，插件刻意不做。
 - 能力摘要表（`dsh_mcp_search` 空查询）只覆盖有 catalog 快照或配置了 `serverSummary` 的 server；从未成功启动过的 server（如 codegraph）不会列出。**口径提示**：`middleLayerHides='all'` 时该表按「经中间层取用」表述，不再宣称 server「对模型可见」—— 可见与否以装配结果为准（此时连已启用的 server 也从模型面隐藏）。
-- **按模型覆盖只能为「当前路由 + 已存在的键」配置**：面板不拉 provider/model 目录（避免一次无鉴权网络往返），覆盖卡的行集合 = 当前解析到的路由（`provider` 与 `provider/model`）∪ 已存在的覆盖键。**要给别的 provider/model 预置规则，必须先切到该模型**再设；设过的键会一直留在表里可继续编辑。挂载失败后运行期覆盖表会被清空，但这类键按「运行期 ∪ 持久化（`autoManageByRoutePersisted`）」渲染并标注「已保存，未生效」，仍可见、可删。
+- **按模型覆盖的数据源（v0.6.0 补齐）**：面板**会**拉 provider/模型目录（`GET /models`，**60s TTL + 单飞**）—— 「无鉴权读端点不该把每次请求都放大到 adapter」仍是这条缓存的理由，但不再是「不拉目录」的理由。覆盖卡的行集合 = **可折叠的目录**（provider 行 + 模型行）∪ 其它已存在的键（运行期 ∪ 持久化（`autoManageByRoutePersisted`）；未被目录吃掉的键落在「其它键」区），因此**可以为任意 provider/模型预置规则，不必先切到它**；目录拉取失败时降级为「只列键」的旧行为，键照旧全部可见、可删（挂载失败后运行期表被清空的键，按「已保存，未生效」标注）。目录只影响**可点范围**，不影响 gate 语义（查表序 `provider/model` → `provider` → `autoManage` 与生效判定原样）。**限制**：高亮依据没变 —— 目录里的「当前路由」高亮与 `/models` 的 `active` 取自面板绑定会话（host 侧按 `roots[0]` 解析），多会话并存时未必是你正在看的那个会话（见下条）。
 - 面板是**进程级全局**设置区块：`/state` 不带 `session` 参数时，host 侧按 `roots[0]` 解析归属会话 —— 多会话并存时覆盖卡的「面板绑定会话」未必是你正在看的那个会话（卡片同时显示绑定的 `sessionId` 供核对）。
 - **控制端点鉴权**：写操作由进程级随机令牌（`x-panel-token`）保护，仅面板同源客户端自动携带；GET 只读开放。宿主 webServer 本身无鉴权层，若将监听地址改为 `0.0.0.0` 对外暴露，建议同时依赖外层网络隔离。
 
@@ -328,6 +331,13 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 - ✨ 能力表（catalog）采集改走 `snapshotEnabled` 并覆盖 preset 行（`7672450` / `c0855f9`）；关前补采加等待上限与前置守卫（`1db832f` / `2161bba`）；prune 的 alive 集合纳入 standing 行（0.6.0）—— 关掉的 server 仍可被 `mcp_search` 检索。
 - ✨ `mcp_search` 分层检索（`18576e4`，防上下文膨胀 + 给出该调哪个工具的指引）；摘要分支 `count` 改用工具总数（`b8b87f9`）。
 - 🔧 `existingRowIds` 覆盖 standing 行，防 `mcp/add` 写重复行；`applyStateResidue` 遍历纳入 standing 行（否则对 preset 行恒 0 应用，`desired` 永远悬着）；新增 `/debug → standingDiag` 自证面。
+
+#### 按模型覆盖：补齐 provider/模型目录数据源
+
+- 🧭 **`GET /models` 目录端点**（读端点，**无鉴权**，与其它读端点一致）：数据源是宿主 llm 服务（`ctx.inject` 捕获的 `routeServices.llm`）的 `listProviders()` / `listModels(provider)`；**60s TTL + 单飞**（`MODELS_TTL_MS = 60_000`）把这条开放端点的扇出上界锁死为 60s 一次（`listModels` 会逐个 provider 打到 adapter，可能触达网络）；结果按 provider 字典序。三条降级路径都**不抛**：`llm` 缺失 / `listProviders()` 抛错 → `providers: []`；单个 `listModels()` 抛错 → 只该 provider `models: []`。
+- 🖱️ **覆盖卡改可折叠的 provider/模型目录**：provider 行与模型行都能设置三态覆盖（键 = `provider` / `provider/model`），因此**任意 provider/模型都可预置规则，不必先切到它**；目录拉取失败 → 降级为「只列键」的旧行为；未被目录吃掉的键落在「其它键」区，运行期 ∪ 持久化的覆盖键仍然全部可见、可删。
+- 🔗 **`active` 与 `/state` 的 `autoManageActive` 同源**：两处都走 `src/model-route.ts` 的 `activeRouteView`（`{ on, source, provider, model }`，`source` 取值 `'model'` / `'provider'` / `'master'` / `'no-route'`）—— 面板高亮与 gate 生效依据不会再各写一份。
+- ⚠️ **诚实边界**：面板是**进程级** settings.section，`/state` 不带 `session` 参数时 host 侧按 `roots[0]` 解析会话 —— 多会话并存时，目录里的「当前路由」高亮未必是你正在看的那个会话（卡片已显示绑定的 `sessionId` 供核对）。
 
 ### v0.5.5（2026-09-08）— rc.1 空面板修复（standing 组合兜底）
 

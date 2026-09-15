@@ -237,6 +237,10 @@ autoManage=false 时：不注册 dsh_mcp_search/dsh_mcp_call、不过滤装配�
 - **读数分层（勿混）**：`/state` 的 `autoManageByRoute` 是**运行期**表（gate 实际读的那张），`autoManageByRoutePersisted` 是 state.json 的**用户意图**。挂载失败时 `applyAutoManage` 的 catch 会清空运行期表而意图保留 → 面板覆盖卡按两表**并集**渲染，给「已持久化但当前未生效」的键挂「已保存，未生效」标记，使其可见且可删（改的只是读数面，`decisionFor` 仍只看运行期表）。
 - `/config` POST 用 `routeOverride: { key, value }` 单条增删（`value: null` 删键）；只有 `autoManage` / `middleLayerHides` / `routeOverride` 变化才重挂中间层。**面板侧须带等值守卫**（点已选中的那一段不发请求）—— 否则一次无谓的 `applyAutoManage` 就是该轮前缀缓存 miss。
 - 覆盖项为真时即使总开关关也会挂载中间层（否则出现「gate 打开但网关没挂」→ 覆盖模型看得到 `dsh_mcp_search` 却拉不起 preset 关态行）。
+- **面板数据源（v0.6.0 补齐）**：覆盖卡的**可点范围**来自 `GET /models`（读端点，**无鉴权**，与其它读端点一致；`providers` + `active` + `cached` + `fetchedAt`，见 README 端点表）。它是本仓唯一会**扇出到 LLM adapter** 的读端点（`/state` 同样会扇出，但扇到的是 MCP server 侧），故 `MODELS_TTL_MS = 60_000` 的 TTL 缓存 + 单飞不是性能优化而是边界：把开放端点的扇出上界锁死为 60s 一次。单次抓取另有 `MODELS_FETCH_TIMEOUT_MS = 8_000` 上界 —— 无上界的话，一个**永不 settle** 的 `listModels` 会被单飞钉住，端点在该 adapter 恢复前对**所有**调用者不可用（且无报错）。超时只改本次请求的返回（空目录 + `cached:false`），不写缓存、不动 `fetchedAt`，并清掉在飞标记让下一个请求能重新抓取；迟到的真实结果仍照常写缓存（数据仍是新鲜读数）。
+- **三条降级路径都不抛**（开放读端点上任何抛都会变成 500 把整张卡片打成错误态）：`llm` 缺失 → `providers: []`；`listProviders()` 抛错 → `providers: []`；单个 provider 的 `listModels()` 抛错 → **只**该 provider `models: []`。前端拉取失败 → 降级为「只列键」的旧行为，不阻断卡片。
+- **`active` 与 `/state` 的 `autoManageActive` 同源**：两处都走 `src/model-route.ts` 的 `activeRouteView(decision)`（`{ on, source, provider, model }`）—— 「面板高亮哪条是当前路由」与「gate 按哪条判定」不得各写一份。
+- **界线**：目录只影响**可点范围**（任意 `provider` / `provider/model` 键都能预置规则，不必先切到该模型），**不影响 gate 语义** —— 查表序、`decisionFor` 的输入、以及运行期表 / 持久化表的读数分层全部原样不变。
 
 ### 12.5 `middleLayerHides`
 
