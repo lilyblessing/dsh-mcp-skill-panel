@@ -9,7 +9,7 @@
 
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.5.0-green.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.7.2-green.svg">
 </p>
 
 ---
@@ -188,8 +188,8 @@ Dependencies are now **self-contained** (`@deepseek-ai/*` build-time deps are al
 npm install --legacy-peer-deps --ignore-scripts   # one-time (npm run setup / junctions no longer required)
 npm run typecheck  # tsc type check (Context service augmentation comes from @deepseek-ai devDeps)
 npm run build      # tsdown (node external all @deepseek-ai/*) -> tsc dts last (order matters)
-npm run verify     # artifact verification (no inlined TOOL_RUNTIME_SCHEDULER, client wrapper, lib/types)
-node scripts/selftest-mcp.mjs  # catalog unit tests
+npm run verify     # artifact verification (no inlined TOOL_RUNTIME_SCHEDULER, client wrapper, lib/types, row-display artifact presence + zero-import gate)
+npm run selftest:mcp  # catalog unit tests
 ```
 
 > **lib/ artifacts are rebuilt by GitHub Actions** (`.github/workflows/build.yml`): push your source, CI runs typecheck → build → verify → selftest and, on `main`, commits the fresh `lib/` back with `[skip ci]` — remember to `git pull` to collect it.
