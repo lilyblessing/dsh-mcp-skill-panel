@@ -141,6 +141,45 @@ export const en: Record<string, string> = {
     'Disabled MCP servers stay hidden from the model and are used on demand via dsh_mcp_search / dsh_mcp_call (keep-alive enable + idle reaping). Servers you enabled stay directly visible (e.g. memory for recall, filesystem for IO); AI-temporarily-enabled servers never pollute context. Manually enabled servers are never auto-disabled.',
   'ri.autoManageDescOff':
     'Off: tools of enabled MCP servers are directly visible to the model (classic mode).',
+  // middle-layer hide scope (property 5a): 'all' also hides servers you enabled
+  'ri.hidesLabel': 'Middle layer hides',
+  'ri.hidesDisabled': 'Disabled servers only',
+  'ri.hidesAll': 'All MCP servers',
+  'ri.hidesDescDisabled':
+    'Only the servers you switched off go behind the middle layer. Servers you left enabled stay fully visible to the model — a single 450-tool server can blow past a provider tool cap on its own.',
+  'ri.hidesDescAll':
+    'Every MCP server is hidden from models where the middle layer is active, including the ones you enabled, and is reached via dsh_mcp_search / dsh_mcp_call instead. Servers keep running, so a model whose route has the middle layer off still sees all their tools directly.',
+  // per-model override (property 4)
+  'ri.routeTitle': 'Per-model override',
+  'ri.routeDesc':
+    'Decide the middle layer per model route. Lookup order: provider/model → provider → master switch. An override set to "Force on" also mounts the middle layer while the master switch is off.',
+  'ri.routeInherit': 'Follow master',
+  'ri.routeOn': 'Force on',
+  'ri.routeOff': 'Force off',
+  'ri.routeCurrent': 'current route',
+  'ri.routeActive': 'This session: {state} · {route}',
+  'ri.routeActiveOn': 'middle layer ON',
+  'ri.routeActiveOff': 'middle layer OFF',
+  'ri.routeSourceModel': 'by model rule',
+  'ri.routeSourceProvider': 'by provider rule',
+  'ri.routeSourceMaster': 'by master switch',
+  'ri.routeSourceNoRoute': 'model unknown — master switch only',
+  'ri.routeUnknown': 'unknown model',
+  'ri.routeNoRouteHint':
+    'No session model was resolved for this view (diagnostic assembly or a missing route service), so only the master switch is evaluated — per-model overrides cannot take effect here. This is not "the override did nothing": the route itself is unknown.',
+  'ri.routeMounted': 'Middle layer mounted (control tools available to models allowed by the table).',
+  'ri.routeNotMounted': 'Middle layer not mounted.',
+  'ri.routeEmpty': 'No route to show yet (no session model and no override).',
+  // bulk tool control (property 1)
+  'ri.toolFilter': 'Filter tools…',
+  'ri.toolBulkDisableAll': 'Disable all',
+  'ri.toolBulkEnableAll': 'Enable all',
+  'ri.toolBulkDisableFiltered': 'Disable {n} filtered',
+  'ri.toolBulkEnableFiltered': 'Enable {n} filtered',
+  'ri.toolBulkDone': '{n} tool(s) changed.',
+  'ri.toolBulkIgnored': '{n} name(s) not recognized (the catalog may have changed).',
+  'ri.toolEnabledOf': '{enabled} of {total} tools enabled',
+  'ri.toolNoMatch': 'No tool matches the filter.',
 }
 
 export const zh: Record<string, string> = {
@@ -281,4 +320,43 @@ export const zh: Record<string, string> = {
     '停用的 MCP 服务器对模型隐藏，需要时经 dsh_mcp_search / dsh_mcp_call 按需调用（保活启用 + 空闲回收）；你手动打开的服务器保持模型可见（如 memory 高灵敏召回、filesystem 直接读写）；AI 临时启用的服务器不会污染上下文。用户手动启用的服务器不会被自动停用。',
   'ri.autoManageDescOff':
     '关闭后：已启用 MCP 服务器的工具直接对模型可见（经典模式）。',
+  // 中间层隐藏范围（特性 5a）：'all' 连已启用的 server 也从模型面隐藏
+  'ri.hidesLabel': '中间层隐藏',
+  'ri.hidesDisabled': '仅手动停用的 server',
+  'ri.hidesAll': '全部 MCP server',
+  'ri.hidesDescDisabled':
+    '只有你手动停用的 server 走中间层；保持启用的 server 仍对模型完全可见 —— 单个 450 工具的 server 就足以顶穿 provider 的工具数上限。',
+  'ri.hidesDescAll':
+    '对中间层生效的模型隐藏**全部** MCP server（含你手动启用的），一律经 dsh_mcp_search / dsh_mcp_call 取用。server 保持运行，所以中间层未生效的模型照样直接看到全部工具。',
+  // 按模型覆盖（特性 4）
+  'ri.routeTitle': '按模型覆盖',
+  'ri.routeDesc':
+    '按模型路由决定中间层是否生效。查表顺序：provider/model → provider → 总开关。覆盖项设为「强制开」时，即使总开关关闭也会挂载中间层。',
+  'ri.routeInherit': '跟随总开关',
+  'ri.routeOn': '强制开',
+  'ri.routeOff': '强制关',
+  'ri.routeCurrent': '当前路由',
+  'ri.routeActive': '本会话：{state} · {route}',
+  'ri.routeActiveOn': '中间层已生效',
+  'ri.routeActiveOff': '中间层未生效',
+  'ri.routeSourceModel': '按模型规则',
+  'ri.routeSourceProvider': '按 provider 规则',
+  'ri.routeSourceMaster': '按总开关',
+  'ri.routeSourceNoRoute': '模型未知 —— 只看总开关',
+  'ri.routeUnknown': '未知模型',
+  'ri.routeNoRouteHint':
+    '本次没有解析出会话模型（诊断装配或路由服务缺失），因此只有总开关参与判定 —— 按模型覆盖在此无从生效。这不是「覆盖没起作用」，而是路由本身未知。',
+  'ri.routeMounted': '中间层已挂载（控制工具对表中的模型可见）。',
+  'ri.routeNotMounted': '中间层未挂载。',
+  'ri.routeEmpty': '暂无可列出的路由（无会话模型且没有覆盖项）。',
+  // 工具批量控制（特性 1）
+  'ri.toolFilter': '过滤工具…',
+  'ri.toolBulkDisableAll': '全部禁用',
+  'ri.toolBulkEnableAll': '全部启用',
+  'ri.toolBulkDisableFiltered': '禁用筛出的 {n} 个',
+  'ri.toolBulkEnableFiltered': '启用筛出的 {n} 个',
+  'ri.toolBulkDone': '已改动 {n} 个工具。',
+  'ri.toolBulkIgnored': '有 {n} 条未识别（目录可能已变）。',
+  'ri.toolEnabledOf': '{total} 个工具中启用 {enabled} 个',
+  'ri.toolNoMatch': '没有匹配的工具。',
 }

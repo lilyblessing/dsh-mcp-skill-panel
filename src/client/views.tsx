@@ -335,6 +335,76 @@ const C = {
     fontSize: 11,
     whiteSpace: 'nowrap' as const,
   }),
+  // 工具批量控制条（0.6.0 特性 1）：过滤框 + 全部/按过滤 的批量启停动作。
+  // 450 工具的 server 不过滤没法用，所以过滤与批量是同一件工作流（先搜再全禁）。
+  toolBar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    flexWrap: 'wrap' as const,
+    marginTop: 6,
+  },
+  toolFilterInput: {
+    font: 'inherit',
+    fontSize: 12,
+    flex: '1 1 160px',
+    minWidth: 120,
+    padding: '3px 8px',
+    borderRadius: 5,
+    border: '1px solid var(--dsw-alias-border-l2)',
+    // 与 cfgInput 同款：输入槽用文字色淡染（主题自适应），不用未定义的 fill-l1。
+    background: 'color-mix(in srgb, var(--dsw-alias-label-primary) 7%, transparent)',
+    color: 'var(--dsw-alias-label-primary)',
+  },
+  bulkBtn: (busy: boolean): React.CSSProperties => ({
+    font: 'inherit',
+    cursor: busy ? 'default' : 'pointer',
+    opacity: busy ? 0.55 : 1,
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-alias-bg-layer-1)',
+    color: 'var(--dsw-alias-label-secondary)',
+    borderRadius: 5,
+    padding: '3px 10px',
+    fontSize: 11,
+    whiteSpace: 'nowrap' as const,
+  }),
+  // 分段控件（中间层隐藏范围 / 按模型覆盖三态共用）：选中态用主题自带的
+  // ghost-active 令牌，不学 PR 原稿的 color-mix + info 系令牌（那一族宿主未定义，属 C 段）。
+  routeRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '4px 0',
+    fontSize: 12,
+    borderTop: '1px solid var(--dsw-alias-border-l2)',
+    flexWrap: 'wrap' as const,
+  },
+  routeName: {
+    flex: '1 1 140px',
+    color: 'var(--dsw-alias-label-primary)',
+    fontWeight: 500,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  routeSeg: (active: boolean): React.CSSProperties => ({
+    font: 'inherit',
+    cursor: 'pointer',
+    border: '1px solid',
+    borderRadius: 5,
+    padding: '2px 9px',
+    fontSize: 11,
+    whiteSpace: 'nowrap' as const,
+    fontWeight: active ? 600 : 400,
+    color: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-tertiary)',
+    background: active ? 'var(--dsw-alias-button-ghost-active-fill)' : 'transparent',
+    borderColor: active ? 'var(--dsw-alias-button-ghost-active-border)' : 'var(--dsw-alias-border-l2)',
+  }),
+  // 批量动作结果回执（changed / ignoredToolNames）
+  toolNote: {
+    margin: 0,
+    fontSize: 11,
+    color: 'var(--dsw-alias-label-secondary)',
+  },
 }
 
 function formatK(n: number): string {
@@ -690,7 +760,16 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
 
       {view && tab === 'mcp' && (
         <>
-          <AutoManageCard on={(view as McpView).autoManage} busy={Boolean(busy.autoManage)} t={t} onToggle={toggleAutoManage} />
+          <AutoManageCard
+            on={(view as McpView).autoManage}
+            hides={(view as McpView).middleLayerHides}
+            mounted={(view as McpView).autoManageMounted}
+            busy={Boolean(busy.autoManage)}
+            t={t}
+            onToggle={toggleAutoManage}
+            loadMcp={loadMcp}
+          />
+          <RouteOverridesCard state={view as McpView} t={t} loadMcp={loadMcp} />
           <ApplyTimingCard
             applyMode={applyMode}
             hasPending={hasPending}
@@ -737,11 +816,36 @@ function Badge(props: { color: string; bg: string; children: React.ReactNode; ti
 
 function AutoManageCard(props: {
   on: boolean
+  hides: 'disabled' | 'all'
+  mounted: boolean
   busy: boolean
   t: Props['t']
   onToggle: () => void
+  loadMcp: () => void
 }): React.ReactElement {
-  const { on, busy, t, onToggle } = props
+  const { on, hides, mounted, busy, t, onToggle, loadMcp } = props
+  const [hidesBusy, setHidesBusy] = useState(false)
+  const [hidesErr, setHidesErr] = useState<string | null>(null)
+  const setHides = useCallback(
+    async (next: 'disabled' | 'all') => {
+      if (next === hides) return
+      setHidesBusy(true)
+      setHidesErr(null)
+      try {
+        await panelPost('/api/mcp-skill-panel/config', { middleLayerHides: next })
+        loadMcp()
+      } catch (error) {
+        setHidesErr(error instanceof Error ? error.message : String(error))
+      } finally {
+        setHidesBusy(false)
+      }
+    },
+    [hides, loadMcp],
+  )
+  // 隐藏范围只在中间层**实际挂载**时才有意义，而挂载条件是「总开关开 或 覆盖表有 true 项」
+  // —— 所以判据用 mounted（运行期读数），不用总开关 on：否则总开关关但覆盖项 true 时
+  // 用户看不到也改不了这个开关。
+  const showHides = on || mounted
   // 按钮与 MCP 卡片统一为「动作语义」配色（用户截图确认）：
   // 启用中=红「停用」、停用中=绿「启用」。注意 C.toggle 的参数语义是 disabled
   // （停用=绿），直接传 on 会得到相反效果 —— 必须反转传参 C.toggle(!on)。
@@ -752,7 +856,7 @@ function AutoManageCard(props: {
           {t('ri.autoManageTitle')}
           <Badge
             color={on ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-tertiary)'}
-            bg={on ? 'var(--dsw-alias-state-success-tertiary)' : 'var(--dsw-alias-fill-l2)'}
+            bg={on ? 'var(--dsw-alias-state-success-tertiary)' : 'var(--dsw-alias-bg-layer-2)'}
           >
             {on ? t('ri.autoManageOn') : t('ri.autoManageOff')}
           </Badge>
@@ -767,6 +871,162 @@ function AutoManageCard(props: {
         </button>
       </div>
       <p style={C.cardDesc}>{on ? t('ri.autoManageDescOn') : t('ri.autoManageDescOff')}</p>
+      {/* 0.6.0 特性 5a：中间层隐藏范围。'all' 时连已启用的 server 也从模型面隐藏
+          （server 保持运行，中间层未生效的模型照旧直连）。 */}
+      {showHides && (
+        <>
+          <div style={{ ...C.routeRow, borderTop: 0 }}>
+            <span style={C.routeName}>{t('ri.hidesLabel')}</span>
+            <span style={{ display: 'flex', gap: 4 }}>
+              <button
+                type="button"
+                style={{ ...C.routeSeg(hides === 'disabled'), ...(hidesBusy ? C.toggleDisabled : {}) }}
+                disabled={hidesBusy}
+                onClick={() => void setHides('disabled')}
+              >
+                {t('ri.hidesDisabled')}
+              </button>
+              <button
+                type="button"
+                style={{ ...C.routeSeg(hides === 'all'), ...(hidesBusy ? C.toggleDisabled : {}) }}
+                disabled={hidesBusy}
+                onClick={() => void setHides('all')}
+              >
+                {t('ri.hidesAll')}
+              </button>
+            </span>
+          </div>
+          <p style={C.hint}>{hides === 'all' ? t('ri.hidesDescAll') : t('ri.hidesDescDisabled')}</p>
+          {hidesErr && <div style={C.error}>{hidesErr}</div>}
+        </>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 0.6.0 特性 4：按模型覆盖表（三态：跟随总开关 / 强制开 / 强制关）→ `config.autoManageByRoute`。
+ *
+ * 数据来源说明（本仓**没有** `/models` 端点，/config 只回显覆盖表）：行集合 = 覆盖表现有键
+ * ∪ 当前会话路由（`autoManageActive.provider` 与 `provider/model`）。因此面板只保证「当前
+ * 模型」与「已配置的键」可编辑；要为一个当前会话之外的模型预置规则，需先切到该模型。
+ * 这比 PR 原稿（拉 provider 目录、每个 provider 一次 listModels 网络调用）少一条无鉴权
+ * GET，见评审 WARN-3。
+ */
+function RouteOverridesCard(props: {
+  state: McpView
+  t: Props['t']
+  loadMcp: () => void
+}): React.ReactElement {
+  const { state, t, loadMcp } = props
+  const [busyKey, setBusyKey] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  const setOverride = useCallback(
+    async (key: string, value: boolean | null) => {
+      setBusyKey(key)
+      setErr(null)
+      try {
+        // value=null → 后端删掉该项（= 跟随总开关），不会写 false 进表
+        await panelPost('/api/mcp-skill-panel/config', { routeOverride: { key, value } })
+        loadMcp()
+      } catch (error) {
+        setErr(error instanceof Error ? error.message : String(error))
+      } finally {
+        setBusyKey(null)
+      }
+    },
+    [loadMcp],
+  )
+
+  const current = (key: string): boolean | null => {
+    const value = state.autoManageByRoute[key]
+    return typeof value === 'boolean' ? value : null
+  }
+
+  const segment = (key: string): React.ReactElement => {
+    const value = current(key)
+    const disabled = busyKey === key
+    const option = (label: string, target: boolean | null): React.ReactElement => (
+      <button
+        type="button"
+        style={{ ...C.routeSeg(value === target), ...(disabled ? C.toggleDisabled : {}) }}
+        disabled={disabled}
+        onClick={() => void setOverride(key, target)}
+      >
+        {label}
+      </button>
+    )
+    return (
+      <span style={{ display: 'flex', gap: 4 }}>
+        {option(t('ri.routeInherit'), null)}
+        {option(t('ri.routeOn'), true)}
+        {option(t('ri.routeOff'), false)}
+      </span>
+    )
+  }
+
+  const active = state.autoManageActive
+  // 当前路由行：provider 级与 provider/model 级各一行（命中优先级 model > provider）。
+  const activeKeys = [active.provider, active.provider && active.model ? `${active.provider}/${active.model}` : null].filter(
+    (key): key is string => typeof key === 'string' && key.length > 0,
+  )
+  const keys = [...new Set([...activeKeys, ...Object.keys(state.autoManageByRoute)])]
+  const sourceLabel =
+    active.source === 'model'
+      ? t('ri.routeSourceModel')
+      : active.source === 'provider'
+        ? t('ri.routeSourceProvider')
+        : active.source === 'master'
+          ? t('ri.routeSourceMaster')
+          : t('ri.routeSourceNoRoute')
+  const routeLabel = active.provider && active.model ? `${active.provider}/${active.model}` : t('ri.routeUnknown')
+  // 诊断装配（无 agent）时 source='no-route'：必须显式说出来，否则用户看到
+  // 「强制开」却没生效会以为是 bug（评审 §6-2 的隐藏风险）。
+  const noRoute = active.source === 'no-route'
+
+  return (
+    <div style={C.card}>
+      <div style={C.cardTop}>
+        <h3 style={C.cardTitle}>
+          {t('ri.routeTitle')}
+          <Badge
+            color={active.on ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-tertiary)'}
+            bg={active.on ? 'var(--dsw-alias-state-success-tertiary)' : 'var(--dsw-alias-bg-layer-2)'}
+          >
+            {active.on ? t('ri.routeActiveOn') : t('ri.routeActiveOff')}
+          </Badge>
+          {noRoute && (
+            <Badge color="var(--dsw-alias-state-warn-primary)" bg="var(--dsw-alias-state-warn-tertiary)" title={t('ri.routeNoRouteHint')}>
+              {t('ri.routeSourceNoRoute')}
+            </Badge>
+          )}
+        </h3>
+      </div>
+      <p style={C.cardDesc}>{t('ri.routeDesc')}</p>
+      <p style={C.cardMeta}>
+        {t('ri.routeActive', { state: sourceLabel, route: routeLabel })}
+        {' · '}
+        {state.autoManageMounted ? t('ri.routeMounted') : t('ri.routeNotMounted')}
+      </p>
+      {err && <div style={C.error}>{err}</div>}
+      {keys.length === 0 && !err && <p style={C.cardMeta}>{t('ri.routeEmpty')}</p>}
+      {keys.map((key, index) => (
+        <div key={key} style={{ ...C.routeRow, ...(index === 0 ? { borderTop: 0 } : {}) }}>
+          <span style={C.routeName} title={key}>
+            {key}
+            {activeKeys.includes(key) && (
+              <>
+                {' '}
+                <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--dsw-alias-label-tertiary)' }}>
+                  · {t('ri.routeCurrent')}
+                </span>
+              </>
+            )}
+          </span>
+          {segment(key)}
+        </div>
+      ))}
     </div>
   )
 }
@@ -1009,10 +1269,59 @@ function McpPanel(props: {
   // 工具行禁用开关临时态（立即生效后由 loadMcp 校准）
   const [toolBusy, setToolBusy] = useState<Record<string, boolean>>({})
   const [toolErr, setToolErr] = useState<string | null>(null)
+  // 0.6.0 特性 1：每 server 的工具过滤词（450 工具的 server 不过滤根本没法用）
+  const [toolFilter, setToolFilter] = useState<Record<string, string>>({})
+  // 批量动作进行中的 server（按钮防重入）
+  const [bulkBusy, setBulkBusy] = useState<Record<string, boolean>>({})
+  // 批量动作回执（已改动 N 条 / 有 K 条未识别）—— 没有它批量操作在 UI 上不可见
+  const [toolNote, setToolNote] = useState<string | null>(null)
   // 0.7.0「更多配置」：点开哪一行（null = 关闭）
   const [cfgRow, setCfgRow] = useState<McpRow | null>(null)
   // 工具预算红线：与展示的数同源（toolsAllEnabled，口径见 BudgetCard）
   const overBudget = state.toolBudget !== null && state.toolsAllEnabled > state.toolBudget
+
+  /**
+   * 批量启停（`POST /mcp/toolBulk`）。
+   *
+   * 发参纪律 —— 后端 `resolveToolBulkTargets` 是三态契约：
+   * - **省略** `toolNames` = 该 server 的全部工具（唯一的「全部」写法）；
+   * - 显式数组 = 精确集合；`[]` 是合法空操作（不写盘、changed=0、仍 200）；
+   * - 非数组 / 非空却一条都不匹配 = 400。
+   *
+   * 所以这里**永远**传显式全名数组，绝不让字段缺失：调用方算错名单的最坏后果是
+   * 「一条都没动」，而不是「整个 server 被全量误禁并写盘」。
+   */
+  const toolBulk = useCallback(
+    async (serverName: string, disabled: boolean, toolNames: string[]) => {
+      setBulkBusy((prev) => ({ ...prev, [serverName]: true }))
+      setToolErr(null)
+      setToolNote(null)
+      try {
+        const body = await panelPost<{
+          ok: boolean
+          error?: string
+          changed?: number
+          ignoredToolNames?: string[]
+        }>('/api/mcp-skill-panel/mcp/toolBulk', { serverName, disabled, toolNames })
+        const changed = body.changed ?? 0
+        const ignored = body.ignoredToolNames ?? []
+        // changed = 真正翻转的条数（幂等点击可能为 0）；ignoredToolNames = 点名了但
+        // 不在当前目录里的名字（60s 缓存过期 / 目录漂移），必须让用户看见。
+        setToolNote(
+          ignored.length > 0
+            ? `${t('ri.toolBulkDone', { n: changed })} ${t('ri.toolBulkIgnored', { n: ignored.length })}`
+            : t('ri.toolBulkDone', { n: changed }),
+        )
+        loadMcp()
+      } catch (err) {
+        setToolErr(err instanceof Error ? err.message : String(err))
+        loadMcp()
+      } finally {
+        setBulkBusy((prev) => ({ ...prev, [serverName]: false }))
+      }
+    },
+    [loadMcp, t],
+  )
 
   const toolToggle = useCallback(async (row: McpRow, tool: NonNullable<McpRow['toolList']>[number]) => {
     const key = `${row.entryId}:${tool.name}`
@@ -1091,6 +1400,7 @@ function McpPanel(props: {
       </div>
       <BudgetCard state={state} t={t} loadMcp={loadMcp} />
       {toolErr && <div style={C.error}>{toolErr}</div>}
+      {toolNote && <p style={C.toolNote}>{toolNote}</p>}
       {state.mcp.length === 0 && <div style={C.empty}>{t('ri.empty')}</div>}
       {state.mcp.map((row) => {
         const st = statusOf(row)
@@ -1100,6 +1410,21 @@ function McpPanel(props: {
         const effDisabled = applyMode === 'next-session' && row.pending ? (row.desired ?? row.disabled) : row.disabled
         const isOpen = Boolean(expanded[row.entryId])
         const toolList = row.toolList ?? []
+        // 过滤同时匹配工具名与描述：「和某个 use case 有关的工具」比记全名更常见。
+        const filterText = toolFilter[row.entryId] ?? ''
+        const needle = filterText.trim().toLowerCase()
+        const filtered = needle.length > 0
+        const visibleTools = filtered
+          ? toolList.filter(
+              (tool) => tool.name.toLowerCase().includes(needle) || tool.description.toLowerCase().includes(needle),
+            )
+          : toolList
+        const isBulkBusy = Boolean(bulkBusy[row.serverName])
+        // 批量发参：一律给**显式全名数组**（后端 toolNames 缺省 = 全部，绝不能让字段缺失）。
+        // 「全部」= 本 server 的全量名单；「按当前过滤」= 筛出名单，筛出 0 项时天然是 []，
+        // 即后端的合法空操作（不写盘、changed=0）。
+        const allToolNames = toolList.map((tool) => tool.name)
+        const filteredToolNames = visibleTools.map((tool) => tool.name)
         return (
           <div key={row.entryId} style={C.card}>
             <div style={C.cardTop}>
@@ -1168,25 +1493,80 @@ function McpPanel(props: {
                     ? `▾ ${t('ri.toolListHide')} (${row.toolsEnabled}/${toolList.length})`
                     : `▸ ${t('ri.toolListShow')} (${row.toolsEnabled}/${toolList.length})`}
                 </button>                {isOpen && (
-                  <div style={C.toolList}>
-                    {toolList.map((tool) => {
-                      const tBusy = toolBusy[`${row.entryId}:${tool.name}`]
-                      return (
-                        <div key={tool.name} style={C.toolRow}>
+                  <>
+                    {/* 0.6.0 特性 1：过滤 + 批量启停。「全部」作用于全量名单，「筛出的 N 个」
+                        作用于当前过滤结果；有过滤词但 0 命中时后两个按钮禁用 —— 否则用户
+                        会以为点下去做了点什么（实际只会是一次空操作）。 */}
+                    <div style={C.toolBar}>
+                      <input
+                        style={C.toolFilterInput}
+                        placeholder={t('ri.toolFilter')}
+                        value={filterText}
+                        onChange={(event) => setToolFilter((prev) => ({ ...prev, [row.entryId]: event.target.value }))}
+                      />
+                      <button
+                        type="button"
+                        style={C.bulkBtn(isBulkBusy)}
+                        disabled={isBulkBusy}
+                        onClick={() => void toolBulk(row.serverName, true, allToolNames)}
+                      >
+                        {t('ri.toolBulkDisableAll')}
+                      </button>
+                      <button
+                        type="button"
+                        style={C.bulkBtn(isBulkBusy)}
+                        disabled={isBulkBusy}
+                        onClick={() => void toolBulk(row.serverName, false, allToolNames)}
+                      >
+                        {t('ri.toolBulkEnableAll')}
+                      </button>
+                      {filtered && (
+                        <>
                           <button
                             type="button"
-                            style={{ ...C.toolSwitch(tool.disabled), ...(tBusy ? C.toggleDisabled : {}) }}
-                            disabled={tBusy}
-                            onClick={() => void toolToggle(row, tool)}
+                            style={C.bulkBtn(isBulkBusy || filteredToolNames.length === 0)}
+                            disabled={isBulkBusy || filteredToolNames.length === 0}
+                            onClick={() => void toolBulk(row.serverName, true, filteredToolNames)}
                           >
-                            {tBusy ? t('ri.pending') : tool.disabled ? t('ri.enable') : t('ri.disable')}
+                            {t('ri.toolBulkDisableFiltered', { n: filteredToolNames.length })}
                           </button>
-                          <span style={C.toolName}>{tool.name.replace(/^mcp__[^_]+__/, '')}</span>
-                          <span style={C.toolDesc}>{tool.description || '—'}</span>
-                        </div>
-                      )
-                    })}
-                  </div>
+                          <button
+                            type="button"
+                            style={C.bulkBtn(isBulkBusy || filteredToolNames.length === 0)}
+                            disabled={isBulkBusy || filteredToolNames.length === 0}
+                            onClick={() => void toolBulk(row.serverName, false, filteredToolNames)}
+                          >
+                            {t('ri.toolBulkEnableFiltered', { n: filteredToolNames.length })}
+                          </button>
+                        </>
+                      )}
+                      <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
+                        {t('ri.toolEnabledOf', { enabled: row.toolsEnabled, total: toolList.length })}
+                      </span>
+                    </div>
+                    <div style={C.toolList}>
+                      {visibleTools.length === 0 && (
+                        <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>{t('ri.toolNoMatch')}</div>
+                      )}
+                      {visibleTools.map((tool) => {
+                        const tBusy = toolBusy[`${row.entryId}:${tool.name}`]
+                        return (
+                          <div key={tool.name} style={C.toolRow}>
+                            <button
+                              type="button"
+                              style={{ ...C.toolSwitch(tool.disabled), ...(tBusy ? C.toggleDisabled : {}) }}
+                              disabled={tBusy}
+                              onClick={() => void toolToggle(row, tool)}
+                            >
+                              {tBusy ? t('ri.pending') : tool.disabled ? t('ri.enable') : t('ri.disable')}
+                            </button>
+                            <span style={C.toolName}>{tool.name.replace(/^mcp__[^_]+__/, '')}</span>
+                            <span style={C.toolDesc}>{tool.description || '—'}</span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </>
                 )}
               </>
             )}
