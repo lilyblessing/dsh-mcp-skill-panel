@@ -39,6 +39,8 @@ import type { McpControlCtx, McpCallController } from './mcpcall'
 import { createMcpCallController, installMcpControlTools } from './mcpcall'
 
 export { normalizeToolName, normalizeArguments, msgOf } from './mcpcall'
+// 中间层控制工具名（命名前缀铁律见 mcpcall.ts：不得以 mcp_ 开头）
+export { MCP_SEARCH_TOOL, MCP_CALL_TOOL, CONTROL_TOOL_NAMES } from './mcpcall'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
 import type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
 import { createDomainCaches, getSchemasView, resolveCollectScopeKey, type DomainCaches } from './collect'

@@ -1,4 +1,4 @@
-# MCP 中间层控制设计（mcp_search + mcp_call + 私有 catalog）
+# MCP 中间层控制设计（dsh_mcp_search + dsh_mcp_call + 私有 catalog）
 
 > 状态：实施中（P0-P4 完成 + v0.4.1 采集链路修复 + v0.4.2 按状态过滤/面板开关） · 基于 2026-08 全部实测结论 · 关联 README「工作原理」
 
@@ -6,7 +6,7 @@
 
 现有插件（dsh-mcp-skill-panel）已实现**人工** MCP 启停面板。本设计新增**模型自主按需使用 MCP** 的形态 2（中间层代理）：
 
-- 模型面：`mcp_search`（按需检索目录，返回 top-K 精确 schema）+ `mcp_call`（保活启用 → 插件内执行 → 空闲回收）
+- 模型面：`dsh_mcp_search`（按需检索目录，返回 top-K 精确 schema）+ `dsh_mcp_call`（保活启用 → 插件内执行 → 空闲回收）
 - **可见性由用户启停决定**（v0.4.2）：用户打开的 server 工具进上下文（memory 高灵敏召回）；用户停用的 server 对模型隐藏、经中间层按需调用；AI 临时启用的 server 不污染上下文
 - MCP 默认全停 → 模型按能力需要临时启用 → 用完自动回收
 
@@ -24,12 +24,12 @@
 
 ```
 ┌─ 模型可见面（恒定 2 工具）──────────────────────┐
-│  mcp_search(关键词) → top-K 精确 schema        │
-│  mcp_call(server, tool, args) → 执行结果       │
+│  dsh_mcp_search(关键词) → top-K 精确 schema        │
+│  dsh_mcp_call(server, tool, args) → 执行结果       │
 └───────────────────────────────────────────────┘
         │                              │
         ▼                              ▼
-┌─ 私有 catalog ────────────────┐  ┌─ 控制层（mcp_call 执行体）─────────┐
+┌─ 私有 catalog ────────────────┐  ┌─ 控制层（dsh_mcp_call 执行体）─────────┐
 │  server → 工具 schema 快照     │  │  保活启用（loader.update）          │
 │  · tools/change 增量采集       │  │  → 等注册（tools/change+轮询）      │
 │  · 惰性采集兜底（临时启用快照） │  │  → ctx.tools.execute               │
@@ -60,7 +60,7 @@
 ### A. 可见性过滤（模型侧核心）
 
 - 注册 `ctx.root.on('system-prompt/assemble', ...)`：按 server 状态过滤 `assembly.tools`（v0.4.2），然后 `return next()`
-- 判定：`isMcpVisible(serverName)` = 非 AI 临时启用 且 loader entry 非 disabled。**用户打开的 server（含预设默认启用）工具保留进上下文**（memory 高灵敏召回、filesystem 直接读写）；**停用的 server 过滤**（经 mcp_search/mcp_call 按需调用）；**AI 临时启用（mcp_call 保活中）的 server 仍过滤**（按需不污染、无上下文抖动）
+- 判定：`isMcpVisible(serverName)` = 非 AI 临时启用 且 loader entry 非 disabled。**用户打开的 server（含预设默认启用）工具保留进上下文**（memory 高灵敏召回、filesystem 直接读写）；**停用的 server 过滤**（经 dsh_mcp_search/dsh_mcp_call 按需调用）；**AI 临时启用（dsh_mcp_call 保活中）的 server 仍过滤**（按需不污染、无上下文抖动）
 - 每回合装配时执行，实时生效；tools registry 不受影响（`tools.execute` 照常）
 - **用户手动打开 = 清除 AI 标记**：toggleMcp 启用方向调用 `controller.markUserEnabled()`（清 aiEnabled/计数/lastUsed + state.json ai owner），转为「用户打开」语义 —— 模型立即可见、回收器不再回收
 - ✅ **已实测（2026-08-17 动态探针）**：`ctx.on('system-prompt/assemble')` 可收到事件（emit ctx 向下传播到后代 ctx），监听器改写 `assembly.tools` 后经 `next()` 传导成立。standing scope 基线 96 工具（含 56 个 `mcp__*`）→ 全过滤后 40 工具（0 个 `mcp__*`），非 MCP 工具原样保留；按状态过滤路径（用户打开保留 / 停用过滤）随 v0.4.2 部署验证
@@ -70,12 +70,12 @@
 - **数据**：`{ [serverName]: { tools: [{name, description, parameters}], fetchedAt, source: 'live'|'cached' } }`
 - **采集通道**：
   1. 增量快照（主）：`tools/change` 后，对 enabled server 用 `tools.schemas(scopeOf(agent.ctx))` 分组快照（preset 层共享，任一 agent 的 scope 即可）
-  2. 惰性采集兜底：`mcp_search` 命中 catalog 缺失的 server → 临时 enable → 等注册 → 快照 → 若原 disabled 则立即 disable
+  2. 惰性采集兜底：`dsh_mcp_search` 命中 catalog 缺失的 server → 临时 enable → 等注册 → 快照 → 若原 disabled 则立即 disable
 - **持久化**：`~/.dsh/dsh-mcp-skill-panel/catalog.json`（0600），启动加载 + 变更写回（复用状态文件模式）
 - **检索**：关键词分词 + 打分（name 权重最高 > description > 参数名），顺序扫描（工具数 ≤1000 时毫秒级；超过再考虑索引）→ top-K（默认 5，上限 10）
 - **面板联动**：state 端点 mcp 行的 `tools/tokens` 优先显示 catalog 值（停用态也能看到「目录中有 173 个工具」）
 
-### C. mcp_search 工具
+### C. dsh_mcp_search 工具
 
 - 参数：`{ query: string, server?: string, limit?: number }`
 - 行为：
@@ -84,7 +84,7 @@
   - 无 query 无 server：返回能力摘要表（见 E）
 - 输出：JSON 文本（render 为 text）
 
-### D. mcp_call 工具（控制层）
+### D. dsh_mcp_call 工具（控制层）
 
 - 参数：`{ server, tool, arguments }`（server 用 catalog 里的 serverName）
 - 执行体：
@@ -103,7 +103,7 @@
   - `cheatengine: 游戏进程内存读写与调试`
   - `mimo-image: 图片理解与描述（小米 MIMO 多模态）`
   - `chrome: 浏览器自动化（导航/点击/截图/控制台）`
-- 用途：mcp_search 空查询时返回；辅助模型「知道有哪些 MCP」
+- 用途：dsh_mcp_search 空查询时返回；辅助模型「知道有哪些 MCP」
 
 ## 5. 配置项（Config 扩展）
 
@@ -111,13 +111,13 @@
 {
   autoManage: boolean          // false（默认）：现状，纯面板；true：形态 2 激活
   keepAliveMs: number          // 默认 30_000，空闲回收窗口
-  searchLimitDefault: 5        // mcp_search top-K 默认
+  searchLimitDefault: 5        // dsh_mcp_search top-K 默认
   searchLimitMax: 10
   serverSummary?: Record<string, string>  // 能力摘要表
 }
 ```
 
-autoManage=false 时：不注册 mcp_search/mcp_call、不过滤装配、回收器不启动——**零行为变化**（向后兼容）。
+autoManage=false 时：不注册 dsh_mcp_search/dsh_mcp_call、不过滤装配、回收器不启动——**零行为变化**（向后兼容）。
 
 ## 6. 与现有代码的关系
 
@@ -137,7 +137,7 @@ autoManage=false 时：不注册 mcp_search/mcp_call、不过滤装配、回收�
 | `system-prompt/assemble` 改写传导（已解除） | ✅ P0 探针实测通过：`assembly.tools` 改写经 Waterfall `next()` 传导，`mcp__*` 56→0；无需瞬态退路 |
 | 保活期间其他会话模型回合恰好装配（过滤前） | 过滤是全局装配点，启用与装配无关——无此风险（过滤机制成立时） |
 | 工具重名/多 server 同名工具 | 完整 id `mcp__<server>__<tool>` 唯一；server 名冲突时 loader 行反查报错 |
-| mcp_call 参数透传失败（实测案例 B 第 6 次失败） | 返回 server 原始错误文本，模型自行重试（与直接调用体验一致） |
+| dsh_mcp_call 参数透传失败（实测案例 B 第 6 次失败） | 返回 server 原始错误文本，模型自行重试（与直接调用体验一致） |
 | catalog 采集的 scope 依赖 | 任一会话存在即可采集；无会话时惰性采集通道（临时启用）兜底 |
 | 回收误关用户手动启用的 | owner 标记：仅回收 AI 启用的 |
 
@@ -147,7 +147,7 @@ autoManage=false 时：不注册 mcp_search/mcp_call、不过滤装配、回收�
 |---|---|---|
 | P0 | 验证 `system-prompt/assemble` 过滤传导（动态探针：装配过滤 + 确认模型请求工具列表无 mcp__） | ✅ 通过（2026-08-17 探针：96→40 工具，`mcp__*` 56→0） |
 | P1 | catalog：采集/检索/持久化/惰性采集 + 单测 | ✅ 已提交（c42f5ab）+ selftest-mcp.mjs 单测 |
-| P2 | mcp_call + 保活回收 + mcp_search + 能力表 + autoManage 接线 | ✅ 已提交（c42f5ab）+ **案例复测通过（2026-08-16）**：案例 1 chrome→bilibili→mimo 识图全链路；案例 2 calcmcp 8 次连击零重复 spawn（进程恒 1）+ 30s 空闲自动回收（进程退出 + ai owner 清除） |
+| P2 | dsh_mcp_call + 保活回收 + dsh_mcp_search + 能力表 + autoManage 接线 | ✅ 已提交（c42f5ab）+ **案例复测通过（2026-08-16）**：案例 1 chrome→bilibili→mimo 识图全链路；案例 2 calcmcp 8 次连击零重复 spawn（进程恒 1）+ 30s 空闲自动回收（进程退出 + ai owner 清除） |
 | P3 | owner 标记、并发计数、面板联动、README | ✅ 面板联动已提交（0894214）；owner/并发计数随 P2；README 已定稿 |
 | P4 | 发布（版本 bump + 产物 + 文档） | ✅ v0.4.0 已发布 + 安装验证；**采集链路修复**（见 §11）随 v0.4.1 |
 

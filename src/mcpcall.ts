@@ -32,6 +32,22 @@ const REGISTER_POLL_MS = 50
 const DEFAULT_TOOL_TIMEOUT_MS = 60_000
 
 /**
+ * 中间层两个模型工具的注册名。
+ *
+ * 命名前缀铁律（2026-09-15，claude 400 取证）：**不得以 `mcp_` 开头**。
+ * 实测 claude.ai 订阅网关把 `mcp_` 前缀的工具名当作 MCP connector 保留名，
+ * 整个请求被拒为 HTTP 400 `invalid_request_error`，且错误文案被改写成
+ * 「You're out of extra usage」（与配额无关，极具误导性）。
+ * 证据：同一会话 16 秒内 486 工具（含本组）→400、484 工具（不含）→正常、
+ * 486 →400；32 工具的最小集同样复现，与工具数量/体积无关。
+ * 全部 session 统计：含本组 0/5 成功，不含本组 111/111 成功。
+ */
+export const MCP_SEARCH_TOOL = 'dsh_mcp_search'
+export const MCP_CALL_TOOL = 'dsh_mcp_call'
+/** 两个控制工具的名字集合（装配过滤按模型路由决定是否投放）。 */
+export const CONTROL_TOOL_NAMES: ReadonlySet<string> = new Set([MCP_SEARCH_TOOL, MCP_CALL_TOOL])
+
+/**
  * 归一化 mcp_call 的 tool 参数（2026-08-22 修补）：模型可能把 mcp_search 返回的
  * 注册全名（mcp__<server>__<tool>）直接填入 tool，无条件拼接会生成双重前缀。
  * 规则：以 mcp__ 开头视为注册全名形态 → 循环剥离本 server 前缀（兼容嵌套重复）；
@@ -46,7 +62,7 @@ export function normalizeToolName(serverName: string, toolName: string): string 
     while (name.startsWith(prefix)) name = name.slice(prefix.length)
     if (name.startsWith('mcp__')) {
       throw new Error(
-        `mcp_call: tool 参数疑似其他 MCP server 的注册全名（${JSON.stringify(toolName)}，server="${serverName}"）；请传该 server 上的裸名（如 understand_image，不带 mcp__ 前缀）`,
+        `${MCP_CALL_TOOL}: tool 参数疑似其他 MCP server 的注册全名（${JSON.stringify(toolName)}，server="${serverName}"）；请传该 server 上的裸名（如 understand_image，不带 mcp__ 前缀）`,
       )
     }
   }
@@ -440,7 +456,7 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
         return text.length > 0 ? text : `MCP ${serverName}.${bareTool} 无返回内容`
       } catch (error) {
         failed = true
-        return `MCP ${serverName}.${bareTool} 调用异常：${msgOf(error)}（提示：tool 参数应传该 server 上的裸名；server/tool 是否存在可先 mcp_search 确认）`
+        return `MCP ${serverName}.${bareTool} 调用异常：${msgOf(error)}（提示：tool 参数应传该 server 上的裸名；server/tool 是否存在可先 ${MCP_SEARCH_TOOL} 确认）`
       } finally {
         const next = (state.refCounts.get(serverName) ?? 1) - 1
         if (next <= 0) state.refCounts.delete(serverName)
@@ -504,7 +520,7 @@ function buildSummary(control: McpControlCtx): Array<{ server: string; summary: 
 
 function registerMcpSearchTool(ctx: Context, control: McpControlCtx): () => void {
   const definition = defineTool({
-    name: 'mcp_search',
+    name: MCP_SEARCH_TOOL,
     description:
       '检索可用的 MCP 服务器与工具目录。空参数返回能力摘要表；传 server 列出该服务器的全部工具；传 query 做关键词 top-K 全文检索（命中返回完整 schema）。',
     parameters: {
@@ -560,13 +576,19 @@ function toJson(value: unknown): JsonValue {
 
 function registerMcpCallTool(ctx: Context, controller: McpCallController): () => void {
   const definition = defineTool({
-    name: 'mcp_call',
+    name: MCP_CALL_TOOL,
     description:
       '调用一个 MCP 服务器上的工具。自动保活启用目标 server（用完按 keepAliveMs 空闲回收），等待注册后在下层执行。参数透传给远端工具。',
     parameters: {
-      server: { type: 'string', required: true, description: 'MCP 服务器名（见 mcp_search 摘要）' },
+      server: { type: 'string', required: true, description: `MCP 服务器名（见 ${MCP_SEARCH_TOOL} 摘要）` },
       tool: { type: 'string', required: true, description: '该 server 上的工具名（裸名，如 understand_image；误传注册全名 mcp__<server>__<tool> 会自动归一化）' },
-      arguments: { type: 'json', description: '传给远端工具的参数字典；必须传 JSON 对象本身，不要传 JSON 字符串（兼容：误传字符串会自动解析）' },
+      // type:'object' 而非 'json'：'json' 的编译产物是**无 type 标注**的属性节点，
+      // 对严格校验 input_schema 的 provider 是不必要的风险面（2026-09-15 claude 取证期排查）。
+      arguments: {
+        type: 'object',
+        additionalProperties: true,
+        description: '传给远端工具的参数字典；必须传 JSON 对象本身，不要传 JSON 字符串（兼容：误传字符串会自动解析）',
+      },
     },
     output: {
       schema: { type: 'string' },

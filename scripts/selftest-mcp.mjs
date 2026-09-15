@@ -564,6 +564,15 @@ check('parsePresetMcpText：引号值去引号 + transport 缺席为 null', () =
   assert.equal(parsed.get('mcp-notransport').transport, null)
 })
 
+// 控制工具命名前缀铁律（2026-09-15 claude 400 取证）
+check('控制工具名不得以 mcp_ 开头（claude.ai 网关保留前缀 → HTTP 400）', () => {
+  for (const name of index.CONTROL_TOOL_NAMES) {
+    assert.ok(!/^mcp_(?!_)/.test(name), `控制工具名 ${name} 命中保留前缀 mcp_`)
+  }
+  assert.equal(index.MCP_SEARCH_TOOL, 'dsh_mcp_search')
+  assert.equal(index.MCP_CALL_TOOL, 'dsh_mcp_call')
+})
+
 if (failed) {
   console.log('\nselftest: FAILED')
   process.exit(1)
