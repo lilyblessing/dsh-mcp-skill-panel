@@ -30,12 +30,19 @@ export type StateFile = {
     config?: {
         autoManage?: boolean;
         applyMode?: ApplyMode;
+        /**
+         * 工具预算（面板红线提示用，如 grok 的 350 上限）；缺省不提示。
+         * 与其它面板可写值一样只落 state.json（**不**进 cordis Config）。
+         */
+        toolBudget?: number;
     };
 };
 /** 生效时机：immediate=立即（默认，下轮生效）；next-session=记意图、新会话/重启生效。 */
 export type ApplyMode = 'immediate' | 'next-session';
 /** 当前生效时机（缺省 immediate）。 */
 export declare function stateApplyMode(state: StateFile): ApplyMode;
+/** 工具预算（>0 的有限数才有效，否则视为未设置）。 */
+export declare function stateToolBudget(state: StateFile): number | undefined;
 export declare function readState(): Promise<StateFile>;
 export declare function writeState(state: StateFile): Promise<void>;
 /** AI-owner 标记读写：state.json 的 ai 段（entryId → {at}）。 */

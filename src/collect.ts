@@ -9,13 +9,13 @@ import { scopeOf } from '@deepseek-ai/dsh-scope'
 import type { McpRow, McpView, SkillsView } from './shared-types'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
 import { projectServerOwner, getActiveWorkspace } from './project-mcp'
-import { disabledToolsOf } from './tool-disable'
+import { disabledToolsOf, isToolDisabled } from './tool-disable'
 import type { CatalogServer } from './catalog'
 import { serverOfMcp } from './catalog'
 import type { McpCallController } from './mcpcall'
 import type { CatalogRuntime } from './index'
 import { messageOf } from './util'
-import { readState } from './state'
+import { readState, stateToolBudget } from './state'
 import { pendingMcp } from './pending'
 import { listPresetMcpRows } from './preset-mcp'
 import { gatewayServerOfEntryId } from './gateway'
@@ -292,6 +292,66 @@ function catalogTokens(runtime: CatalogRuntime, serverName: string, info: Catalo
   return tokens
 }
 
+/**
+ * 行级**工具级启用数**：按禁用集合折算该 server 的工具数与 token 估算。
+ *
+ * 口径（2026-09-16 移植裁量 F1）：这是「工具级启用数」而**不是**「实际进入上下文的
+ * 工具数」—— 与 installToolDisableFilter 同源（同一张表、同一套作用域分派），但
+ * 不减 server 级可见性（AI 临时启用 / 面板隐藏 server）与 project-mcp 的工作区过滤。
+ * 面板文案不得越界声明。
+ */
+function effectiveOf(
+  toolList: Array<{ name: string; tokens: number }> | undefined,
+  toolDisabled: ReadonlySet<string>,
+  fallbackTools: number,
+  fallbackTokens: number,
+): { toolsEnabled: number; tokensEnabled: number } {
+  // 工具目录不可得（scope 异常且无 catalog 快照）：退回整行值，宁可高估也不谎报 0。
+  if (!toolList) return { toolsEnabled: fallbackTools, tokensEnabled: fallbackTokens }
+  let toolsEnabled = 0
+  let tokensEnabled = 0
+  for (const tool of toolList) {
+    if (toolDisabled.has(tool.name)) continue
+    toolsEnabled += 1
+    tokensEnabled += tool.tokens
+  }
+  return { toolsEnabled, tokensEnabled }
+}
+
+/**
+ * 全部工具（含 read/edit/bash/skill 等非 MCP 工具）计数 —— 工具预算红线用。
+ *
+ * 口径（2026-09-16 移植裁量 F2，覆盖 PR 原文）：**优先取请求面真值** ——
+ * 会话上一次已落盘请求的装配后工具表（`session.requestHeader()?.tools`，
+ * EpochHeader.tools = Assembled tool schemas）。它已是全部装配过滤器（工具级禁用 /
+ * server 级可见性 / project-mcp 工作区）跑完的结果，对 350 这类 provider 上限是
+ * 正确的比较对象；代价是有一轮延迟（读到的是上一次请求）。
+ *
+ * 取不到（冷启动、无会话上下文、诊断装配）时回退**注册表**口径：PR 原式的
+ * `schemas.length - (mcpToolsTotal - mcpToolsEnabledTotal)`。注册表视图不等于请求面
+ * （不扣 server 级隐藏与项目工作区过滤），所以是近似值 —— 调用方必须把
+ * `toolsAllSource` 透出到面板与 API，不得混同。
+ */
+function toolsAllCounts(
+  agent: ReturnType<typeof resolveAgent>,
+  schemas: Array<unknown>,
+  mcpToolsTotal: number,
+  mcpToolsEnabledTotal: number,
+): { toolsAllTotal: number; toolsAllEnabled: number; toolsAllSource: 'request' | 'registry' } {
+  try {
+    const tools = agent?.session?.requestHeader()?.tools
+    // 请求面真值：装配后已无「工具级禁用」可扣 → total 与 enabled 同值。
+    if (Array.isArray(tools)) return { toolsAllTotal: tools.length, toolsAllEnabled: tools.length, toolsAllSource: 'request' }
+  } catch {
+    // header 折叠异常：静默回退注册表口径（下面就是回退路径）
+  }
+  return {
+    toolsAllTotal: schemas.length,
+    toolsAllEnabled: schemas.length - (mcpToolsTotal - mcpToolsEnabledTotal),
+    toolsAllSource: 'registry',
+  }
+}
+
 async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<McpView> {
   const { ctx } = deps
   const errors: string[] = []
@@ -305,20 +365,32 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
   // 同样合并全局视图：patch 层 server（filesystem 等）的工具列表需要出现在面板。
   let schemas = getSchemasView(ctx, deps.caches, scopeKey, DOMAIN_TTL_MS)
   if (scopeKey) schemas = mergeSchemas(schemas, getSchemasView(ctx, deps.caches, undefined, DOMAIN_TTL_MS))
-  const toolsByServer = new Map<string, Array<{ name: string; description: string }>>()
+  const toolsByServer = new Map<string, Array<{ name: string; description: string; tokens: number }>>()
+  // 工具级启用数（F1 口径，见 effectiveOf）：工具级禁用不改注册表，只在装配时剔除，
+  // 所以面板必须按同一谓词（isToolDisabled，与 system-prompt/assemble 的工具级过滤同源）
+  // 自己复算 —— 否则「禁用 400 个工具」后面板仍显示 450，整个批量禁用毫无反馈。
+  let mcpToolsEnabledTotal = 0
+  let mcpTokensEnabledTotal = 0
   for (const schema of schemas) {
     const name = String(schema?.name ?? '')
     if (!name.startsWith('mcp__')) continue
     const server = serverOfMcp(name)
     if (server === null) continue
+    const tokens = tokenEstimate(schema?.parameters)
+    if (!isToolDisabled(name, cwd)) {
+      mcpToolsEnabledTotal += 1
+      mcpTokensEnabledTotal += tokens
+    }
     let list = toolsByServer.get(server)
     if (!list) {
       list = []
       toolsByServer.set(server, list)
     }
-    list.push({ name, description: String(schema?.description ?? '') })
+    list.push({ name, description: String(schema?.description ?? ''), tokens })
   }
   for (const list of toolsByServer.values()) list.sort((a, b) => a.name.localeCompare(b.name))
+  // 工具预算红线的比较对象（口径来源见 toolsAllCounts，随 toolsAllSource 一并透出）
+  const { toolsAllTotal, toolsAllEnabled, toolsAllSource } = toolsAllCounts(agent, schemas, mcpToolsTotal, mcpToolsEnabledTotal)
 
   const mcp: McpRow[] = []
   // P1 会话边界：读一次 state.json 的 desired 意图（延迟生效模式下与 live disabled 不同，
@@ -357,8 +429,13 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
         // 兜底：schemas 视图缺失该 server（scope 解析异常等）时用 catalog 快照
         // 构建工具列表（CatalogEntry.name 是全名 mcp__<server>__<tool>，
         // 与聚合产物和禁用表完全同构）。保证工具级禁用 UI 始终可用。
-        toolList = catalogInfo.tools.map((tool) => ({ name: String(tool.name ?? ''), description: String(tool.description ?? '') }))
+        toolList = catalogInfo.tools.map((tool) => ({
+          name: String(tool.name ?? ''),
+          description: String(tool.description ?? ''),
+          tokens: tokenEstimate(tool.parameters),
+        }))
       }
+      const effective = effectiveOf(toolList, toolDisabled, displayTools, displayTokens)
       mcp.push({
         entryId: entry.id,
         rowId: entry.options.id,
@@ -368,6 +445,8 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
         running,
         tools: displayTools,
         tokens: displayTokens,
+        toolsEnabled: effective.toolsEnabled,
+        tokensEnabled: effective.tokensEnabled,
         toolList: toolList?.map((tool) => ({ name: tool.name, description: tool.description, disabled: toolDisabled.has(tool.name) })) ?? null,
         status,
         unregistered: disp.unregistered,
@@ -427,8 +506,13 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
           const toolDisabled = disabledToolsOf(pr.serverName, projectWorkspace)
           let toolList = toolsByServer.get(pr.serverName)
           if (!toolList && catalogInfo) {
-            toolList = catalogInfo.tools.map((tool) => ({ name: String(tool.name ?? ''), description: String(tool.description ?? '') }))
+            toolList = catalogInfo.tools.map((tool) => ({
+              name: String(tool.name ?? ''),
+              description: String(tool.description ?? ''),
+              tokens: tokenEstimate(tool.parameters),
+            }))
           }
+          const effective = effectiveOf(toolList, toolDisabled, displayTools, displayTokens)
           mcp.push({
             entryId: pr.entryId,
             rowId: pr.rowId,
@@ -438,6 +522,8 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
             running: pr.running,
             tools: displayTools,
             tokens: displayTokens,
+            toolsEnabled: effective.toolsEnabled,
+            tokensEnabled: effective.tokensEnabled,
             toolList: toolList?.map((tool) => ({ name: tool.name, description: tool.description, disabled: toolDisabled.has(tool.name) })) ?? null,
             status,
             unregistered: disp.unregistered,
@@ -473,6 +559,12 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
     mcpDisabled: mcp.filter((row) => row.disabled).length,
     mcpToolsTotal,
     mcpTokensTotal,
+    mcpToolsEnabledTotal,
+    mcpTokensEnabledTotal,
+    toolsAllTotal,
+    toolsAllEnabled,
+    toolsAllSource,
+    toolBudget: stateToolBudget(state ?? {}) ?? null,
     autoManage: deps.catalogRuntime.autoManage,
     activeWorkspace: getActiveWorkspace(),
     errors,

@@ -18,6 +18,22 @@ export interface McpRow {
   running: boolean
   tools: number
   tokens: number
+  /**
+   * 该 server 的**工具级启用数**：扣掉「工具级禁用」后仍会投放给模型的工具数
+   * （tokensEnabled 为同口径的 token 估算）。批量禁用后这里立刻变化 —— 否则
+   * 整个批量操作没有任何可见反馈。
+   *
+   * 口径边界（2026-09-16 移植裁量 F1，勿写成「实际进入上下文」）：谓词是
+   * isToolDisabled + 会话工作区，与 system-prompt/assemble 的**工具级**过滤器同源，
+   * 但它**不覆盖**另外两条隐藏路径：
+   * - server 级可见性（AI 临时启用保活 / 面板自主隐藏 server）—— 这些 server 的
+   *   工具仍被计入；
+   * - project-mcp 的工作区过滤（非本工作区的项目行）。
+   * 所以这是「工具级启用数」，不是「模型实际看到的工具数」。
+   */
+  toolsEnabled: number
+  /** {@link toolsEnabled} 同口径的 token 估算。 */
+  tokensEnabled: number
   status: McpStatus
   /** 模型是否可见（autoManage 下：启用且非 AI 临时启用 → 可见；关闭模式下全部启用可见）。 */
   modelVisible: boolean
@@ -73,6 +89,29 @@ export interface McpView {
   mcpDisabled: number
   mcpToolsTotal: number
   mcpTokensTotal: number
+  /**
+   * 扣掉工具级禁用后的 MCP 工具总数 / token 估算（口径同 McpRow.toolsEnabled，
+   * 见其注释：是「工具级启用数」，不是「实际进入上下文」）。
+   */
+  mcpToolsEnabledTotal: number
+  mcpTokensEnabledTotal: number
+  /**
+   * 全部工具（含 read/edit/bash/skill 等非 MCP 工具）计数 —— 工具预算红线用。
+   * 取数口径见 {@link toolsAllSource}；红线比较**只**用 toolsAllEnabled（与展示同源）。
+   */
+  toolsAllTotal: number
+  toolsAllEnabled: number
+  /**
+   * 上面两个数的口径来源（2026-09-16 移植裁量 F2）：
+   * - 'request' = 会话里**上一次已落盘请求**的装配后工具表（`requestHeader().tools`），
+   *   已经是所有装配过滤器跑完的真值；有一轮延迟，且此口径下 total 与 enabled 同值；
+   * - 'registry' = 回退到工具**注册表**视图（`ctx.tools.schemas()` 全量）：
+   *   total 是注册表数、enabled 是注册表数减去被工具级禁用剔除的 MCP 工具数 —— 近似值。
+   * UI 与 API 必须把该来源显示出来，不得把注册表口径说成请求面。
+   */
+  toolsAllSource: 'request' | 'registry'
+  /** 工具预算（如 grok 的 350）；null = 未设置，不提示。 */
+  toolBudget: number | null
   /** AI 中间层当前是否生效（面板开关）。 */
   autoManage: boolean
   errors: string[]

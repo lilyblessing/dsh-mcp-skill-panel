@@ -17,6 +17,26 @@ export const en: Record<string, string> = {
   'ri.statMcpDisabled': '{n} disabled',
   'ri.statMcpTools': '{n} tools',
   'ri.statMcpTokens': '~{n}k tokens',
+  // 有效统计 / 工具预算（0.6.0 移植 PR #17 特性 2/3）
+  // 口径纪律：这里是「工具级启用数」（扣掉工具级禁用），**不是**「实际进入上下文」——
+  // server 级隐藏（AI 临时启用 / hideAll）与 project-mcp 工作区过滤都未计入。
+  'ri.statMcpToolsEffective': '{enabled} / {total} MCP tools enabled',
+  'ri.statMcpTokensEffective': '~{enabled}k / ~{total}k tokens',
+  'ri.statToolsAll': '{n} tools total',
+  'ri.toolsSourceRequest': 'measured on the last request',
+  'ri.toolsSourceRegistry': 'registry estimate (no request yet)',
+  'ri.toolEnabledCaliber': 'Tools enabled at the tool level (disabled tools are dropped when the prompt is assembled). Server-level hiding and workspace filtering are not counted.',
+  'ri.budgetLabel': 'Tool budget',
+  'ri.budgetOver': '{used} / {budget} tools — over budget',
+  'ri.budgetOk': '{used} / {budget} tools',
+  'ri.budgetSet': 'Set',
+  'ri.budgetClear': 'Clear',
+  'ri.budgetHint':
+    'Some providers cap the number of tools per request (grok: ~350 — verify with your provider). Counts every tool in the request, not just MCP ones.',
+  'ri.budgetSourceRequest':
+    'Counted from the assembled tool list of this session\u2019s last logged request (real value, one turn behind).',
+  'ri.budgetSourceRegistry':
+    'No request logged yet — falling back to the tool registry, which does not subtract server-level hiding. Treat it as an estimate.',
   'ri.statSkills': '{n} skills',
   'ri.statSkillsVisible': '{n} model-visible',
   // mcp card
@@ -139,6 +159,24 @@ export const zh: Record<string, string> = {
   'ri.statMcpDisabled': '{n} 个已停用',
   'ri.statMcpTools': '{n} 个工具',
   'ri.statMcpTokens': '约 {n}k token',
+  // 有效统计 / 工具预算（0.6.0 移植 PR #17 特性 2/3）
+  // 口径纪律：这里是「工具级启用数」（扣掉工具级禁用），**不是**「实际进入上下文」——
+  // server 级隐藏（AI 临时启用 / hideAll）与 project-mcp 工作区过滤都未计入。
+  'ri.statMcpToolsEffective': 'MCP 工具启用 {enabled} / {total}',
+  'ri.statMcpTokensEffective': '约 {enabled}k / {total}k token',
+  'ri.statToolsAll': '全部工具 {n} 个',
+  'ri.toolsSourceRequest': '上次请求实测',
+  'ri.toolsSourceRegistry': '注册表估算（尚无请求）',
+  'ri.toolEnabledCaliber':
+    '工具级启用数：被禁用的工具在装配提示词时被剔除（server 级隐藏与工作区过滤不计入这个数）。',
+  'ri.budgetLabel': '工具预算',
+  'ri.budgetOver': '{used} / {budget} 个工具 —— 已超预算',
+  'ri.budgetOk': '{used} / {budget} 个工具',
+  'ri.budgetSet': '设置',
+  'ri.budgetClear': '清除',
+  'ri.budgetHint': '部分 provider 对单次请求的工具数有上限（grok 约 350，请以实际为准）。这里统计请求内的全部工具，不只是 MCP 工具。',
+  'ri.budgetSourceRequest': '取数口径：本会话上一次已落盘请求的装配后工具表（真值，有一轮延迟）。',
+  'ri.budgetSourceRegistry': '尚无已落盘请求 —— 回退工具注册表估算（不扣 server 级隐藏），仅供参考。',
   'ri.statSkills': '{n} 个技能',
   'ri.statSkillsVisible': '{n} 个模型可见',
   // mcp card

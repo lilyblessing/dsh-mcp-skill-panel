@@ -10,7 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { mkdir, readFile, writeFile, rename, access } from 'node:fs/promises'
 import { basename, dirname, join, parse as parsePath } from 'node:path'
 import { homedir } from 'node:os'
-import { readState, writeState, stateApplyMode, type ApplyMode } from './state'
+import { readState, writeState, stateApplyMode, stateToolBudget, type ApplyMode } from './state'
 import { setSkillFlag, rowDisabledState, isValidSkillName, buildSkillMd, EDITABLE_CONFIG_KEYS } from './preset'
 import { pendingMcp, applyPendingMcp } from './pending'
 import { findPresetRowByEntryId, findPresetRowByServerName } from './preset-mcp'
@@ -987,6 +987,7 @@ export function makeRoutes(
               autoManage: catalogRuntime.autoManage,
               applyMode: stateApplyMode(state),
               configAutoManage: config.autoManage ?? null,
+              toolBudget: stateToolBudget(state) ?? null,
             }
           },
         },
@@ -996,6 +997,7 @@ export function makeRoutes(
             const parsed = JSON.parse((await readBody(req)) || '{}') as {
               autoManage?: boolean
               applyMode?: ApplyMode
+              toolBudget?: number | null
             }
             const state = await readState()
             state.config ??= {}
@@ -1005,9 +1007,18 @@ export function makeRoutes(
             if (parsed.applyMode === 'immediate' || parsed.applyMode === 'next-session') {
               state.config.applyMode = parsed.applyMode
             }
+            // 工具预算：null = 清除（不提示）；只接受 >0 的有限数，其余忽略（保持原值）
+            if (parsed.toolBudget === null) {
+              delete state.config.toolBudget
+            } else if (typeof parsed.toolBudget === 'number' && Number.isFinite(parsed.toolBudget) && parsed.toolBudget > 0) {
+              state.config.toolBudget = Math.round(parsed.toolBudget)
+            }
             await writeState(state)
             if (typeof parsed.autoManage === 'boolean') catalogRuntime.applyAutoManage(parsed.autoManage)
-            return { autoManage: catalogRuntime.autoManage, applyMode: stateApplyMode(state) }
+            // 预算与中间层无关（不触发 tools/change），但面板视图是 60s 缓存 ——
+            // 不失效的话用户点了「设置」要等一轮轮询才看到红线变化。
+            if (parsed.toolBudget !== undefined) invalidateMcp()
+            return { autoManage: catalogRuntime.autoManage, applyMode: stateApplyMode(state), toolBudget: stateToolBudget(state) ?? null }
           },
         },
       ], true),

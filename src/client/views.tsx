@@ -311,6 +311,30 @@ const C = {
     background: disabled ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)',
     whiteSpace: 'nowrap' as const,
   }),
+  // 0.6.0 工具预算卡（设置/清除按钮与输入槽，风格与既有 cfgInput 一致）
+  budgetInput: {
+    font: 'inherit',
+    fontSize: 12,
+    width: 76,
+    padding: '3px 8px',
+    borderRadius: 5,
+    border: '1px solid var(--dsw-alias-border-l2)',
+    // 与 cfgInput 同款：输入槽用文字色淡染（主题自适应），不用未定义的 fill-l1。
+    background: 'color-mix(in srgb, var(--dsw-alias-label-primary) 7%, transparent)',
+    color: 'var(--dsw-alias-label-primary)',
+  },
+  smallBtn: (busy: boolean): React.CSSProperties => ({
+    font: 'inherit',
+    cursor: busy ? 'default' : 'pointer',
+    opacity: busy ? 0.55 : 1,
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-alias-bg-layer-1)',
+    color: 'var(--dsw-alias-label-secondary)',
+    borderRadius: 5,
+    padding: '3px 10px',
+    fontSize: 11,
+    whiteSpace: 'nowrap' as const,
+  }),
 }
 
 function formatK(n: number): string {
@@ -870,6 +894,106 @@ export function ensureToolToken(): Promise<string | null> {
   return toolTokenPromise
 }
 
+/** 带令牌的写端点 POST（工具预算等面板配置共用；无 x-panel-token 会被 401）。 */
+async function panelPost<T extends { ok: boolean; error?: string }>(path: string, body: unknown): Promise<T> {
+  const token = await ensureToolToken()
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (token) headers['x-panel-token'] = token
+  const res = await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) })
+  const parsed = (await res.json()) as T
+  if (!parsed.ok) throw new Error(parsed.error ?? `${path} failed`)
+  return parsed
+}
+
+/**
+ * 工具预算红线卡（provider 的单请求工具上限，如 grok 约 350）。
+ *
+ * 口径纪律（F2）：比较与展示用的是**同一个字段** `toolsAllEnabled`，并把它取自
+ * 请求面还是注册表回退显式写在卡片上（`toolsAllSource`）—— 不得把注册表口径
+ * 说成请求面真值。
+ */
+function BudgetCard(props: { state: McpView; t: Props['t']; loadMcp: () => void }): React.ReactElement {
+  const { state, t, loadMcp } = props
+  const [draft, setDraft] = useState<string>(state.toolBudget === null ? '' : String(state.toolBudget))
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const over = state.toolBudget !== null && state.toolsAllEnabled > state.toolBudget
+
+  const save = useCallback(
+    async (value: number | null) => {
+      setBusy(true)
+      setErr(null)
+      try {
+        await panelPost('/api/mcp-skill-panel/config', { toolBudget: value })
+        loadMcp()
+      } catch (error) {
+        setErr(error instanceof Error ? error.message : String(error))
+      } finally {
+        setBusy(false)
+      }
+    },
+    [loadMcp],
+  )
+
+  return (
+    <div style={C.card}>
+      <div style={C.cardTop}>
+        <h3 style={C.cardTitle}>
+          {t('ri.budgetLabel')}
+          {state.toolBudget !== null && (
+            <Badge
+              color={over ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-success-primary)'}
+              // 2026-09-16：PR 原用 state-error-tertiary 这个 alias，宿主题并未定义
+              // （与 bg-l1 事故同类）→ 背景声明失效变透明。改用存在的 state-error-secondary。
+              bg={over ? 'var(--dsw-alias-state-error-secondary)' : 'var(--dsw-alias-state-success-tertiary)'}
+            >
+              {over
+                ? t('ri.budgetOver', { used: state.toolsAllEnabled, budget: state.toolBudget })
+                : t('ri.budgetOk', { used: state.toolsAllEnabled, budget: state.toolBudget })}
+            </Badge>
+          )}
+        </h3>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <input
+            style={C.budgetInput}
+            inputMode="numeric"
+            placeholder="350"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          <button
+            type="button"
+            style={C.smallBtn(busy)}
+            disabled={busy}
+            onClick={() => {
+              const parsed = Number.parseInt(draft, 10)
+              void save(Number.isFinite(parsed) && parsed > 0 ? parsed : null)
+            }}
+          >
+            {t('ri.budgetSet')}
+          </button>
+          <button
+            type="button"
+            style={C.smallBtn(busy)}
+            disabled={busy}
+            onClick={() => {
+              setDraft('')
+              void save(null)
+            }}
+          >
+            {t('ri.budgetClear')}
+          </button>
+        </div>
+      </div>
+      <p style={C.cardDesc}>{t('ri.budgetHint')}</p>
+      <p style={C.cardMeta}>
+        {state.toolsAllSource === 'request' ? t('ri.budgetSourceRequest') : t('ri.budgetSourceRegistry')}
+      </p>
+      {err && <div style={C.error}>{err}</div>}
+    </div>
+  )
+}
+
 function McpPanel(props: {
   state: McpView
   t: Props['t']
@@ -887,6 +1011,8 @@ function McpPanel(props: {
   const [toolErr, setToolErr] = useState<string | null>(null)
   // 0.7.0「更多配置」：点开哪一行（null = 关闭）
   const [cfgRow, setCfgRow] = useState<McpRow | null>(null)
+  // 工具预算红线：与展示的数同源（toolsAllEnabled，口径见 BudgetCard）
+  const overBudget = state.toolBudget !== null && state.toolsAllEnabled > state.toolBudget
 
   const toolToggle = useCallback(async (row: McpRow, tool: NonNullable<McpRow['toolList']>[number]) => {
     const key = `${row.entryId}:${tool.name}`
@@ -924,15 +1050,46 @@ function McpPanel(props: {
           <span style={C.statValue}>{state.mcpDisabled}</span>
           <span style={C.statLabel}>{t('ri.statMcpDisabled', { n: state.mcpDisabled })}</span>
         </div>
-        <div style={C.stat}>
-          <span style={C.statValue}>{state.mcpToolsTotal}</span>
-          <span style={C.statLabel}>{t('ri.statMcpTools', { n: state.mcpToolsTotal })}</span>
+        {/* 有效统计（0.6.0，PR #17 特性 2）：分子是**工具级启用数**（扣掉工具级禁用），
+            分母是该 server 注册的工具总数。注意口径边界 —— server 级隐藏（AI 临时启用 /
+            中间层 hideAll）与 project-mcp 工作区过滤都不在这个数里，所以文案不说
+            「实际进入上下文」。批量禁用后这里立刻变化，这是该操作唯一的可见反馈。 */}
+        <div style={C.stat} title={t('ri.toolEnabledCaliber')}>
+          <span style={C.statValue}>
+            {state.mcpToolsEnabledTotal}
+            {state.mcpToolsEnabledTotal !== state.mcpToolsTotal && (
+              <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--dsw-alias-label-tertiary)' }}>
+                {' '}/ {state.mcpToolsTotal}
+              </span>
+            )}
+          </span>
+          <span style={C.statLabel}>
+            {t('ri.statMcpToolsEffective', { enabled: state.mcpToolsEnabledTotal, total: state.mcpToolsTotal })}
+          </span>
         </div>
+        <div style={C.stat} title={t('ri.toolEnabledCaliber')}>
+          <span style={C.statValue}>~{formatK(state.mcpTokensEnabledTotal)}k</span>
+          <span style={C.statLabel}>
+            {t('ri.statMcpTokensEffective', {
+              enabled: formatK(state.mcpTokensEnabledTotal),
+              total: formatK(state.mcpTokensTotal),
+            })}
+          </span>
+        </div>
+        {/* 工具预算（特性 3）：全部工具（含非 MCP），口径来源由 toolsAllSource 标注 */}
         <div style={C.stat}>
-          <span style={C.statValue}>~{formatK(state.mcpTokensTotal)}k</span>
-          <span style={C.statLabel}>{t('ri.statMcpTokens', { n: formatK(state.mcpTokensTotal) })}</span>
+          <span style={{ ...C.statValue, color: overBudget ? 'var(--dsw-alias-state-error-primary)' : undefined }}>
+            {state.toolsAllEnabled}
+            {state.toolBudget !== null && (
+              <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--dsw-alias-label-tertiary)' }}>
+                {' '}/ {state.toolBudget}
+              </span>
+            )}
+          </span>
+          <span style={C.statLabel}>{t('ri.statToolsAll', { n: state.toolsAllEnabled })}</span>
         </div>
       </div>
+      <BudgetCard state={state} t={t} loadMcp={loadMcp} />
       {toolErr && <div style={C.error}>{toolErr}</div>}
       {state.mcp.length === 0 && <div style={C.empty}>{t('ri.empty')}</div>}
       {state.mcp.map((row) => {
@@ -1001,8 +1158,15 @@ function McpPanel(props: {
             </p>
             {toolList.length > 0 && (
               <>
-                <button type="button" style={C.toolToggleBtn} onClick={() => setExpanded((prev) => ({ ...prev, [row.entryId]: !prev[row.entryId] }))}>
-                  {isOpen ? `▾ ${t('ri.toolListHide')} (${toolList.length})` : `▸ ${t('ri.toolListShow')} (${toolList.length})`}
+                <button
+                  type="button"
+                  style={C.toolToggleBtn}
+                  title={t('ri.toolEnabledCaliber')}
+                  onClick={() => setExpanded((prev) => ({ ...prev, [row.entryId]: !prev[row.entryId] }))}
+                >
+                  {isOpen
+                    ? `▾ ${t('ri.toolListHide')} (${row.toolsEnabled}/${toolList.length})`
+                    : `▸ ${t('ri.toolListShow')} (${row.toolsEnabled}/${toolList.length})`}
                 </button>                {isOpen && (
                   <div style={C.toolList}>
                     {toolList.map((tool) => {
