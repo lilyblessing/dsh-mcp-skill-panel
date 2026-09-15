@@ -228,7 +228,10 @@ const C = {
     zIndex: 1000,
   },
   modal: {
-    background: 'var(--dsw-alias-bg-l1, #1b1b1f)',
+    // 2026-09-15 色彩修复：原先用了不存在的 --dsw-alias-bg-l1，恒回落 #1b1b1f，
+    // 亮色主题下抽屉恒暗 + 输入框（fill-l1 未定义→透明）透出暗底，文字不可读。
+    // 改与卡片同源的 bg-layer-1，随宿主主题走。
+    background: 'var(--dsw-alias-bg-layer-1)',
     border: '1px solid var(--dsw-alias-border-l2)',
     borderRadius: 10,
     padding: 16,
@@ -254,7 +257,8 @@ const C = {
     padding: '4px 6px',
     borderRadius: 6,
     border: '1px solid var(--dsw-alias-border-l2)',
-    background: 'var(--dsw-alias-fill-l1)',
+    // 输入槽用文字色淡染（主题自适应）；不用 fill-l1（宿主未定义即透明透底）。
+    background: 'color-mix(in srgb, var(--dsw-alias-label-primary) 7%, transparent)',
     color: 'var(--dsw-alias-label-primary)',
   },
   cfgArea: {
@@ -263,7 +267,7 @@ const C = {
     padding: '4px 6px',
     borderRadius: 6,
     border: '1px solid var(--dsw-alias-border-l2)',
-    background: 'var(--dsw-alias-fill-l1)',
+    background: 'color-mix(in srgb, var(--dsw-alias-label-primary) 7%, transparent)',
     color: 'var(--dsw-alias-label-primary)',
     resize: 'vertical' as const,
   },
