@@ -86,7 +86,7 @@ export declare function resolveCollectScopeKey(ctx: Context, sessionId: string |
 /** scope key 解析来源（/debug scopeDiag 展示用）。 */
 export declare function scopeKeySource(): 'agent' | 'standing' | null;
 /** 行级读数判定已拆到 ./row-display（零宿主依赖，便于 selftest 独立加载）。 */
-export { computeStatus, rowDisplay } from './row-display';
+export { computeStatus, modelVisibleScope, rowDisplay } from './row-display';
 /** MCP 工具聚合结果：per-server 工具数 + token 估算。tools/change 间隙复用，跳过 schemas 深克隆。 */
 export interface McpAggregate {
     byServer: Map<string, {

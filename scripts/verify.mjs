@@ -41,7 +41,7 @@ if (existsSync(clientOut)) {
   check(src.includes('require("react")') || src.includes('require(\'react\')'), 'react kept external')
 }
 
-// 0.7.1：row-display 必须是零依赖独立产物（selftest 靠它绕开宿主包解析）。
+// 0.6.0：row-display 必须是零依赖独立产物（selftest 靠它绕开宿主包解析）。
 {
   const rowDisplayOut = join(root, 'lib', 'row-display.js')
   if (check(existsSync(rowDisplayOut), `row-display standalone bundle exists: ${rowDisplayOut}`)) {

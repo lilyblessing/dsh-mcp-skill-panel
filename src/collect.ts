@@ -15,11 +15,11 @@ import { serverOfMcp } from './catalog'
 import type { McpCallController } from './mcpcall'
 import type { CatalogRuntime } from './index'
 import { messageOf } from './util'
-import { readState, stateToolBudget } from './state'
+import { readState, stateAutoManageByRoute, stateToolBudget } from './state'
 import { pendingMcp } from './pending'
 import { listPresetMcpRows } from './preset-mcp'
 import { gatewayServerOfEntryId } from './gateway'
-import { computeStatus, rowDisplay } from './row-display'
+import { computeStatus, modelVisibleScope, rowDisplay } from './row-display'
 
 /** 分域缓存 TTL：事件驱动失效为主，TTL 只是兜底（事件丢失场景） */
 export const DOMAIN_TTL_MS = 60_000
@@ -185,7 +185,7 @@ export function scopeKeySource(): 'agent' | 'standing' | null {
 }
 
 /** 行级读数判定已拆到 ./row-display（零宿主依赖，便于 selftest 独立加载）。 */
-export { computeStatus, rowDisplay } from './row-display'
+export { computeStatus, modelVisibleScope, rowDisplay } from './row-display'
 
 function baseView(
   ctx: Context,
@@ -358,6 +358,10 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
   const agent = resolveAgent(ctx, sessionId)
   const scopeKey = await resolveCollectScopeKey(ctx, sessionId)
   const cwd = agent?.session?.header?.cwd ?? undefined
+  // 本次装配的中间层判定（与 filter.ts 的 gateFor 同源：同一份运行期读数 + 同一个
+  // decisionFor(agent)）。行徽标必须按它折算，否则 hideAll 下的「模型可见」是假声明。
+  const decision = deps.catalogRuntime.decisionFor(agent)
+  const hideAllActive = deps.catalogRuntime.middleLayerHides === 'all' && decision.on
 
   // MCP：loader 行 × schema 聚合（聚合结果版本化复用）
   const { byServer, mcpToolsTotal, mcpTokensTotal } = getMcpAggregate(ctx, deps.caches, scopeKey, errors)
@@ -415,7 +419,7 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
       // 面板联动（P3）：停用/未挂载时优先显示 catalog 目录值（工具数与 token 估算），
       // 让用户看到「该 MCP 有哪些工具可用」而不只是 0
       const catalogInfo = deps.catalogRuntime.catalog[serverName]
-      // 0.7.1 诚实上报：启用+在跑却零注册 → tools=0 + unregistered，不回落目录快照
+      // 0.6.0 诚实上报：启用+在跑却零注册 → tools=0 + unregistered，不回落目录快照
       const disp = rowDisplay(disabled, running, liveTools, catalogInfo?.tools.length ?? 0)
       const displayTools = disp.displayTools
       const displayTokens =
@@ -436,6 +440,8 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
         }))
       }
       const effective = effectiveOf(toolList, toolDisabled, displayTools, displayTokens)
+      const aiOwned = deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(serverName) ?? false)
+      const scope = modelVisibleScope(disabled, aiOwned, hideAllActive)
       mcp.push({
         entryId: entry.id,
         rowId: entry.options.id,
@@ -450,11 +456,11 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
         toolList: toolList?.map((tool) => ({ name: tool.name, description: tool.description, disabled: toolDisabled.has(tool.name) })) ?? null,
         status,
         unregistered: disp.unregistered,
-        modelVisible:
-          !disabled &&
-          !(deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(serverName) ?? false)),
-        // 0.7.2：AI 临时启用可辨识（否则与"用户打开"外观相同，见 shared-types 注释）
-        aiOwned: deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(serverName) ?? false),
+        // 模型直连可见 = 装配会投放该 server 的工具（含 hideAll 折算，见 modelVisibleScope）
+        modelVisible: scope === 'direct',
+        modelVisibleScope: scope,
+        // 0.6.0：AI 临时启用可辨识（否则与"用户打开"外观相同，见 shared-types 注释）
+        aiOwned,
         desired: rowDesired,
         pending: rowDesired !== undefined ? rowDesired !== disabled : false,
         workspace: projectWorkspace,
@@ -497,7 +503,7 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
           // toggle 后（pendingHit 或 desired≠live）才挂 pending。
           const pendingFlag = pendingHit ? pendingHit.disabled !== pr.disabled : rowDesired !== undefined ? rowDesired !== pr.disabled : false
           const catalogInfo = deps.catalogRuntime.catalog[pr.serverName]
-          // 0.7.1 诚实上报：与 loader 路径同判据（启用+在跑却零注册 → failed + tools=0）
+          // 0.6.0 诚实上报：与 loader 路径同判据（启用+在跑却零注册 → failed + tools=0）
           const disp = rowDisplay(pr.disabled, pr.running, liveTools, catalogInfo?.tools.length ?? 0)
           const displayTools = disp.displayTools
           const displayTokens =
@@ -513,6 +519,8 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
             }))
           }
           const effective = effectiveOf(toolList, toolDisabled, displayTools, displayTokens)
+          const aiOwned = deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(pr.serverName) ?? false)
+          const scope = modelVisibleScope(pr.disabled, aiOwned, hideAllActive)
           mcp.push({
             entryId: pr.entryId,
             rowId: pr.rowId,
@@ -527,11 +535,10 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
             toolList: toolList?.map((tool) => ({ name: tool.name, description: tool.description, disabled: toolDisabled.has(tool.name) })) ?? null,
             status,
             unregistered: disp.unregistered,
-            modelVisible:
-              !pr.disabled &&
-              !(deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(pr.serverName) ?? false)),
-            // 0.7.2：与 loader 路径同判据（AI 临时启用可辨识）
-            aiOwned: deps.catalogRuntime.autoManage && (deps.controller?.isAiEnabled(pr.serverName) ?? false),
+            modelVisible: scope === 'direct',
+            modelVisibleScope: scope,
+            // 0.6.0：与 loader 路径同判据（AI 临时启用可辨识）
+            aiOwned,
             desired: rowDesired,
             pending: pendingFlag,
             workspace: projectWorkspace,
@@ -570,19 +577,22 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
     // 装配期 gate 读的是同一份值：hides 由 gateFor 直接读 runtime.middleLayerHides，
     // 覆盖表由 decisionFor 读 runtime.autoManageByRoute）。
     autoManageByRoute: { ...deps.catalogRuntime.autoManageByRoute },
+    // 持久化读数（state.json 的用户意图）：与上面的运行期表合看，才能区分
+    // 「已配置」与「已生效」。applyAutoManage 挂载失败时会清空运行期表而 state.json
+    // 不动（index.ts 的 catch），只透出运行期会让覆盖卡一行都不显示 → 用户看不到也删不掉。
+    autoManageByRoutePersisted: stateAutoManageByRoute(state ?? {}),
     autoManageMounted: deps.catalogRuntime.autoManageMounted,
     middleLayerHides: deps.catalogRuntime.middleLayerHides,
-    // 当前会话实际生效的判定（面板顶部徽标：「本会话：开启 · grok/grok-4.6」）。
+    // 面板**绑定会话**的判定（顶部徽标：「面板绑定会话：开启 · grok/grok-4.6」）。
     // agent 缺省/服务缺失 → source='no-route'，此时 on 回退总开关（保守维持旧行为）。
-    autoManageActive: (() => {
-      const decision = deps.catalogRuntime.decisionFor(agent)
-      return {
-        on: decision.on,
-        source: decision.source,
-        provider: decision.route?.provider ?? null,
-        model: decision.route?.model ?? null,
-      }
-    })(),
+    // 注意：/state 不带 session 参数，host 侧按 roots[0] 解析 —— 多会话并存时未必是
+    // 用户当前会话，故文案不得断言「本会话 / 当前会话」（卡片同时显示 sessionId 供核对）。
+    autoManageActive: {
+      on: decision.on,
+      source: decision.source,
+      provider: decision.route?.provider ?? null,
+      model: decision.route?.model ?? null,
+    },
     activeWorkspace: getActiveWorkspace(),
     errors,
   }

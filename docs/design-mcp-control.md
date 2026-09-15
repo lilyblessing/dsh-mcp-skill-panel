@@ -233,15 +233,16 @@ autoManage=false 时：不注册 dsh_mcp_search/dsh_mcp_call、不过滤装配�
 
 - 键：`provider`（如 `grok`）或 `provider/model`（如 `grok/grok-4.6`）；查表序 **`provider/model` → `provider` → `autoManage` 总开关**。
 - **落点分层（关键）**：进程级「控制工具与网关是否存在」由 `applyAutoManage` 的 `needed = on || 任一覆盖项为真` 决定；每回合「这个模型看得见什么」由装配过滤的 `gateFor` 决定。**不得**把按模型分流做成挂载/卸载开关 —— 那会触发 `tools/change` → 全会话前缀 100% miss。
-- 会话侧判定 `decisionFor(agent)` → `{ on, source: 'override' | 'master' | 'no-route', route }`；`context.agent` 缺席（诊断装配）或投影服务不可得时**保守回退总开关**（`source='no-route'`），面板显式展示来源，避免「配了却没生效」的静默降级。
-- `/config` POST 用 `routeOverride: { key, value }` 单条增删（`value: null` 删键）；只有 `autoManage` / `middleLayerHides` / `routeOverride` 变化才重挂中间层。
+- 会话侧判定 `decisionFor(agent)` → `{ on, source: 'model' | 'provider' | 'master' | 'no-route', route }`（取值见 `src/model-route.ts` 的 `routeDecision`：`'model'` = 命中 `provider/model` 精确项、`'provider'` = 命中 `provider` 项、`'master'` = 落到总开关、`'no-route'` = 未解析出模型）；`context.agent` 缺席（诊断装配）或投影服务不可得时**保守回退总开关**（`source='no-route'`），面板显式展示来源，避免「配了却没生效」的静默降级。
+- **读数分层（勿混）**：`/state` 的 `autoManageByRoute` 是**运行期**表（gate 实际读的那张），`autoManageByRoutePersisted` 是 state.json 的**用户意图**。挂载失败时 `applyAutoManage` 的 catch 会清空运行期表而意图保留 → 面板覆盖卡按两表**并集**渲染，给「已持久化但当前未生效」的键挂「已保存，未生效」标记，使其可见且可删（改的只是读数面，`decisionFor` 仍只看运行期表）。
+- `/config` POST 用 `routeOverride: { key, value }` 单条增删（`value: null` 删键）；只有 `autoManage` / `middleLayerHides` / `routeOverride` 变化才重挂中间层。**面板侧须带等值守卫**（点已选中的那一段不发请求）—— 否则一次无谓的 `applyAutoManage` 就是该轮前缀缓存 miss。
 - 覆盖项为真时即使总开关关也会挂载中间层（否则出现「gate 打开但网关没挂」→ 覆盖模型看得到 `dsh_mcp_search` 却拉不起 preset 关态行）。
 
 ### 12.5 `middleLayerHides`
 
 - 默认 `'disabled'`：只隐藏「用户停用 + AI 临时启用」的 server；`'all'`：**连已启用的 server 也从模型装配面隐藏**，模型统一经中间层取用。
 - 它只改写本次装配的 `assembly.tools`：工具注册表与 `ctx.tools.execute` 通道不受影响，`dsh_mcp_call` 仍能拉起 preset 关态行（前提：中间层已挂载）。
-- **与能力摘要表的一致性**：`'all'` 时空查询摘要表按「经中间层取用」表述，不得再宣称 server「对模型可见」——否则摘要说可见、装配却全隐藏，两条信息互相矛盾。
+- **与能力摘要表、行徽标的一致性**：`'all'` 时空查询摘要表按「经中间层取用」表述，不得再宣称 server「对模型可见」——否则摘要说可见、装配却全隐藏，两条信息互相矛盾。面板行徽标同理：`McpRow.modelVisibleScope`（`'direct'` / `'via-middle-layer'` / `'hidden'`）在 `'all'` 且本会话 gate 打开时给「经中间层取用」，`modelVisible`（= `scope === 'direct'`）不再可能在实际隐藏时仍为真。
 
 ### 12.6 控制工具参数契约（`arguments` 收紧）
 

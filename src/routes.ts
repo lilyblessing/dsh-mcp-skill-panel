@@ -410,7 +410,7 @@ async function toggleSkill(deps: Deps, skillName: string, disabled: boolean, ses
  */
 let fileWriteChain: Promise<unknown> = Promise.resolve()
 
-/** 0.7.0：配置合法性校验（UI 预校验与后端落盘共用同一套规则）。 */
+/** 0.6.0：配置合法性校验（UI 预校验与后端落盘共用同一套规则）。 */
 function validateRowConfig(config: Record<string, unknown>): void {
   const transport = config.transport === undefined ? undefined : String(config.transport)
   if (transport !== undefined && transport !== 'stdio' && transport !== 'streamable-http') {
@@ -446,7 +446,7 @@ function validateRowConfig(config: Record<string, unknown>): void {
 }
 
 /**
- * 0.7.0：把配置意图写进 state.json（运行期唯一安全的写面）。
+ * 0.6.0：把配置意图写进 state.json（运行期唯一安全的写面）。
  * 结构：state.mcp[预设文件][行 id].config —— 启动早期由 syncPresetFiles 物化。
  */
 async function writeRowConfigIntent(
@@ -498,7 +498,7 @@ async function applyRowConfigToLive(
   return rowConfigApplyHook(server, config)
 }
 
-/** 0.7.0：描述某个 standing 行的**全量挂载配置**与运行态（只读；/debug/rowConfig 与配置编辑共用）。 */
+/** 0.6.0：描述某个 standing 行的**全量挂载配置**与运行态（只读；/debug/rowConfig 与配置编辑共用）。 */
 async function describeRow(server: string): Promise<Record<string, unknown>> {
   const entry = findStandingEntryByServer(server)
   const out: Record<string, unknown> = {
@@ -900,7 +900,7 @@ export function makeRoutes(
         // P1 会话边界：「立即应用待生效变更」强制生效入口。把 next-session 模式积压的
         // 待办一次性 entry.update（=临时转 immediate），随后的请求会 miss（调用方提示费用）。
         //
-        // 0.7.2 加固：本端点是 next-session「零缓存失效」承诺的**唯一逃生舱**，而 README
+        // 0.6.0 加固：本端点是 next-session「零缓存失效」承诺的**唯一逃生舱**，而 README
         // 把它定义为「**用户点击**『立即应用待生效变更』按钮，作为"已知晓费用"的强制生效出口」
         // ——「用户已知晓费用」这个前提原先在服务端**不存在**：端点只校验 method + 面板令牌，
         // 于是模型/脚本一发裸 POST 就能单方面作废该承诺（2026-09-14 实测：模型经此端点把
@@ -1142,7 +1142,7 @@ export function makeRoutes(
       }),
     },
     {
-      // 0.7.0「更多配置」：读/写某个 MCP 行的**挂载配置**（cwd/command/args/env/url/headers…）。
+      // 0.6.0「更多配置」：读/写某个 MCP 行的**挂载配置**（cwd/command/args/env/url/headers…）。
       //
       // 动机：面板卡片只显示 serverName/transport/disabled，看不到 cwd 一类字段；而
       // codegraph 这类按 cwd 认项目的 MCP 一旦缺 cwd 就表现为"行在跑却零工具"。
@@ -1210,7 +1210,7 @@ export function makeRoutes(
       ], true),
     },
     {
-      // 0.7.0 取证用（只读）：读某 server 行的**全量挂载配置**（含 cwd/command/args/env）。
+      // 0.6.0 取证用（只读）：读某 server 行的**全量挂载配置**（含 cwd/command/args/env）。
       //
       // 面板卡片只显示 serverName/transport/disabled，看不到 cwd 一类字段；而
       // codegraph 这类按 cwd 认项目的 MCP，配置错在哪正是靠这个端点定位的

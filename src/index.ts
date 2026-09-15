@@ -573,7 +573,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   // 启动早期物化 MCP 启停意图（仅当无会话在跑时；有会话则下次重启再物化）。
   // 不阻塞 apply；失败只记日志，不拖累插件挂载。
-  // 0.7.0：同一管线也物化「更多配置」改过的挂载配置（见 preset.syncPresetFiles 的 config 段）。
+  // 0.6.0：同一管线也物化「更多配置」改过的挂载配置（见 preset.syncPresetFiles 的 config 段）。
   void syncPresetFiles(ctx).then(
     (count) => {
       if (count > 0) ctx.logger.info(`runtime-inventory: materialized ${count} MCP row state(s) into preset composition`)
@@ -583,7 +583,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   )
 
-  // 0.7.0「更多配置」的热应用钩子：路由层不碰 loader，经此改 live entry 的 config。
+  // 0.6.0「更多配置」的热应用钩子：路由层不碰 loader，经此改 live entry 的 config。
   // 实测依据（2026-09-13）：entry.update({ config }) 在 standing 行上干净生效、不丢行、1.2s。
   // 与写预设文件是两件事——意图落盘 + 启动物化才是持久化路径（铁律不破）。
   setRowConfigApplyHook(async (server, nextConfig) => {

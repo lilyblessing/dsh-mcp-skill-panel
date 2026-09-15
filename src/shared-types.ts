@@ -35,10 +35,29 @@ export interface McpRow {
   /** {@link toolsEnabled} 同口径的 token 估算。 */
   tokensEnabled: number
   status: McpStatus
-  /** 模型是否可见（autoManage 下：启用且非 AI 临时启用 → 可见；关闭模式下全部启用可见）。 */
+  /**
+   * 模型是否**直连可见**（本次装配会被投放给模型）= `modelVisibleScope === 'direct'`。
+   *
+   * 语义（0.6.0 收口，与 `src/filter.ts` 的装配过滤逐字对齐）：
+   * `!disabled && !aiOwned && !(middleLayerHides === 'all' && decisionFor(agent).on)`。
+   * 早先只扣「AI 临时启用」而不扣 `hideAll`，于是在 `middleLayerHides='all'` 且本会话
+   * 中间层生效时，卡片仍挂「模型可见」而装配面已把该 server 的工具**全部**剔除
+   * （`filter.ts:82`）—— 与能力摘要表（`buildSummaryHeader`）修过的同类失真一致，
+   * 这里补齐。**经中间层取用的行不算「模型可见」**，其面板表述见
+   * {@link modelVisibleScope} 的 `'via-middle-layer'`。
+   */
   modelVisible: boolean
   /**
-   * 0.7.2：该行当前是「AI 经 mcp_call 临时启用」保活中的（autoManage 下为 true）。
+   * 模型面可见性作用域（0.6.0 收口）：`modelVisible` 只能回答「可见 / 不可见」，
+   * 但 `middleLayerHides='all'` + 本会话中间层生效时还有第三种状态 —— **不直连可见，
+   * 但模型仍可经 `dsh_mcp_search` / `dsh_mcp_call` 取用**（server 照旧在跑）。
+   * - `'direct'`：工具会进本次装配，模型直连可见（= {@link modelVisible}）；
+   * - `'via-middle-layer'`：不进本次装配，模型改经中间层取用（hideAll 生效）；
+   * - `'hidden'`：模型面确实用不了（该行已停用，或正被 AI 临时启用保活）。
+   */
+  modelVisibleScope: 'direct' | 'via-middle-layer' | 'hidden'
+  /**
+   * 0.6.0：该行当前是「AI 经 mcp_call 临时启用」保活中的（autoManage 下为 true）。
    *
    * 为什么需要这个字段：卡片此前只有 `modelVisible`——用户手动启用的行同样 `modelVisible=true`，
    * 于是「用户打开」与「AI 临时打开」在外观上**分不清**。2026-09-14 实测事故里，模型误用面板
@@ -51,7 +70,7 @@ export interface McpRow {
   /** true = 已记录意图但尚未在运行时生效（待下次会话/重启）。 */
   pending?: boolean
   /**
-   * 0.7.1 诚实上报：行**启用且在跑**，但 live 注册的工具数为 0
+   * 0.6.0 诚实上报：行**启用且在跑**，但 live 注册的工具数为 0
    * （子进程起不来/空转：如 codegraph 缺 `.codegraph` 索引、端点不可达）。
    *
    * 此前这种行会回落显示 catalog 目录快照的工具数，于是"零注册"被渲染成
@@ -117,6 +136,14 @@ export interface McpView {
   /** 按模型覆盖表（运行期当前值）：键为 provider 或 provider/model，值 true=启用中间层。 */
   autoManageByRoute: Record<string, boolean>
   /**
+   * 按模型覆盖表的**持久化**读数（state.json 的 `config.autoManageByRoute`）——
+   * 与 {@link autoManageByRoute}（运行期）不是一回事：`applyAutoManage` 挂载失败时
+   * 会清空运行期表（`index.ts` 的 catch 分支）而 state.json 保留用户意图，此时只看
+   * 运行期表会让面板**一行覆盖项都不显示**，用户看不到也删不掉已持久化的配置。
+   * 面板因此按「运行期 ∪ 持久化」渲染，并给「已持久化但当前未生效」的键加标记。
+   */
+  autoManageByRoutePersisted: Record<string, boolean>
+  /**
    * 中间层是否已实际挂载（总开关关但存在 true 覆盖项时也会挂载）。
    * 与 {@link autoManageByRoute} 合看：任一模型判定 on ⇒ 本字段为 true（G2 不变量）。
    */
@@ -124,8 +151,13 @@ export interface McpView {
   /** 中间层生效时隐藏哪些 server：'disabled'=仅手动停用的；'all'=全部 MCP。 */
   middleLayerHides: 'disabled' | 'all'
   /**
-   * 当前会话（或缺省 agent）实际生效的判定与依据 —— 面板顶部徽标用它显示
-   * 「本会话：开启 · grok/grok-4.6（provider 项）」这类信息。
+   * 面板**绑定会话**（`/state` 不带 `session` 参数 → host 侧按 `roots[0]` 解析，
+   * 见 `collect.ts` 的 `resolveAgent`）实际生效的判定与依据 —— 顶部徽标用它显示
+   * 「面板绑定会话：开启 · grok/grok-4.6（provider 项）」这类信息。
+   *
+   * 措辞纪律：面板是**进程级全局** settings.section，多会话并存时它绑定的是
+   * `roots[0]`，未必是用户当前正在看的那个会话 —— 文案不得断言「本会话 / 当前会话」。
+   * 卡片同时显示 `{@link McpView.sessionId}`，便于人工交叉核对归属。
    * source='no-route' = 本次解析不出模型（诊断装配/服务缺失），已保守回退总开关。
    */
   autoManageActive: {

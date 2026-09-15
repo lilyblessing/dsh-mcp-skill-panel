@@ -15,22 +15,21 @@ export const en: Record<string, string> = {
   // stats
   'ri.statMcpServers': '{n} servers',
   'ri.statMcpDisabled': '{n} disabled',
-  'ri.statMcpTools': '{n} tools',
-  'ri.statMcpTokens': '~{n}k tokens',
   // 有效统计 / 工具预算（0.6.0 移植 PR #17 特性 2/3）
   // 口径纪律：这里是「工具级启用数」（扣掉工具级禁用），**不是**「实际进入上下文」——
   // server 级隐藏（AI 临时启用 / hideAll）与 project-mcp 工作区过滤都未计入。
-  'ri.statMcpToolsEffective': '{enabled} / {total} MCP tools enabled',
+  // 分母限定：`mcpToolsTotal` 只统计**已挂载 server** 的注册工具（走 schemas 注册表视图），
+  // 与行级计数器的目录快照分母不同源，故文案必须带上这个限定词（评审 cbc-N4 / 子代理 NIT-4）。
+  'ri.statMcpToolsEffective': '{enabled} / {total} MCP tools enabled (mounted servers only)',
   'ri.statMcpTokensEffective': '~{enabled}k / ~{total}k tokens',
   'ri.statToolsAll': '{n} tools total',
-  'ri.toolsSourceRequest': 'measured on the last request',
-  'ri.toolsSourceRegistry': 'registry estimate (no request yet)',
   'ri.toolEnabledCaliber': 'Tools enabled at the tool level (disabled tools are dropped when the prompt is assembled). Server-level hiding and workspace filtering are not counted.',
   'ri.budgetLabel': 'Tool budget',
   'ri.budgetOver': '{used} / {budget} tools — over budget',
   'ri.budgetOk': '{used} / {budget} tools',
   'ri.budgetSet': 'Set',
   'ri.budgetClear': 'Clear',
+  'ri.budgetInvalid': 'Enter a positive whole number (e.g. 350). Nothing was changed — use "Clear" to remove the budget.',
   'ri.budgetHint':
     'Some providers cap the number of tools per request (grok: ~350 — verify with your provider). Counts every tool in the request, not just MCP ones.',
   'ri.budgetSourceRequest':
@@ -85,7 +84,7 @@ export const en: Record<string, string> = {
   'ri.addSkillError': 'Failed: {error}',
   'ri.toolListShow': 'Tools',
   'ri.toolListHide': 'Tools',
-  // more-config drawer (0.7.0)
+  // more-config drawer (0.6.0)
   'ri.moreConfig': 'More config…',
   'ri.cfgTitle': 'Mount config',
   'ri.cfgClose': 'Close',
@@ -107,6 +106,9 @@ export const en: Record<string, string> = {
   'ri.skillSource': 'source: {source}',
   'ri.modelVisible': 'Model',
   'ri.modelHidden': 'Hidden',
+  'ri.modelViaMiddleLayer': 'Middle layer',
+  'ri.modelViaMiddleLayerHint':
+    'Not directly visible to the model this turn: the middle layer hides every MCP server (hide scope = all) for models the middle layer is active on, so these tools are dropped from the assembled tool list and reached via dsh_mcp_search / dsh_mcp_call instead. The server itself keeps running.',
   'ri.userVisible': 'User',
   // toggles
   'ri.toggleOffHint': 'Release context: tools disappear immediately.',
@@ -156,8 +158,11 @@ export const en: Record<string, string> = {
   'ri.routeInherit': 'Follow master',
   'ri.routeOn': 'Force on',
   'ri.routeOff': 'Force off',
-  'ri.routeCurrent': 'current route',
-  'ri.routeActive': 'This session: {state} · {route}',
+  'ri.routeCurrent': 'resolved route',
+  // 措辞纪律（评审 cbc-N9 / 子代理 WARN-4）：/state 不带 session 参数 → host 侧按
+  // roots[0] 解析，多会话并存时可能不是用户当前那个会话 —— 故写「面板绑定会话」，
+  // 且卡片上同时显示绑定 sessionId 供核对，不得断言「本会话 / 当前会话」。
+  'ri.routeActive': 'Session bound to this panel: {state} · {route}',
   'ri.routeActiveOn': 'middle layer ON',
   'ri.routeActiveOff': 'middle layer OFF',
   'ri.routeSourceModel': 'by model rule',
@@ -169,6 +174,9 @@ export const en: Record<string, string> = {
     'No session model was resolved for this view (diagnostic assembly or a missing route service), so only the master switch is evaluated — per-model overrides cannot take effect here. This is not "the override did nothing": the route itself is unknown.',
   'ri.routeMounted': 'Middle layer mounted (control tools available to models allowed by the table).',
   'ri.routeNotMounted': 'Middle layer not mounted.',
+  'ri.routePersistedOnly': 'saved, not in effect',
+  'ri.routePersistedHint':
+    'This override is persisted in state.json but is not in effect: the middle layer failed to mount this time, so the runtime table (what the gate actually reads) was cleared while your intent was kept. You can delete or re-set it here. It is retried on the next start.',
   'ri.routeEmpty': 'No route to show yet (no session model and no override).',
   // bulk tool control (property 1)
   'ri.toolFilter': 'Filter tools…',
@@ -196,16 +204,14 @@ export const zh: Record<string, string> = {
   // stats
   'ri.statMcpServers': '{n} 个服务器',
   'ri.statMcpDisabled': '{n} 个已停用',
-  'ri.statMcpTools': '{n} 个工具',
-  'ri.statMcpTokens': '约 {n}k token',
   // 有效统计 / 工具预算（0.6.0 移植 PR #17 特性 2/3）
   // 口径纪律：这里是「工具级启用数」（扣掉工具级禁用），**不是**「实际进入上下文」——
   // server 级隐藏（AI 临时启用 / hideAll）与 project-mcp 工作区过滤都未计入。
-  'ri.statMcpToolsEffective': 'MCP 工具启用 {enabled} / {total}',
+  // 分母限定：`mcpToolsTotal` 只统计**已挂载 server** 的注册工具（schemas 注册表视图），
+  // 与行级计数器的目录快照分母不同源（评审 cbc-N4 / 子代理 NIT-4）。
+  'ri.statMcpToolsEffective': 'MCP 工具启用 {enabled} / {total}（分母仅含已挂载 server）',
   'ri.statMcpTokensEffective': '约 {enabled}k / {total}k token',
   'ri.statToolsAll': '全部工具 {n} 个',
-  'ri.toolsSourceRequest': '上次请求实测',
-  'ri.toolsSourceRegistry': '注册表估算（尚无请求）',
   'ri.toolEnabledCaliber':
     '工具级启用数：被禁用的工具在装配提示词时被剔除（server 级隐藏与工作区过滤不计入这个数）。',
   'ri.budgetLabel': '工具预算',
@@ -213,6 +219,7 @@ export const zh: Record<string, string> = {
   'ri.budgetOk': '{used} / {budget} 个工具',
   'ri.budgetSet': '设置',
   'ri.budgetClear': '清除',
+  'ri.budgetInvalid': '请输入正整数（如 350）。本次未改动任何设置 —— 要清空预算请点「清除」。',
   'ri.budgetHint': '部分 provider 对单次请求的工具数有上限（grok 约 350，请以实际为准）。这里统计请求内的全部工具，不只是 MCP 工具。',
   'ri.budgetSourceRequest': '取数口径：本会话上一次已落盘请求的装配后工具表（真值，有一轮延迟）。',
   'ri.budgetSourceRegistry': '尚无已落盘请求 —— 回退工具注册表估算（不扣 server 级隐藏），仅供参考。',
@@ -249,7 +256,7 @@ export const zh: Record<string, string> = {
   'ri.projectBadge': '项目',
   'ri.toolListShow': '工具',
   'ri.toolListHide': '工具',
-  // 「更多配置」抽屉（0.7.0）
+  // 「更多配置」抽屉（0.6.0）
   'ri.moreConfig': '更多配置…',
   'ri.cfgTitle': '挂载配置',
   'ri.cfgClose': '关闭',
@@ -286,6 +293,9 @@ export const zh: Record<string, string> = {
   'ri.skillSource': '来源：{source}',
   'ri.modelVisible': '模型可见',
   'ri.modelHidden': '模型隐藏',
+  'ri.modelViaMiddleLayer': '经中间层取用',
+  'ri.modelViaMiddleLayerHint':
+    '本轮模型看不到它：中间层隐藏范围为「全部 MCP server」且本模型走中间层，这些工具已被装配过滤整条剔除，改经 dsh_mcp_search / dsh_mcp_call 取用（server 仍在运行）。',
   'ri.userVisible': '用户可用',
   // toggles
   'ri.toggleOffHint': '释放上下文：工具立即从模型目录消失。',
@@ -335,8 +345,11 @@ export const zh: Record<string, string> = {
   'ri.routeInherit': '跟随总开关',
   'ri.routeOn': '强制开',
   'ri.routeOff': '强制关',
-  'ri.routeCurrent': '当前路由',
-  'ri.routeActive': '本会话：{state} · {route}',
+  'ri.routeCurrent': '当前解析到的路由',
+  // 措辞纪律（评审 cbc-N9 / 子代理 WARN-4）：/state 不带 session 参数 → host 侧按
+  // roots[0] 解析，多会话并存时可能不是用户当前那个会话 —— 故写「面板绑定会话」，
+  // 且卡片上同时显示绑定 sessionId 供核对，不得断言「本会话 / 当前会话」。
+  'ri.routeActive': '面板绑定会话：{state} · {route}',
   'ri.routeActiveOn': '中间层已生效',
   'ri.routeActiveOff': '中间层未生效',
   'ri.routeSourceModel': '按模型规则',
@@ -348,6 +361,9 @@ export const zh: Record<string, string> = {
     '本次没有解析出会话模型（诊断装配或路由服务缺失），因此只有总开关参与判定 —— 按模型覆盖在此无从生效。这不是「覆盖没起作用」，而是路由本身未知。',
   'ri.routeMounted': '中间层已挂载（控制工具对表中的模型可见）。',
   'ri.routeNotMounted': '中间层未挂载。',
+  'ri.routePersistedOnly': '已保存，未生效',
+  'ri.routePersistedHint':
+    '该覆盖项已持久化进 state.json，但当前不生效：本次中间层挂载失败，运行期表（gate 实际读的那张表）被清空，而你的意图被保留。可在此删除或重设，下次启动会重试挂载。',
   'ri.routeEmpty': '暂无可列出的路由（无会话模型且没有覆盖项）。',
   // 工具批量控制（特性 1）
   'ri.toolFilter': '过滤工具…',

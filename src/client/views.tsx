@@ -217,7 +217,7 @@ const C = {
     fontSize: 12,
     alignSelf: 'flex-start' as const,
   },
-  // 0.7.0「更多配置」抽屉
+  // 0.6.0「更多配置」抽屉
   modalMask: {
     position: 'fixed' as const,
     inset: 0,
@@ -668,7 +668,7 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
   // P2-9：useCallback 稳定引用，避免 McpPanel 每次渲染重建（状态徽标查表）
   const mcpStatus = useCallback(
     (row: McpRow): { label: string; color: string; bg: string; title?: string } => {
-      // 0.7.1 诚实上报：启用+在跑但零注册（子进程起不来/空转）单独一档，
+      // 0.6.0 诚实上报：启用+在跑但零注册（子进程起不来/空转）单独一档，
       // 不复用 statusIdle 的"No tools"，也不会再被目录快照伪装成 active。
       if (row.unregistered) {
         return {
@@ -682,7 +682,7 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
         case 'active':
           return { label: t('ri.statusActive'), color: 'var(--dsw-alias-state-success-primary)', bg: 'var(--dsw-alias-state-success-tertiary)' }
         case 'disabled':
-          return { label: t('ri.statusDisabled'), color: 'var(--dsw-alias-label-tertiary)', bg: 'var(--dsw-alias-fill-l2)' }
+          return { label: t('ri.statusDisabled'), color: 'var(--dsw-alias-label-tertiary)', bg: 'var(--dsw-alias-fill-l2, var(--dsw-alias-bg-layer-2))' }
         case 'idle':
           return { label: t('ri.statusIdle'), color: 'var(--dsw-alias-state-warn-primary)', bg: 'var(--dsw-alias-state-warn-tertiary)' }
         default:
@@ -939,10 +939,18 @@ function RouteOverridesCard(props: {
     [loadMcp],
   )
 
+  // 当前值 = 运行期表优先，运行期没有该键时回落到**持久化**表：中间层挂载失败会把
+  // 运行期表清空（index.ts 的 catch），此时只读运行期会让已配置的键显示成「跟随总开关」
+  // 并诱导用户重设一次（见下面的 persistedOnly 标记）。
   const current = (key: string): boolean | null => {
     const value = state.autoManageByRoute[key]
-    return typeof value === 'boolean' ? value : null
+    if (typeof value === 'boolean') return value
+    const persisted = state.autoManageByRoutePersisted[key]
+    return typeof persisted === 'boolean' ? persisted : null
   }
+  // 「已持久化但当前不在运行期表里」= 该覆盖项本次没生效（挂载失败），必须显式标记。
+  const persistedOnly = (key: string): boolean =>
+    !(key in state.autoManageByRoute) && typeof state.autoManageByRoutePersisted[key] === 'boolean'
 
   const segment = (key: string): React.ReactElement => {
     const value = current(key)
@@ -952,7 +960,14 @@ function RouteOverridesCard(props: {
         type="button"
         style={{ ...C.routeSeg(value === target), ...(disabled ? C.toggleDisabled : {}) }}
         disabled={disabled}
-        onClick={() => void setOverride(key, target)}
+        onClick={() => {
+          // 等值守卫（与「隐藏范围」setHides、「生效时机」switchMode 两处同类控件一致）：
+          // 点已选中的那一段不再发请求 —— 后端只要收到 routeOverride 字段就会重挂中间层
+          // （routes.ts 的 middlewareTouched → 该轮前缀缓存 miss），而结果逐字不变。
+          // 对「跟随总开关」而言，本来就不存在的键点它同样不发删除请求。
+          if (value === target) return
+          void setOverride(key, target)
+        }}
       >
         {label}
       </button>
@@ -971,7 +986,15 @@ function RouteOverridesCard(props: {
   const activeKeys = [active.provider, active.provider && active.model ? `${active.provider}/${active.model}` : null].filter(
     (key): key is string => typeof key === 'string' && key.length > 0,
   )
-  const keys = [...new Set([...activeKeys, ...Object.keys(state.autoManageByRoute)])]
+  // 行集合 = 当前路由键 ∪ 运行期覆盖表 ∪ **持久化**覆盖表。加最后一项是为了让
+  // 「已配置但本次未生效」的键仍然可见、可删（否则挂载失败后用户既看不到也删不掉）。
+  const keys = [
+    ...new Set([
+      ...activeKeys,
+      ...Object.keys(state.autoManageByRoute),
+      ...Object.keys(state.autoManageByRoutePersisted),
+    ]),
+  ]
   const sourceLabel =
     active.source === 'model'
       ? t('ri.routeSourceModel')
@@ -1008,6 +1031,10 @@ function RouteOverridesCard(props: {
         {t('ri.routeActive', { state: sourceLabel, route: routeLabel })}
         {' · '}
         {state.autoManageMounted ? t('ri.routeMounted') : t('ri.routeNotMounted')}
+        {/* 绑定会话 id：把上面那句「面板绑定会话」变成可核对的事实（面板是进程级全局
+            组件，/state 不带 session → host 侧按 roots[0] 解析，多会话时未必是当前会话）。 */}
+        {' · '}
+        {t('ri.session')}: {state.sessionId ?? '—'}
       </p>
       {err && <div style={C.error}>{err}</div>}
       {keys.length === 0 && !err && <p style={C.cardMeta}>{t('ri.routeEmpty')}</p>}
@@ -1021,6 +1048,18 @@ function RouteOverridesCard(props: {
                 <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--dsw-alias-label-tertiary)' }}>
                   · {t('ri.routeCurrent')}
                 </span>
+              </>
+            )}
+            {persistedOnly(key) && (
+              <>
+                {' '}
+                <Badge
+                  color="var(--dsw-alias-state-warn-primary)"
+                  bg="var(--dsw-alias-state-warn-tertiary)"
+                  title={t('ri.routePersistedHint')}
+                >
+                  {t('ri.routePersistedOnly')}
+                </Badge>
               </>
             )}
           </span>
@@ -1068,7 +1107,7 @@ function ApplyTimingCard(props: {
 
   const applyPending = useCallback(async () => {
     // 「立即应用（知晓费用）」：强制把这批待办在当轮改变工具集 → 前缀失效、按 miss 计费。
-    // 0.7.2：服务端要求 body 带 { confirm: true }（见 routes.ts 该端点的加固注释）——
+    // 0.6.0：服务端要求 body 带 { confirm: true }（见 routes.ts 该端点的加固注释）——
     // 「用户已知晓费用」必须是显式动作，不能被裸 POST（模型/脚本）静默满足。
     // 这里先弹二次确认对话框（费用说明），用户点「确定」才发请求。
     if (!window.confirm(t('ri.applyPendingConfirm'))) return
@@ -1226,8 +1265,18 @@ function BudgetCard(props: { state: McpView; t: Props['t']; loadMcp: () => void 
             style={C.smallBtn(busy)}
             disabled={busy}
             onClick={() => {
-              const parsed = Number.parseInt(draft, 10)
-              void save(Number.isFinite(parsed) && parsed > 0 ? parsed : null)
+              // 只想接受「纯正整数」形态：`Number.parseInt('350abc')` = 350、`'-5'` = -5、
+              // 空串 = NaN —— 旧写法把这些一并以 null 发给后端，而后端的 `toolBudget: null`
+              // 是**清除**语义（`delete state.config.toolBudget`），于是敲错一次就把已设预算
+              // 静默删掉（评审 cbc-N5 / 子代理 NIT-2）。现在非法输入只提示、不发请求；
+              // 清空预算只由「清除」按钮触发。
+              const text = draft.trim()
+              const parsed = Number(text)
+              if (!/^\d+$/.test(text) || !Number.isFinite(parsed) || parsed <= 0) {
+                setErr(t('ri.budgetInvalid'))
+                return
+              }
+              void save(parsed)
             }}
           >
             {t('ri.budgetSet')}
@@ -1275,7 +1324,7 @@ function McpPanel(props: {
   const [bulkBusy, setBulkBusy] = useState<Record<string, boolean>>({})
   // 批量动作回执（已改动 N 条 / 有 K 条未识别）—— 没有它批量操作在 UI 上不可见
   const [toolNote, setToolNote] = useState<string | null>(null)
-  // 0.7.0「更多配置」：点开哪一行（null = 关闭）
+  // 0.6.0「更多配置」：点开哪一行（null = 关闭）
   const [cfgRow, setCfgRow] = useState<McpRow | null>(null)
   // 工具预算红线：与展示的数同源（toolsAllEnabled，口径见 BudgetCard）
   const overBudget = state.toolBudget !== null && state.toolsAllEnabled > state.toolBudget
@@ -1447,17 +1496,28 @@ function McpPanel(props: {
                     {t('ri.aiOwnedBadge')}
                   </Badge>
                 )}
-                {row.modelVisible ? (
-                  <Badge color="var(--dsw-alias-state-info-primary, #4a90d9)" bg="var(--dsw-alias-state-info-tertiary, rgba(74,144,217,0.15))">
-                    {t('ri.modelVisible')}
-                  </Badge>
-                ) : (
-                  !row.disabled && (
-                    <Badge color="var(--dsw-alias-label-tertiary)" bg="var(--dsw-alias-fill-l2)">
+                {/* 模型面可见性三态（0.6.0 收口）：此前只看 row.modelVisible（= 启用且非
+                    AI 临时启用），在 middleLayerHides='all' 且本会话 gate 打开时会把
+                    「经中间层取用」误标成「模型可见」（filter.ts:82 已把工具全部剔除）。
+                    停用行照旧不挂徽标（保持原行为）。 */}
+                {!row.disabled &&
+                  (row.modelVisibleScope === 'direct' ? (
+                    <Badge color="var(--dsw-alias-state-info-primary, #4a90d9)" bg="var(--dsw-alias-state-info-tertiary, rgba(74,144,217,0.15))">
+                      {t('ri.modelVisible')}
+                    </Badge>
+                  ) : row.modelVisibleScope === 'via-middle-layer' ? (
+                    <Badge
+                      color="var(--dsw-alias-state-info-primary, #4a90d9)"
+                      bg="var(--dsw-alias-state-info-tertiary, rgba(74,144,217,0.15))"
+                      title={t('ri.modelViaMiddleLayerHint')}
+                    >
+                      {t('ri.modelViaMiddleLayer')}
+                    </Badge>
+                  ) : (
+                    <Badge color="var(--dsw-alias-label-tertiary)" bg="var(--dsw-alias-fill-l2, var(--dsw-alias-bg-layer-2))">
                       {t('ri.modelHidden')}
                     </Badge>
-                  )
-                )}
+                  ))}
               </h3>
               <button
                 type="button"
@@ -1570,7 +1630,7 @@ function McpPanel(props: {
                 )}
               </>
             )}
-            {/* 0.7.0：更多配置（cwd/command/args/env/url/headers…）。对 codegraph 这类
+            {/* 0.6.0：更多配置（cwd/command/args/env/url/headers…）。对 codegraph 这类
                 按 cwd 认项目的 MCP 是必需入口 —— 缺 cwd 时表现为"行在跑却零工具"。 */}
             <button type="button" style={C.toolToggleBtn} onClick={() => setCfgRow(row)}>
               {t('ri.moreConfig')}
@@ -1594,7 +1654,7 @@ function McpPanel(props: {
 }
 
 /**
- * 0.7.0「更多配置」抽屉：编辑某个 MCP 行的挂载配置。
+ * 0.6.0「更多配置」抽屉：编辑某个 MCP 行的挂载配置。
  *
  * 形态取三种字段的**字符串编辑**（args 每行一项、env/headers 每行 k=v），
  * 与后端 white-list（preset.EDITABLE_CONFIG_KEYS）一一对应：
@@ -1832,7 +1892,7 @@ function SkillPanel(props: {
                 {row.name}
                 <Badge
                   color={visible ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-tertiary)'}
-                  bg={visible ? 'var(--dsw-alias-state-success-tertiary)' : 'var(--dsw-alias-fill-l2)'}
+                  bg={visible ? 'var(--dsw-alias-state-success-tertiary)' : 'var(--dsw-alias-fill-l2, var(--dsw-alias-bg-layer-2))'}
                 >
                   {visible ? t('ri.modelVisible') : t('ri.modelHidden')}
                 </Badge>

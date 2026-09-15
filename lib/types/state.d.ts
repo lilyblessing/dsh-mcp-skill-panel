@@ -5,7 +5,7 @@ export interface McpRowState {
     /** toggle 时该行在文件中的实际状态（true/false/null=无 disabled 键） */
     lastApplied: boolean | null;
     /**
-     * 0.7.0：面板"更多配置"改过的挂载配置意图（键值形态，见 preset.EDITABLE_CONFIG_KEYS）。
+     * 0.6.0：面板"更多配置"改过的挂载配置意图（键值形态，见 preset.EDITABLE_CONFIG_KEYS）。
      * 运行期只写这里（安全）；由 syncPresetFiles 在启动早期物化进预设行的 `config:` 块。
      * `appliedYaml` 记录**上次已物化**的值（YAML 文本形态），相等即无需重写 ——
      * 既幂等又能在配置变更后自动重写。

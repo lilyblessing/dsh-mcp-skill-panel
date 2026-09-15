@@ -1,7 +1,7 @@
 /**
  * 行级读数判定（纯函数；**零宿主依赖**，可独立 selftest）。
  *
- * 从 collect.ts 拆出（0.7.1）：这两个函数决定面板卡片的徽标与 tools/tokens 数字，
+ * 从 collect.ts 拆出（0.6.0）：这两个函数决定面板卡片的徽标与 tools/tokens 数字，
  * 是「故障现场有没有被目录快照伪装成健康」的唯一判据 —— 放在 collect.ts 里时，
  * selftest 必须 import 整个包入口，而入口会连带加载 @deepseek-ai/* 宿主包
  * （仓库 node_modules 侧不完整 → ERR_MODULE_NOT_FOUND：@deepseek-ai/dsh-home-paths，
@@ -23,7 +23,7 @@ export function computeStatus(disabled: boolean, running: boolean, liveTools: nu
   return liveTools > 0 ? 'active' : 'idle'
 }
 
-/** 展示用读数判定（0.7.1 诚实上报；纯函数，selftest 表驱动回归）。
+/** 展示用读数判定（0.6.0 诚实上报；纯函数，selftest 表驱动回归）。
  *
  * 与 computeStatus 的区别：这里决定 tools/tokens **显示什么数字**。
  * 此前两条路径都写成 `liveTools > 0 ? liveTools : catalogInfo?.tools.length ?? 0`，
@@ -44,4 +44,26 @@ export function rowDisplay(
   const unregistered = !disabled && running && liveTools <= 0
   if (unregistered) return { displayTools: 0, unregistered }
   return { displayTools: liveTools > 0 ? liveTools : catalogTools, unregistered }
+}
+
+/** 模型面可见性作用域判定（0.6.0 收口；纯函数，selftest 表驱动回归）。
+ *
+ * 起因（发布前独立审查 cbc-W1）：`modelVisible` 只扣「AI 临时启用」，**不扣**
+ * `middleLayerHides === 'all'` —— 而装配过滤在 `gate.on && gate.hideAll` 时把该
+ * server 的工具**全部**剔除（`filter.ts`）。于是 `'all'` + 本会话 gate 打开时，
+ * 卡片仍挂「模型可见」，与本次装配结果相反（同类失真本批已在能力摘要表
+ * `buildSummaryHeader` 上修过，行徽标漏了）。
+ *
+ * @param disabled - 该行是否停用（停用行不进装配）。
+ * @param aiOwned - 该行是否正被 AI 经 dsh_mcp_call 临时启用保活（对模型不可见）。
+ * @param hideAllActive - 中间层生效且隐藏范围为 `'all'`（等价于 filter.ts 的 `gate.on && gate.hideAll`）。
+ * @returns `'direct'`（进本次装配）/ `'via-middle-layer'`（不进装配，改经中间层取用）/ `'hidden'`。
+ */
+export function modelVisibleScope(
+  disabled: boolean,
+  aiOwned: boolean,
+  hideAllActive: boolean,
+): McpRow['modelVisibleScope'] {
+  if (disabled || aiOwned) return 'hidden'
+  return hideAllActive ? 'via-middle-layer' : 'direct'
 }

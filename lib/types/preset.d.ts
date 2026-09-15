@@ -18,7 +18,7 @@ import type { Context } from '@deepseek-ai/cordis';
  */
 export declare function setRowFlag(text: string, rowId: string, key: string, value: boolean): string;
 /**
- * 0.7.0：在组合文件中对 `- id: <rowId>` 行做**任意标量键**的设置/删除（通用版 setRowFlag）。
+ * 0.6.0：在组合文件中对 `- id: <rowId>` 行做**任意标量键**的设置/删除（通用版 setRowFlag）。
  *
  * 为什么必须是文本编辑而不是 yaml.dump：预设文件里允许 `!!js` 表达式与注释，
  * dump 会丢掉它们（setRowFlag 的注释已记录这条）。
@@ -38,7 +38,7 @@ export declare function setRowConfigKeys(text: string, rowId: string, set: Recor
 export declare const EDITABLE_CONFIG_KEYS: readonly ["transport", "command", "args", "env", "cwd", "url", "headers", "toolCallTimeoutMs", "failOnStartupError"];
 export type EditableConfigKey = (typeof EDITABLE_CONFIG_KEYS)[number];
 /**
- * 0.7.0：把配置值序列化成**单行 YAML**（写入预设文件用）。
+ * 0.6.0：把配置值序列化成**单行 YAML**（写入预设文件用）。
  *
  * 保守策略：只在确认安全时才裸写，其余一律单引号包裹（YAML 单引号里 `'` 需写成 `''`）。
  * 数组/对象用 flow 风格（与预设里既有的 `args: ['serve', '--mcp']` 一致）。

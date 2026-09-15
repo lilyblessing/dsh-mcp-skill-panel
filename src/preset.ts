@@ -62,7 +62,7 @@ export function setRowFlag(text: string, rowId: string, key: string, value: bool
 }
 
 /**
- * 0.7.0：在组合文件中对 `- id: <rowId>` 行做**任意标量键**的设置/删除（通用版 setRowFlag）。
+ * 0.6.0：在组合文件中对 `- id: <rowId>` 行做**任意标量键**的设置/删除（通用版 setRowFlag）。
  *
  * 为什么必须是文本编辑而不是 yaml.dump：预设文件里允许 `!!js` 表达式与注释，
  * dump 会丢掉它们（setRowFlag 的注释已记录这条）。
@@ -273,7 +273,7 @@ function isJsExprObject(value: unknown): value is { __jsExpr: string } {
 }
 
 /**
- * 0.7.0：把配置值序列化成**单行 YAML**（写入预设文件用）。
+ * 0.6.0：把配置值序列化成**单行 YAML**（写入预设文件用）。
  *
  * 保守策略：只在确认安全时才裸写，其余一律单引号包裹（YAML 单引号里 `'` 需写成 `''`）。
  * 数组/对象用 flow 风格（与预设里既有的 `args: ['serve', '--mcp']` 一致）。
@@ -390,7 +390,7 @@ export async function syncPresetFiles(ctx: Context): Promise<number> {
         // 改为保留条目：lastApplied 对齐现实（cur），desired 保留（面板仍显示
         // 意图徽标，可重新 toggle 接管）；desired 与现状一致时自动恢复管理闭环。
         //
-        // 0.7.1 修复（2026-09-14 实测事故）：**配置意图必须继续物化**。
+        // 0.6.0 修复（2026-09-14 实测事故）：**配置意图必须继续物化**。
         // 原实现在此处 `continue` 把整行跳过 → 「更多配置」改的 cwd 永远进不了
         // 预设文件且毫无提示。触发场景：codegraph 行无 `disabled` 键 ⇒
         // rowDisabledState 返回 null，而 state 里记的 lastApplied 来自 live
@@ -415,7 +415,7 @@ export async function syncPresetFiles(ctx: Context): Promise<number> {
         }
         lastApplied = entry.desired
       }
-      // 0.7.0：配置意图物化（仅当与上次物化结果不同才写，幂等且可自愈）
+      // 0.6.0：配置意图物化（仅当与上次物化结果不同才写，幂等且可自愈）
       let configAppliedYaml = entry.configAppliedYaml
       if (entry.config && Object.keys(entry.config).length > 0) {
         const yamlText = configKeysToYamlText(entry.config)

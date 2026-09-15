@@ -64,7 +64,7 @@ if (hostFilled.length > 0) {
   console.log(`NOTICE 宿主闭包回填 ${new Set(hostFilled).size} 个 devDep 缺口：${[...new Set(hostFilled)].join(', ')}（源自 ${HOST_SCOPE}）`)
 }
 const convert = await import(pathToFileURL(join(root, 'lib', 'mcp-convert.js')).href)
-// 0.7.1：行级读数判定拆成零宿主依赖模块，纯逻辑护栏不再受宿主包解析环境影响。
+// 0.6.0：行级读数判定拆成零宿主依赖模块，纯逻辑护栏不再受宿主包解析环境影响。
 const rowDisplayMod = await import(pathToFileURL(join(root, 'lib', 'row-display.js')).href)
 
 let failed = false
@@ -327,7 +327,7 @@ check('computeStatus：表驱动四态（active 以 liveTools 真实注册为准
   }
 })
 
-check('rowDisplay：诚实上报（0.7.1）—— 启用+在跑却零注册时不再回落目录快照', () => {
+check('rowDisplay：诚实上报（0.6.0）—— 启用+在跑却零注册时不再回落目录快照', () => {
   const cases = [
     // [disabled, running, liveTools, catalogTools, expectedTools, expectedUnregistered]
     [false, true, 4, 4, 4, false],    // 真注册 → 用真值
@@ -341,6 +341,31 @@ check('rowDisplay：诚实上报（0.7.1）—— 启用+在跑却零注册时�
     const got = rowDisplayMod.rowDisplay(disabled, running, liveTools, catalogTools)
     assert.equal(got.displayTools, tools, `rowDisplay(${disabled}, ${running}, ${liveTools}, ${catalogTools}).displayTools -> ${got.displayTools}, expected ${tools}`)
     assert.equal(got.unregistered, unregistered, `rowDisplay(${disabled}, ${running}, ${liveTools}, ${catalogTools}).unregistered -> ${got.unregistered}, expected ${unregistered}`)
+  }
+})
+
+// 0.6.0 收口（发布前独立审查 cbc-W1）：行徽标的「模型可见」必须与装配结果一致 ——
+// hideAll 生效时工具被整条剔除（filter.ts 的 `gate.on && gate.hideAll`），此时只能说
+// 「经中间层取用」，不能说「模型可见」。纯函数表驱动，防回归。
+check('modelVisibleScope：hideAll 生效时不得再宣称「模型可见」（cbc-W1）', () => {
+  const cases = [
+    // [disabled, aiOwned, hideAllActive, expectedScope, expectedModelVisible]
+    [false, false, false, 'direct', true],              // 常规直连
+    [false, false, true, 'via-middle-layer', false],    // 本次修复的假声明现场
+    [true, false, false, 'hidden', false],              // 停用行
+    [true, false, true, 'hidden', false],               // 停用 + hideAll
+    [false, true, false, 'hidden', false],              // AI 临时启用保活（对模型不可见）
+    [false, true, true, 'hidden', false],               // AI 临时启用 + hideAll
+  ]
+  for (const [disabled, aiOwned, hideAllActive, scope, modelVisible] of cases) {
+    const got = rowDisplayMod.modelVisibleScope(disabled, aiOwned, hideAllActive)
+    assert.equal(
+      got,
+      scope,
+      `modelVisibleScope(${disabled}, ${aiOwned}, ${hideAllActive}) -> ${got}, expected ${scope}`,
+    )
+    // modelVisible 必须恒等于 scope === 'direct'（面板与 API 的单一判据）
+    assert.equal(got === 'direct', modelVisible, `scope=${got} 时 modelVisible 应为 ${modelVisible}`)
   }
 })
 

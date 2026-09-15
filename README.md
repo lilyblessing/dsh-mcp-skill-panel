@@ -161,7 +161,7 @@ dsh plugin --profile web add "github:lilyblessing/dsh-mcp-skill-panel#main"
 | GET | `/state?session=<id>&part=<mcp\|skills\|all>` | 清单快照；`part` 分域拉取，缺省 all |
 | POST | `/mcp/toggle` | `{ entryId, disabled }` 启停单个 MCP |
 | POST | `/mcp/toggleBatch` | `[{ entryId, disabled }]` 批量启停（400ms 合并，单次失效） |
-| POST | `/mcp/applyPending` | 立即应用待生效队列（next-session 意图强制生效）；**需 body `{ confirm: true }`**，缺了即 400（0.7.2 加固：该操作会让当前会话下一轮 100% miss 前缀缓存） |
+| POST | `/mcp/applyPending` | 立即应用待生效队列（next-session 意图强制生效）；**需 body `{ confirm: true }`**，缺了即 400（该操作会让当前会话下一轮 100% miss 前缀缓存，故要求显式确认） |
 | GET\|POST | `/mcp/rowConfig` | body `{ server, set?, unset?, apply? }` 读/写某 MCP 行的挂载配置（`command`/`args`/`env`/`cwd`/`url`/`headers`…）；GET **开放但 env/headers 脱敏回显**，POST **需 `x-panel-token`**；写侧占位符即「保留原值」 |
 | GET | `/debug/rowConfig` | 只读取某 server 行的全量挂载配置 + 模块身份读数（运维排障用；env/headers 脱敏回显） |
 | POST | `/mcp/toolToggle` | `{ serverName, toolName, disabled }` 工具级禁用（全名 `mcp__<server>__<tool>`） |
@@ -255,7 +255,7 @@ sequenceDiagram
 - 工具数/token 为估算值（`JSON.stringify(parameters).length / 4`），与模型注入面真实值近似。
 - 停用后工具立即消失，但**当前回合的请求缓存**（如有）可能仍引用旧 schema；下一请求自然刷新。
 - **持久化时滞**：启停实时生效；跨重启保持依赖下次启动的物化 —— 插件在「已有会话运行」期间被热更新时，本次进程不物化，下一次重启生效。
-- **手动编辑预设组合文件的 mcp 行**（如手动移除 `disabled: true`）会令该行退出插件的**启停持久化管理**（下次启动尊重你的改动，不再写 `disabled`）；但**配置意图（「更多配置」改的字段）仍会继续物化**（0.7.1 起），两者是正交字段。
+- **手动编辑预设组合文件的 mcp 行**（如手动移除 `disabled: true`）会令该行退出插件的**启停持久化管理**（下次启动尊重你的改动，不再写 `disabled`）；但**配置意图（「更多配置」改的字段）仍会继续物化**，两者是正交字段。
 - **未注册 ≠ 未启用**：`status=failed / tools=0 / unregistered=true` 表示该行**已启用且在跑**，但子进程一个工具都没注册（多为配置问题：缺项目索引、端点不可达、可执行文件不存在）。卡片下方列出的工具来自目录快照，只是"可被 `dsh_mcp_search` 检索"，不代表当前可用。
 - **工具级禁用边界**：禁用拦截作用于模型可见性（装配过滤）、`dsh_mcp_search` 检索与中间层 `dsh_mcp_call`；对已注册工具的直接原生调用（绕过中间层）不做运行时拦截。
 - **有效统计是「工具级启用数」，不等于「实际进入上下文」**：它只扣「工具级禁用」（谓词与装配过滤同源）。**口径边界**：不扣 server 级隐藏（`dsh_mcp_call` 保活中的 AI 临时启用 server、`middleLayerHides='all'` 下的全部 server），也不扣 project-mcp 的工作区过滤 —— 它回答的是「该 server 有多少工具处于启用态」，不是「模型这一回合实际看到多少」。
@@ -263,6 +263,8 @@ sequenceDiagram
 - **控制工具的 `arguments` 必须是 JSON 对象**：`dsh_mcp_call` 的 `arguments` 声明为对象类型，**字符串形态会被参数校验前置拒绝**（报 `invalid arguments: "arguments" must be an object`）。这是有意的收紧（0.6.0 起）—— 旧版会把 JSON 字符串透明解析，现在按工具描述要求的对象形态传入即可。
 - 运行期写 SKILL.md 安全（skill-filesystem 的 watcher 本就预期文件被改）；运行期写预设组合文件会触发 dsh-agent-presets 的 stamp 重挂事故，插件刻意不做。
 - 能力摘要表（`dsh_mcp_search` 空查询）只覆盖有 catalog 快照或配置了 `serverSummary` 的 server；从未成功启动过的 server（如 codegraph）不会列出。**口径提示**：`middleLayerHides='all'` 时该表按「经中间层取用」表述，不再宣称 server「对模型可见」—— 可见与否以装配结果为准（此时连已启用的 server 也从模型面隐藏）。
+- **按模型覆盖只能为「当前路由 + 已存在的键」配置**：面板不拉 provider/model 目录（避免一次无鉴权网络往返），覆盖卡的行集合 = 当前解析到的路由（`provider` 与 `provider/model`）∪ 已存在的覆盖键。**要给别的 provider/model 预置规则，必须先切到该模型**再设；设过的键会一直留在表里可继续编辑。挂载失败后运行期覆盖表会被清空，但这类键按「运行期 ∪ 持久化（`autoManageByRoutePersisted`）」渲染并标注「已保存，未生效」，仍可见、可删。
+- 面板是**进程级全局**设置区块：`/state` 不带 `session` 参数时，host 侧按 `roots[0]` 解析归属会话 —— 多会话并存时覆盖卡的「面板绑定会话」未必是你正在看的那个会话（卡片同时显示绑定的 `sessionId` 供核对）。
 - **控制端点鉴权**：写操作由进程级随机令牌（`x-panel-token`）保护，仅面板同源客户端自动携带；GET 只读开放。宿主 webServer 本身无鉴权层，若将监听地址改为 `0.0.0.0` 对外暴露，建议同时依赖外层网络隔离。
 
 ## 🛠️ 开发
@@ -289,6 +291,8 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 
 ### v0.6.0（2026-09-16）— 首个公开发布
 
+> 本节条目折叠自发布前的内部开发线（该开发线从未对外发布，发布时统一按 v0.6.0 计），因此条目内保留了当时的迭代顺序与提交号。
+
 #### 安全加固：`/mcp/applyPending` 的显式确认 + AI 临时启用可辨识
 
 - 🔒 **逃生舱加闸门**：`POST /mcp/applyPending`（README §92–96 定义的那个「**用户点击**『立即应用待生效变更』按钮、已知晓费用」的强制生效出口）原先只校验 method + 面板令牌，**「用户已知晓费用」这个前提在服务端并不存在** —— 任何能发 HTTP 的调用方（包括模型自己）一发裸 POST 就能单方面作废 next-session 的「零缓存失效」承诺。实测（2026-09-14）：模型经此端点把 next-session 下的 obsidian 行在当前会话直接打开，README §92 描述的两条生效边界（新会话首次请求前 / DSH 重启）被绕过。
@@ -307,7 +311,7 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 #### 诚实上报未注册行 + 配置物化误判修复
 
 - 🐛 **假绿缺陷修复**：行「启用 + 在跑 + live 注册工具数 = 0」时，面板此前回落显示目录快照工具数，把故障现场渲染成健康 —— 实测 codegraph 显示 `running=true / tools=4`，而 Host 注册表 `mcp__* = 0`、`mcp_call` 两次 60s 超时（真因：工作区缺 `.codegraph` 索引，子进程空转）。现在 `unregistered=true` + `tools=0` + `status=failed`，卡片徽标显示「未注册工具 / Not registered」并附悬停说明；目录快照只回落到工具列表（工具级禁用 UI 仍可用），**停用行照旧回落快照**（保留「可被 mcp_search 检索」语义）。
-- 🐛 **配置意图物化被外部改动误判吞掉**（0.7.0 的持久化路径此前实际不可用）：`rowDisabledState` 对**没有 `disabled` 键**的行返回 `null`，而状态文件里的 `lastApplied` 记的是 live `entry.disabled = false` → `null !== false` → 启动物化判成「文件被外部改过」→ **整行跳过，配置永不落地且零提示**（实测：preset 文件 mtime 不变即为铁证）。修复：① 外部改动分支不再跳过，改为「对齐 `lastApplied` → 继续走配置物化」（启停与配置正交，该分支不写 `disabled`，用户对启停的改动仍被尊重）；② `writeRowConfigIntent` 的 `lastApplied` 改读盘取文件事实，不再沿用面板快照。
+- 🐛 **配置意图物化被外部改动误判吞掉**（配置意图的持久化路径此前实际不可用）：`rowDisabledState` 对**没有 `disabled` 键**的行返回 `null`，而状态文件里的 `lastApplied` 记的是 live `entry.disabled = false` → `null !== false` → 启动物化判成「文件被外部改过」→ **整行跳过，配置永不落地且零提示**（实测：preset 文件 mtime 不变即为铁证）。修复：① 外部改动分支不再跳过，改为「对齐 `lastApplied` → 继续走配置物化」（启停与配置正交，该分支不写 `disabled`，用户对启停的改动仍被尊重）；② `writeRowConfigIntent` 的 `lastApplied` 改读盘取文件事实，不再沿用面板快照。
 - 🔧 **`row-display` 拆为零宿主依赖模块**：`computeStatus` / `rowDisplay` 原埋在 `collect.ts`，selftest 只能经 `index.js` 触达（连带加载 `@deepseek-ai/*`，repo 侧不完整 → 测不到）。现独立产物 `lib/row-display.js`（零 import），selftest 直接加载；`verify` 增加产物存在性 + 零 import 闸门。
 - 🔧 **部署基准修正**：`scripts/deploy-link.mjs` 的 `hostScope` 原为 `profiles/node_modules/@deepseek-ai`（pnpm 扁平层），该层在一次 junction 事故后**170/240 项断链**（含 `dsh-agent-presets`/`dsh-tools`/`dsh-scope`）→ 指向它的部署目录**冷启动全部 MODULE_NOT_FOUND**（运行中的进程因模块已入内存而不暴露）。改为 `profiles/web/node_modules/@deepseek-ai`（同源 0.1.5-rc.2，241 项全通）。另：脚本提示从 `Remove-Item -Recurse` 改为**移动语义**（junction 事故约束）。
 
