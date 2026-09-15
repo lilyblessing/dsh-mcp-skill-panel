@@ -9,7 +9,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { mkdir, readFile, writeFile, rename, access } from 'node:fs/promises'
 import { basename, dirname, join, parse as parsePath } from 'node:path'
 import { homedir } from 'node:os'
-import { readState, writeState, stateApplyMode, type ApplyMode } from './state'
+import { readState, writeState, stateApplyMode, stateAutoManageByRoute, stateMiddleLayerHides, stateToolBudget, type ApplyMode } from './state'
 import { setSkillFlag, rowDisabledState, isValidSkillName, buildSkillMd } from './preset'
 import { pendingMcp, applyPendingMcp } from './pending'
 import { findPresetRowByEntryId } from './preset-mcp'
@@ -17,10 +17,15 @@ import { resolveAgent, resolveCollectScopeKey, scopeKeySource, getSchemasView, m
 import { isMcpEntry, serverNameOf } from './mcp-entry'
 import { parseMcpServersJson, serversToPatchYaml, serversToRows, type McpServers, type McpRowConfig } from './mcp-convert'
 import { remountWorkspace, projectServerOwner, getActiveWorkspace } from './project-mcp'
-import { disabledToolsOf, setToolDisabled } from './tool-disable'
+import { disabledToolsOf, setToolDisabled, setToolsDisabledBulk } from './tool-disable'
 import type { McpCallController } from './mcpcall'
 import type { CatalogRuntime, Config } from './index'
 import { messageOf } from './util'
+
+/** 吞掉诊断用异常（保留一个可断点的落点，避免空 catch）。 */
+function errorsOf(error: unknown): string {
+  return messageOf(error)
+}
 
 const API_PREFIX = '/api/mcp-skill-panel'
 /** 旧前缀（0.3.1 及以前为 /api/runtime-inventory），保留兼容 */
@@ -676,6 +681,10 @@ export function makeRoutes(
             const state = await readState()
             return {
               autoManage: catalogRuntime.autoManage,
+              autoManageByRoute: stateAutoManageByRoute(state),
+              autoManageMounted: catalogRuntime.autoManageMounted,
+              middleLayerHides: stateMiddleLayerHides(state),
+              toolBudget: stateToolBudget(state) ?? null,
               applyMode: stateApplyMode(state),
               configAutoManage: config.autoManage ?? null,
             }
@@ -686,19 +695,58 @@ export function makeRoutes(
           run: async (req) => {
             const parsed = JSON.parse((await readBody(req)) || '{}') as {
               autoManage?: boolean
+              /** 单条覆盖项：key 为 provider 或 provider/model；value null=删除该项。 */
+              routeOverride?: { key?: string; value?: boolean | null }
               applyMode?: ApplyMode
+              toolBudget?: number | null
+              middleLayerHides?: 'disabled' | 'all'
             }
             const state = await readState()
             state.config ??= {}
             if (typeof parsed.autoManage === 'boolean') {
               state.config.autoManage = parsed.autoManage
             }
+            if (parsed.routeOverride && typeof parsed.routeOverride.key === 'string' && parsed.routeOverride.key.length > 0) {
+              const table = (state.config.autoManageByRoute ??= {})
+              const value = parsed.routeOverride.value
+              // null / 非布尔 = 「继承总开关」，即从表里删掉这一项（而不是写 false）
+              if (typeof value === 'boolean') table[parsed.routeOverride.key] = value
+              else delete table[parsed.routeOverride.key]
+              if (Object.keys(table).length === 0) delete state.config.autoManageByRoute
+            }
+            if (parsed.middleLayerHides === 'disabled' || parsed.middleLayerHides === 'all') {
+              state.config.middleLayerHides = parsed.middleLayerHides
+            }
             if (parsed.applyMode === 'immediate' || parsed.applyMode === 'next-session') {
               state.config.applyMode = parsed.applyMode
             }
+            if (parsed.toolBudget === null) {
+              delete state.config.toolBudget
+            } else if (typeof parsed.toolBudget === 'number' && Number.isFinite(parsed.toolBudget) && parsed.toolBudget > 0) {
+              state.config.toolBudget = Math.round(parsed.toolBudget)
+            }
             await writeState(state)
-            if (typeof parsed.autoManage === 'boolean') catalogRuntime.applyAutoManage(parsed.autoManage)
-            return { autoManage: catalogRuntime.autoManage, applyMode: stateApplyMode(state) }
+            // 只有中间层相关字段变化才重挂：applyAutoManage 会 dispose/register 工具，
+            // 触发 tools/change → 整段前缀缓存失效。改 applyMode / toolBudget 与中间层
+            // 无关，不能顺带让用户付一次 miss。
+            const middlewareTouched =
+              typeof parsed.autoManage === 'boolean' ||
+              parsed.routeOverride !== undefined ||
+              parsed.middleLayerHides !== undefined
+            if (middlewareTouched) {
+              // 总开关与覆盖表任一变化都要重算挂载（覆盖表出现 true 项时即便总开关关也要挂载）
+              const master = typeof state.config.autoManage === 'boolean' ? state.config.autoManage : catalogRuntime.autoManage
+              catalogRuntime.applyAutoManage(master, stateAutoManageByRoute(state), stateMiddleLayerHides(state))
+            }
+            invalidateMcp()
+            return {
+              autoManage: catalogRuntime.autoManage,
+              autoManageByRoute: stateAutoManageByRoute(state),
+              autoManageMounted: catalogRuntime.autoManageMounted,
+              middleLayerHides: stateMiddleLayerHides(state),
+              toolBudget: stateToolBudget(state) ?? null,
+              applyMode: stateApplyMode(state),
+            }
           },
         },
       ], true),
@@ -769,6 +817,97 @@ export function makeRoutes(
           disabledTools: [...disabledToolsOf(parsed.serverName)],
         }
       }, true),
+    },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/mcp/toolBulk`,
+      handler: handle('POST', async (req) => {
+        // 工具级批量禁用/启用：面板的「全部禁用 / 全部启用 / 按当前过滤」。
+        // toolNames 省略 = 该 server 面板视图里的全部工具（live schemas，缺失时
+        // 回退 catalog 快照 —— 与逐个开关看到的列表完全同源，不会漏项）。
+        const parsed = JSON.parse((await readBody(req)) || '{}') as {
+          serverName?: string
+          disabled?: boolean
+          toolNames?: string[]
+          session?: string
+        }
+        if (typeof parsed.serverName !== 'string' || parsed.serverName.length === 0) throw new Error('serverName is required')
+        if (typeof parsed.disabled !== 'boolean') throw new Error('disabled (boolean) is required')
+        const serverName = parsed.serverName
+        const view = await cachedMcp(parsed.session)
+        const row = view.mcp.find((item) => item.serverName === serverName)
+        if (!row) throw new Error(`unknown MCP server: ${serverName}`)
+        const known = row.toolList ?? []
+        if (known.length === 0) {
+          // 目录不可得（server 从未启动且无 catalog 快照）：批量无从下手，明确报错，
+          // 而不是静默写 0 条让用户以为已生效。
+          throw new Error(`no tool catalog for ${serverName} (enable it once so its tools can be discovered)`)
+        }
+        const requested = Array.isArray(parsed.toolNames) && parsed.toolNames.length > 0
+          ? known.filter((tool) => parsed.toolNames?.includes(tool.name)).map((tool) => tool.name)
+          : known.map((tool) => tool.name)
+        const changed = await setToolsDisabledBulk(serverName, requested, parsed.disabled)
+        invalidateMcp()
+        const nowDisabled = disabledToolsOf(serverName, row.workspace)
+        return {
+          serverName,
+          disabled: parsed.disabled,
+          requested: requested.length,
+          changed,
+          totalTools: known.length,
+          disabledTools: nowDisabled.size,
+        }
+      }, true),
+    },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/models`,
+      handler: handle('GET', async (req) => {
+        // 按模型分流的配置面：已注册 provider + 其模型目录 + 当前会话判定。
+        // llm 服务缺失（精简组合）时降级为空列表，卡片照常可用（只是没有可点的行）。
+        const state = await readState()
+        const byRoute = stateAutoManageByRoute(state)
+        // 经 ctx.inject 捕获的引用：直接读 ctx.llm 会抛
+        // 「cannot get property "llm" without inject」（cordis 的服务访问守卫）。
+        const llm = catalogRuntime.routeServices.llm
+        const providers: Array<{ provider: string; name: string; models: Array<{ id: string; name: string }> }> = []
+        if (llm) {
+          let list: Array<{ id: string; name: string }> = []
+          try {
+            list = llm.listProviders()
+          } catch (error) {
+            list = []
+            errorsOf(error)
+          }
+          // 模型目录是 adapter 的建议值，可能要打网络；单个 provider 失败不拖垮整页。
+          await Promise.all(
+            list.map(async (entry) => {
+              let models: Array<{ id: string; name: string }> = []
+              try {
+                models = (await llm.listModels(entry.id)).map((model) => ({ id: model.id, name: model.name }))
+              } catch {
+                models = []
+              }
+              providers.push({ provider: entry.id, name: entry.name, models })
+            }),
+          )
+          providers.sort((a, b) => a.provider.localeCompare(b.provider))
+        }
+        const agent = resolveAgent(ctx, queryParam(req.url ?? '', 'session'))
+        const decision = catalogRuntime.decisionFor(agent)
+        return {
+          providers,
+          autoManage: catalogRuntime.autoManage,
+          autoManageByRoute: byRoute,
+          autoManageMounted: catalogRuntime.autoManageMounted,
+          active: {
+            on: decision.on,
+            source: decision.source,
+            provider: decision.route?.provider ?? null,
+            model: decision.route?.model ?? null,
+          },
+        }
+      }),
     },
     {
       kind: 'exact',

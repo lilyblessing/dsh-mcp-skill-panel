@@ -573,6 +573,83 @@ check('控制工具名不得以 mcp_ 开头（claude.ai 网关保留前缀 → H
   assert.equal(index.MCP_CALL_TOOL, 'dsh_mcp_call')
 })
 
+// ── 按模型分流的查表优先级 ──────────────────────────────────────────
+const grok = { provider: 'grok', model: 'grok-4.6' }
+const claude = { provider: 'claude', model: 'claude-sonnet-5' }
+
+check('routeDecision：空覆盖表 = 旧行为（只看总开关）', () => {
+  assert.deepEqual(index.routeDecision(grok, true, {}), { on: true, source: 'master', route: grok })
+  assert.deepEqual(index.routeDecision(grok, false, undefined), { on: false, source: 'master', route: grok })
+})
+
+check('routeDecision：provider 项覆盖总开关', () => {
+  const table = { claude: false }
+  assert.equal(index.routeDecision(claude, true, table).on, false)
+  assert.equal(index.routeDecision(claude, true, table).source, 'provider')
+  // 未列出的 provider 不受影响
+  assert.equal(index.routeDecision(grok, true, table).on, true)
+  assert.equal(index.routeDecision(grok, true, table).source, 'master')
+})
+
+check('routeDecision：provider/model 精确项优先于 provider 项', () => {
+  const table = { claude: false, 'claude/claude-haiku-4-5-20251001': true }
+  assert.equal(index.routeDecision(claude, true, table).on, false)
+  const haiku = { provider: 'claude', model: 'claude-haiku-4-5-20251001' }
+  assert.equal(index.routeDecision(haiku, true, table).on, true)
+  assert.equal(index.routeDecision(haiku, true, table).source, 'model')
+})
+
+check('routeDecision：总开关关 + 覆盖项开 → 该模型仍启用（挂载条件的依据）', () => {
+  assert.equal(index.routeDecision(grok, false, { grok: true }).on, true)
+})
+
+check('routeDecision：未解析出路由 → 保守回退总开关，不静默改变工具集', () => {
+  const decision = index.routeDecision(undefined, true, { claude: false })
+  assert.deepEqual(decision, { on: true, source: 'no-route', route: undefined })
+})
+
+check('routeKey：provider/model 拼接', () => {
+  assert.equal(index.routeKey(grok), 'grok/grok-4.6')
+})
+
+// ── 工具级批量禁用 ─────────────────────────────────────────────────
+await checkAsync('setToolsDisabledBulk：一次禁用整组，再整组启用（persist=false 只动内存）', async () => {
+  const names = ['mcp__bulk__a', 'mcp__bulk__b', 'mcp__bulk__c']
+  const changed = await index.setToolsDisabledBulk('bulk', names, true, false)
+  assert.equal(changed, 3)
+  for (const name of names) assert.equal(index.isToolDisabled(name), true)
+  const back = await index.setToolsDisabledBulk('bulk', names, false, false)
+  assert.equal(back, 3)
+  for (const name of names) assert.equal(index.isToolDisabled(name), false)
+})
+
+await checkAsync('setToolsDisabledBulk：忽略其他 server 的全名，不污染禁用表', async () => {
+  const changed = await index.setToolsDisabledBulk('bulk2', ['mcp__other__x', 'mcp__bulk2__y'], true, false)
+  assert.equal(changed, 1)
+  assert.equal(index.isToolDisabled('mcp__other__x'), false)
+  assert.equal(index.isToolDisabled('mcp__bulk2__y'), true)
+  await index.setToolsDisabledBulk('bulk2', ['mcp__bulk2__y'], false, false)
+})
+
+await checkAsync('setToolsDisabledBulk：重复名去重，批量与单点开关可交替', async () => {
+  await index.setToolDisabled('bulk3', 'mcp__bulk3__a', true, false)
+  // a 已禁用：整组禁用只新增 b，changed 反映集合实际增量
+  const changed = await index.setToolsDisabledBulk('bulk3', ['mcp__bulk3__a', 'mcp__bulk3__a', 'mcp__bulk3__b'], true, false)
+  assert.equal(changed, 1)
+  assert.equal(index.disabledToolsOf('bulk3').size, 2)
+  await index.setToolsDisabledBulk('bulk3', ['mcp__bulk3__a', 'mcp__bulk3__b'], false, false)
+  assert.equal(index.disabledToolsOf('bulk3').size, 0)
+})
+
+// ── 中间层隐藏范围 ────────────────────────────────────────────────
+check('stateMiddleLayerHides：缺省 disabled，只有显式 all 才切换', () => {
+  assert.equal(index.stateMiddleLayerHides({}), 'disabled')
+  assert.equal(index.stateMiddleLayerHides({ config: {} }), 'disabled')
+  assert.equal(index.stateMiddleLayerHides({ config: { middleLayerHides: 'all' } }), 'all')
+  // 非法值不得静默变成 all（会让所有模型突然失去全部 MCP 工具）
+  assert.equal(index.stateMiddleLayerHides({ config: { middleLayerHides: 'nonsense' } }), 'disabled')
+})
+
 if (failed) {
   console.log('\nselftest: FAILED')
   process.exit(1)

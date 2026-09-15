@@ -9,13 +9,13 @@ import { scopeOf } from '@deepseek-ai/dsh-scope'
 import type { McpRow, McpView, SkillsView } from './shared-types'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
 import { projectServerOwner, getActiveWorkspace } from './project-mcp'
-import { disabledToolsOf } from './tool-disable'
+import { disabledToolsOf, isToolDisabled } from './tool-disable'
 import type { CatalogServer } from './catalog'
 import { serverOfMcp } from './catalog'
 import type { McpCallController } from './mcpcall'
 import type { CatalogRuntime } from './index'
 import { messageOf } from './util'
-import { readState } from './state'
+import { readState, stateToolBudget, stateMiddleLayerHides } from './state'
 import { pendingMcp } from './pending'
 import { listPresetMcpRows } from './preset-mcp'
 
@@ -299,6 +299,25 @@ function catalogTokens(runtime: CatalogRuntime, serverName: string, info: Catalo
   return tokens
 }
 
+/** 行级有效统计：按禁用集合折算该 server 实际进入上下文的工具数与 token。 */
+function effectiveOf(
+  toolList: Array<{ name: string; tokens: number }> | undefined,
+  toolDisabled: ReadonlySet<string>,
+  fallbackTools: number,
+  fallbackTokens: number,
+): { toolsEnabled: number; tokensEnabled: number } {
+  // 工具目录不可得（scope 异常且无 catalog 快照）：退回整行值，宁可高估也不谎报 0。
+  if (!toolList) return { toolsEnabled: fallbackTools, tokensEnabled: fallbackTokens }
+  let toolsEnabled = 0
+  let tokensEnabled = 0
+  for (const tool of toolList) {
+    if (toolDisabled.has(tool.name)) continue
+    toolsEnabled += 1
+    tokensEnabled += tool.tokens
+  }
+  return { toolsEnabled, tokensEnabled }
+}
+
 async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<McpView> {
   const { ctx } = deps
   const errors: string[] = []
@@ -312,20 +331,34 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
   // 同样合并全局视图：patch 层 server（filesystem 等）的工具列表需要出现在面板。
   let schemas = getSchemasView(ctx, deps.caches, scopeKey, DOMAIN_TTL_MS)
   if (scopeKey) schemas = mergeSchemas(schemas, getSchemasView(ctx, deps.caches, undefined, DOMAIN_TTL_MS))
-  const toolsByServer = new Map<string, Array<{ name: string; description: string }>>()
+  const toolsByServer = new Map<string, Array<{ name: string; description: string; tokens: number }>>()
+  // 有效统计：工具级禁用不影响注册表，只在装配时剔除，所以面板必须
+  // 自己按同一谓词（isToolDisabled，与 system-prompt/assemble 过滤同源）复算，
+  // 否则「禁用 400 个工具」后面板仍显示 450 —— 整个批量禁用毫无反馈。
+  let mcpToolsEnabledTotal = 0
+  let mcpTokensEnabledTotal = 0
   for (const schema of schemas) {
     const name = String(schema?.name ?? '')
     if (!name.startsWith('mcp__')) continue
     const server = serverOfMcp(name)
     if (server === null) continue
+    const tokens = tokenEstimate(schema?.parameters)
+    if (!isToolDisabled(name, cwd)) {
+      mcpToolsEnabledTotal += 1
+      mcpTokensEnabledTotal += tokens
+    }
     let list = toolsByServer.get(server)
     if (!list) {
       list = []
       toolsByServer.set(server, list)
     }
-    list.push({ name, description: String(schema?.description ?? '') })
+    list.push({ name, description: String(schema?.description ?? ''), tokens })
   }
   for (const list of toolsByServer.values()) list.sort((a, b) => a.name.localeCompare(b.name))
+  // 全量工具口径（含 read/edit/bash/skill 等非 MCP 工具）：面板的「工具预算」红线
+  // 用它对比 provider 上限（如 grok 的 350）。非 MCP 工具不受本插件禁用影响。
+  const toolsAllTotal = schemas.length
+  const toolsAllEnabled = toolsAllTotal - (mcpToolsTotal - mcpToolsEnabledTotal)
 
   const mcp: McpRow[] = []
   // P1 会话边界：读一次 state.json 的 desired 意图（延迟生效模式下与 live disabled 不同，
@@ -362,8 +395,13 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
         // 兜底：schemas 视图缺失该 server（scope 解析异常等）时用 catalog 快照
         // 构建工具列表（CatalogEntry.name 是全名 mcp__<server>__<tool>，
         // 与聚合产物和禁用表完全同构）。保证工具级禁用 UI 始终可用。
-        toolList = catalogInfo.tools.map((tool) => ({ name: String(tool.name ?? ''), description: String(tool.description ?? '') }))
+        toolList = catalogInfo.tools.map((tool) => ({
+          name: String(tool.name ?? ''),
+          description: String(tool.description ?? ''),
+          tokens: tokenEstimate(tool.parameters),
+        }))
       }
+      const effective = effectiveOf(toolList, toolDisabled, displayTools, displayTokens)
       mcp.push({
         entryId: entry.id,
         rowId: entry.options.id,
@@ -373,6 +411,8 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
         running,
         tools: displayTools,
         tokens: displayTokens,
+        toolsEnabled: effective.toolsEnabled,
+        tokensEnabled: effective.tokensEnabled,
         toolList: toolList?.map((tool) => ({ name: tool.name, description: tool.description, disabled: toolDisabled.has(tool.name) })) ?? null,
         status,
         modelVisible:
@@ -417,8 +457,13 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
           const toolDisabled = disabledToolsOf(pr.serverName, projectWorkspace)
           let toolList = toolsByServer.get(pr.serverName)
           if (!toolList && catalogInfo) {
-            toolList = catalogInfo.tools.map((tool) => ({ name: String(tool.name ?? ''), description: String(tool.description ?? '') }))
+            toolList = catalogInfo.tools.map((tool) => ({
+              name: String(tool.name ?? ''),
+              description: String(tool.description ?? ''),
+              tokens: tokenEstimate(tool.parameters),
+            }))
           }
+          const effective = effectiveOf(toolList, toolDisabled, displayTools, displayTokens)
           mcp.push({
             entryId: pr.entryId,
             rowId: pr.rowId,
@@ -428,6 +473,8 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
             running: pr.running,
             tools: displayTools,
             tokens: displayTokens,
+            toolsEnabled: effective.toolsEnabled,
+            tokensEnabled: effective.tokensEnabled,
             toolList: toolList?.map((tool) => ({ name: tool.name, description: tool.description, disabled: toolDisabled.has(tool.name) })) ?? null,
             status,
             modelVisible:
@@ -453,7 +500,25 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
     mcpDisabled: mcp.filter((row) => row.disabled).length,
     mcpToolsTotal,
     mcpTokensTotal,
+    mcpToolsEnabledTotal,
+    mcpTokensEnabledTotal,
+    toolsAllTotal,
+    toolsAllEnabled,
+    toolBudget: stateToolBudget(state ?? {}) ?? null,
     autoManage: deps.catalogRuntime.autoManage,
+    autoManageByRoute: { ...deps.catalogRuntime.autoManageByRoute },
+    autoManageMounted: deps.catalogRuntime.autoManageMounted,
+    middleLayerHides: stateMiddleLayerHides(state ?? {}),
+    // 当前会话实际生效的判定（面板顶部徽标：「本会话：开启 · grok/grok-4.6」）
+    autoManageActive: (() => {
+      const decision = deps.catalogRuntime.decisionFor(agent)
+      return {
+        on: decision.on,
+        source: decision.source,
+        provider: decision.route?.provider ?? null,
+        model: decision.route?.model ?? null,
+      }
+    })(),
     activeWorkspace: getActiveWorkspace(),
     errors,
   }

@@ -32,6 +32,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Catalog, CatalogEntry } from './catalog'
 import { snapshotFromSchemas, loadCatalog, saveCatalog } from './catalog'
 import { installMcpVisibilityFilter } from './filter'
@@ -39,14 +40,13 @@ import type { McpControlCtx, McpCallController } from './mcpcall'
 import { createMcpCallController, installMcpControlTools } from './mcpcall'
 
 export { normalizeToolName, normalizeArguments, msgOf } from './mcpcall'
-// 中间层控制工具名（命名前缀铁律见 mcpcall.ts：不得以 mcp_ 开头）
-export { MCP_SEARCH_TOOL, MCP_CALL_TOOL, CONTROL_TOOL_NAMES } from './mcpcall'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
 import type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
 import { createDomainCaches, getSchemasView, resolveCollectScopeKey, type DomainCaches } from './collect'
 import { listPresetMcpRows } from './preset-mcp'
 import { makeRoutes } from './routes'
-import { readState, writeState, setStateAiOwner, clearStateAiOwner } from './state'
+import { readState, writeState, setStateAiOwner, clearStateAiOwner, stateAutoManageByRoute, stateMiddleLayerHides } from './state'
+import { installRouteServices, resolveRoute, routeDecision, type ModelRoute, type RouteDecision, type RouteServices } from './model-route'
 import { syncPresetFiles } from './preset'
 import { applyPendingMcp } from './pending'
 import { installProjectMcp, rebuildOwnersFromState } from './project-mcp'
@@ -63,13 +63,17 @@ export { setRowFlag, setSkillFlag, rowDisabledState, syncPresetFiles, isValidSki
 export { scanWorkspaceMcp } from './project-mcp'
 // 项目 MCP 运行时装配（外部复用/端到端验证：手动安装、按工作空间重扫、owner 查询）
 export { installProjectMcp, remountWorkspace, projectServerOwner, projectServerName } from './project-mcp'
-export { readState, writeState } from './state'
+export { readState, writeState, stateMiddleLayerHides, stateAutoManageByRoute, stateToolBudget } from './state'
 // P1 会话边界：待生效队列与边界应用入口（selftest 直接测构建产物行为）
 export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending'
 // 工具级禁用作用域（selftest 回归护栏：全局 vs 项目工作区隔离）
-export { loadDisabledTools, setToolDisabled, isToolDisabled, disabledToolsOf } from './tool-disable'
+export { loadDisabledTools, setToolDisabled, setToolsDisabledBulk, isToolDisabled, disabledToolsOf } from './tool-disable'
 // rc.1 standing 组合 preset 行解析（selftest 回归护栏：parsePresetMcpText 文本抽取 + mcp-anki 例外）
 export { parsePresetMcpText } from './preset-mcp'
+// 按模型分流（selftest 回归护栏：三级回退 + 查表优先级）
+export { resolveRoute, routeDecision, routeKey, type ModelRoute, type RouteDecision } from './model-route'
+// 中间层控制工具名（面板/诊断展示；命名前缀铁律见 mcpcall.ts）
+export { MCP_SEARCH_TOOL, MCP_CALL_TOOL, CONTROL_TOOL_NAMES } from './mcpcall'
 
 export const name = 'runtime-inventory'
 
@@ -120,10 +124,24 @@ export interface CatalogRuntime {
   persisting: boolean
   /** 磁盘加载是否已完成（完成前跳过采集，防止空快照覆盖磁盘 last-good）。 */
   loaded: boolean
-  /** AI 中间层当前生效状态（面板开关可动态切换）。 */
+  /** AI 中间层总开关当前值（面板可动态切换）。 */
   autoManage: boolean
-  /** 动态切换 AI 中间层（过滤 + mcp_search/mcp_call + 回收器）。 */
-  applyAutoManage: (on: boolean) => void
+  /** 按模型覆盖表当前值（键 provider 或 provider/model）。 */
+  autoManageByRoute: Record<string, boolean>
+  /** 中间层生效时隐藏哪些 server：'disabled'=仅手动停用的（默认）；'all'=全部。 */
+  middleLayerHides: 'disabled' | 'all'
+  /** 中间层是否已实际挂载（总开关关但有 true 覆盖项时仍会挂载）。 */
+  autoManageMounted: boolean
+  /**
+   * 动态应用 AI 中间层配置（过滤 + 控制工具 + 回收器）。
+   * 挂载条件 = 总开关 on 或覆盖表里存在 true 项；具体某次装配是否生效
+   * 由 {@link CatalogRuntime.decisionFor} 按模型路由决定。
+   */
+  applyAutoManage: (on: boolean, byRoute?: Record<string, boolean>, hides?: 'disabled' | 'all') => void
+  /** 某 agent（缺省=当前解析不到）当前的中间层判定，面板与诊断共用。 */
+  decisionFor: (agent: Agent | undefined) => RouteDecision
+  /** 可选服务 holder（sessionProjections / agentDefaultModel），路由解析用。 */
+  routeServices: RouteServices
   /** 最近一次成功写盘时间（防抖合并用）。 */
   lastPersistAt: number | null
   /** 防抖挂起的写盘 timer（ctx.timeout 创建，ctx 销毁自动清理）。 */
@@ -378,7 +396,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     loaded: false,
     // 初始值由下方 applyAutoManage 赋值（control/controller 构建后）
     autoManage: false,
+    autoManageByRoute: {},
+    middleLayerHides: 'disabled',
+    autoManageMounted: false,
     applyAutoManage: () => {},
+    decisionFor: () => ({ on: false, source: 'master', route: undefined }),
+    routeServices: {},
     lastPersistAt: null,
     persistTimer: undefined,
     tokenCache: new Map(),
@@ -484,15 +507,31 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     return map
   }
+  // 按模型分流：可选服务 holder + 每次装配的判定入口。
+  const routeServices = installRouteServices(ctx)
+  catalogRuntime.routeServices = routeServices
+  catalogRuntime.decisionFor = (agent: Agent | undefined): RouteDecision =>
+    routeDecision(resolveRoute(routeServices, agent), catalogRuntime.autoManage, catalogRuntime.autoManageByRoute)
+  const gateFor = (agent: Agent | undefined): { on: boolean; hideAll: boolean } => ({
+    on: catalogRuntime.decisionFor(agent).on,
+    hideAll: catalogRuntime.middleLayerHides === 'all',
+  })
+
   let autoDisposers: Array<() => void> = []
-  catalogRuntime.applyAutoManage = (on: boolean) => {
+  catalogRuntime.applyAutoManage = (on: boolean, byRoute?: Record<string, boolean>, hides?: 'disabled' | 'all') => {
     for (const d of autoDisposers) d()
     autoDisposers = []
     catalogRuntime.autoManage = on
-    if (!on) return
+    if (byRoute !== undefined) catalogRuntime.autoManageByRoute = byRoute
+    if (hides !== undefined) catalogRuntime.middleLayerHides = hides
+    // 挂载条件不是「总开关 on」而是「有任何模型可能用到」：总开关关 + grok:true
+    // 也要挂，否则覆盖项永远无法生效（工具注册表是进程级的一份）。
+    const needed = on || Object.values(catalogRuntime.autoManageByRoute).some((value) => value === true)
+    catalogRuntime.autoManageMounted = false
+    if (!needed) return
     const disposers: Array<() => void> = []
     try {
-      disposers.push(installMcpVisibilityFilter(ctx, buildVisibility))
+      disposers.push(installMcpVisibilityFilter(ctx, buildVisibility, gateFor))
       disposers.push(installMcpControlTools(ctx, control, controller))
       const offReaper = controller.startIdleReaper()
       disposers.push(() => offReaper())
@@ -503,6 +542,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       return
     }
     autoDisposers = disposers
+    catalogRuntime.autoManageMounted = true
   }
   // 插件卸载兜底：释放当前挂载的中间层（effect disposer 手动调用后 fiber 卸载不再重复）。
   ctx.effect(
@@ -512,12 +552,17 @@ export function apply(ctx: Context, config: Config = {}): void {
     'mcp-skill-panel: autoManage teardown',
   )
   // 初始：config 默认 → state.json 的面板值覆盖（异步，立即生效）。
-  catalogRuntime.applyAutoManage(Boolean(config.autoManage))
+  catalogRuntime.applyAutoManage(Boolean(config.autoManage), {}, 'disabled')
   void readState().then((state) => {
-    if (typeof state.config?.autoManage === 'boolean' && state.config.autoManage !== Boolean(config.autoManage)) {
-      catalogRuntime.applyAutoManage(state.config.autoManage)
-      ctx.logger.info(`mcp-skill-panel: autoManage = ${state.config.autoManage} (from panel state)`)
-    }
+    const master = typeof state.config?.autoManage === 'boolean' ? state.config.autoManage : Boolean(config.autoManage)
+    const byRoute = stateAutoManageByRoute(state)
+    const hides = stateMiddleLayerHides(state)
+    catalogRuntime.applyAutoManage(master, byRoute, hides)
+    const overrides = Object.keys(byRoute).length
+    ctx.logger.info(
+      `mcp-skill-panel: autoManage = ${master}, hides = ${hides}` +
+        `${overrides > 0 ? ` (+${overrides} per-model override(s))` : ''} (from panel state)`,
+    )
   })
 
   // P1 会话边界生效（v0.5.0）：next-session 模式下，新会话首次请求前应用待生效队列。

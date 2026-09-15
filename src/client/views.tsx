@@ -257,6 +257,89 @@ const C = {
     background: disabled ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)',
     whiteSpace: 'nowrap' as const,
   }),
+  // 工具批量控制条（过滤 + 全部禁用/启用）
+  toolBar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    flexWrap: 'wrap' as const,
+    marginTop: 6,
+  },
+  toolFilterInput: {
+    font: 'inherit',
+    fontSize: 12,
+    flex: '1 1 160px',
+    minWidth: 120,
+    padding: '3px 8px',
+    borderRadius: 5,
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-alias-bg-layer-1)',
+    color: 'var(--dsw-alias-label-primary)',
+  },
+  bulkBtn: (busy: boolean): React.CSSProperties => ({
+    font: 'inherit',
+    cursor: busy ? 'default' : 'pointer',
+    opacity: busy ? 0.55 : 1,
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-alias-bg-layer-1)',
+    color: 'var(--dsw-alias-label-secondary)',
+    borderRadius: 5,
+    padding: '3px 10px',
+    fontSize: 11,
+    whiteSpace: 'nowrap' as const,
+  }),
+  // 按模型覆盖表
+  routeRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '4px 0',
+    fontSize: 12,
+    borderTop: '1px solid var(--dsw-alias-border-l2)',
+    flexWrap: 'wrap' as const,
+  },
+  routeName: {
+    flex: '1 1 140px',
+    color: 'var(--dsw-alias-label-primary)',
+    fontWeight: 500,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  routeSeg: (active: boolean): React.CSSProperties => ({
+    font: 'inherit',
+    cursor: 'pointer',
+    border: '1px solid',
+    borderRadius: 5,
+    padding: '2px 9px',
+    fontSize: 11,
+    whiteSpace: 'nowrap' as const,
+    fontWeight: active ? 600 : 400,
+    color: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-tertiary)',
+    background: active
+      ? 'color-mix(in srgb, var(--dsw-alias-state-info-primary, #4a90d9) 16%, transparent)'
+      : 'transparent',
+    borderColor: active ? 'var(--dsw-alias-state-info-primary, #4a90d9)' : 'var(--dsw-alias-border-l2)',
+  }),
+  routeModelToggle: {
+    font: 'inherit',
+    cursor: 'pointer',
+    border: 0,
+    background: 'transparent',
+    color: 'var(--dsw-alias-label-tertiary)',
+    fontSize: 11,
+    padding: '2px 4px',
+    whiteSpace: 'nowrap' as const,
+  },
+  budgetInput: {
+    font: 'inherit',
+    fontSize: 12,
+    width: 76,
+    padding: '3px 8px',
+    borderRadius: 5,
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-alias-bg-layer-1)',
+    color: 'var(--dsw-alias-label-primary)',
+  },
 }
 
 function formatK(n: number): string {
@@ -602,7 +685,15 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
 
       {view && tab === 'mcp' && (
         <>
-          <AutoManageCard on={(view as McpView).autoManage} busy={Boolean(busy.autoManage)} t={t} onToggle={toggleAutoManage} />
+          <AutoManageCard
+            on={(view as McpView).autoManage}
+            hides={(view as McpView).middleLayerHides}
+            busy={Boolean(busy.autoManage)}
+            t={t}
+            onToggle={toggleAutoManage}
+            loadMcp={loadMcp}
+          />
+          <RouteOverridesCard state={view as McpView} t={t} loadMcp={loadMcp} />
           <ApplyTimingCard
             applyMode={applyMode}
             hasPending={hasPending}
@@ -649,11 +740,31 @@ function Badge(props: { color: string; bg: string; children: React.ReactNode }):
 
 function AutoManageCard(props: {
   on: boolean
+  hides: 'disabled' | 'all'
   busy: boolean
   t: Props['t']
   onToggle: () => void
+  loadMcp: () => void
 }): React.ReactElement {
-  const { on, busy, t, onToggle } = props
+  const { on, hides, busy, t, onToggle, loadMcp } = props
+  const [hidesBusy, setHidesBusy] = useState(false)
+  const [hidesErr, setHidesErr] = useState<string | null>(null)
+  const setHides = useCallback(
+    async (next: 'disabled' | 'all') => {
+      if (next === hides) return
+      setHidesBusy(true)
+      setHidesErr(null)
+      try {
+        await panelPost('/api/mcp-skill-panel/config', { middleLayerHides: next })
+        loadMcp()
+      } catch (error) {
+        setHidesErr(error instanceof Error ? error.message : String(error))
+      } finally {
+        setHidesBusy(false)
+      }
+    },
+    [hides, loadMcp],
+  )
   // 按钮与 MCP 卡片统一为「动作语义」配色（用户截图确认）：
   // 启用中=红「停用」、停用中=绿「启用」。注意 C.toggle 的参数语义是 disabled
   // （停用=绿），直接传 on 会得到相反效果 —— 必须反转传参 C.toggle(!on)。
@@ -679,6 +790,250 @@ function AutoManageCard(props: {
         </button>
       </div>
       <p style={C.cardDesc}>{on ? t('ri.autoManageDescOn') : t('ri.autoManageDescOff')}</p>
+      {on && (
+        <>
+          <div style={{ ...C.routeRow, borderTop: 0 }}>
+            <span style={C.routeName}>{t('ri.hidesLabel')}</span>
+            <span style={{ display: 'flex', gap: 4 }}>
+              <button
+                type="button"
+                style={{ ...C.routeSeg(hides === 'disabled'), ...(hidesBusy ? C.toggleDisabled : {}) }}
+                disabled={hidesBusy}
+                onClick={() => void setHides('disabled')}
+              >
+                {t('ri.hidesDisabled')}
+              </button>
+              <button
+                type="button"
+                style={{ ...C.routeSeg(hides === 'all'), ...(hidesBusy ? C.toggleDisabled : {}) }}
+                disabled={hidesBusy}
+                onClick={() => void setHides('all')}
+              >
+                {t('ri.hidesAll')}
+              </button>
+            </span>
+          </div>
+          <p style={C.hint}>{hides === 'all' ? t('ri.hidesDescAll') : t('ri.hidesDescDisabled')}</p>
+          {hidesErr && <div style={C.error}>{hidesErr}</div>}
+        </>
+      )}
+    </div>
+  )
+}
+
+/** provider / provider-model 的三态覆盖表（继承 / 开启 / 关闭）。 */
+function RouteOverridesCard(props: {
+  state: McpView
+  t: Props['t']
+  loadMcp: () => void
+}): React.ReactElement {
+  const { state, t, loadMcp } = props
+  const [providers, setProviders] = useState<Array<{ provider: string; name: string; models: Array<{ id: string; name: string }> }>>([])
+  const [openProvider, setOpenProvider] = useState<Record<string, boolean>>({})
+  const [busyKey, setBusyKey] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  // provider/模型目录只在本卡片挂载时拉一次：listModels 可能触达 adapter 网络，
+  // 不该跟着 60s 面板轮询跑。覆盖表本身来自 state（随面板刷新）。
+  useEffect(() => {
+    let alive = true
+    fetch('/api/mcp-skill-panel/models')
+      .then((res) => res.json() as Promise<{ ok: boolean; providers?: typeof providers; error?: string }>)
+      .then((body) => {
+        if (!alive) return
+        if (!body.ok) throw new Error(body.error ?? 'models failed')
+        setProviders(body.providers ?? [])
+      })
+      .catch((error: unknown) => {
+        if (alive) setErr(error instanceof Error ? error.message : String(error))
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const setOverride = useCallback(
+    async (key: string, value: boolean | null) => {
+      setBusyKey(key)
+      setErr(null)
+      try {
+        await panelPost('/api/mcp-skill-panel/config', { routeOverride: { key, value } })
+        loadMcp()
+      } catch (error) {
+        setErr(error instanceof Error ? error.message : String(error))
+      } finally {
+        setBusyKey(null)
+      }
+    },
+    [loadMcp],
+  )
+
+  const current = (key: string): boolean | null => {
+    const value = state.autoManageByRoute[key]
+    return typeof value === 'boolean' ? value : null
+  }
+
+  const segment = (key: string): React.ReactElement => {
+    const value = current(key)
+    const disabled = busyKey === key
+    const option = (label: string, target: boolean | null): React.ReactElement => (
+      <button
+        type="button"
+        style={{ ...C.routeSeg(value === target), ...(disabled ? C.toggleDisabled : {}) }}
+        disabled={disabled}
+        onClick={() => void setOverride(key, target)}
+      >
+        {label}
+      </button>
+    )
+    return (
+      <span style={{ display: 'flex', gap: 4 }}>
+        {option(t('ri.routeInherit'), null)}
+        {option(t('ri.routeOn'), true)}
+        {option(t('ri.routeOff'), false)}
+      </span>
+    )
+  }
+
+  const active = state.autoManageActive
+  const sourceLabel =
+    active.source === 'model'
+      ? t('ri.routeSourceModel')
+      : active.source === 'provider'
+        ? t('ri.routeSourceProvider')
+        : active.source === 'master'
+          ? t('ri.routeSourceMaster')
+          : t('ri.routeSourceNoRoute')
+  const routeLabel = active.provider && active.model ? `${active.provider}/${active.model}` : t('ri.routeUnknown')
+
+  return (
+    <div style={C.card}>
+      <div style={C.cardTop}>
+        <h3 style={C.cardTitle}>
+          {t('ri.routeTitle')}
+          <Badge
+            color={active.on ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-tertiary)'}
+            bg={active.on ? 'var(--dsw-alias-state-success-tertiary)' : 'var(--dsw-alias-fill-l2)'}
+          >
+            {active.on ? t('ri.routeActiveOn') : t('ri.routeActiveOff')}
+          </Badge>
+        </h3>
+      </div>
+      <p style={C.cardDesc}>{t('ri.routeDesc')}</p>
+      <div style={C.cardMeta}>
+        {t('ri.routeActive', { state: sourceLabel, route: routeLabel })}
+        {' · '}
+        {state.autoManageMounted ? t('ri.routeMounted') : t('ri.routeNotMounted')}
+      </div>
+      {err && <div style={C.error}>{err}</div>}
+      {providers.length === 0 && !err && <div style={C.cardMeta}>{t('ri.routeNoProviders')}</div>}
+      {providers.map((entry) => {
+        const isOpen = Boolean(openProvider[entry.provider])
+        return (
+          <React.Fragment key={entry.provider}>
+            <div style={C.routeRow}>
+              <span style={C.routeName}>{entry.name || entry.provider}</span>
+              {segment(entry.provider)}
+              {entry.models.length > 0 && (
+                <button
+                  type="button"
+                  style={C.routeModelToggle}
+                  onClick={() => setOpenProvider((prev) => ({ ...prev, [entry.provider]: !prev[entry.provider] }))}
+                >
+                  {isOpen ? `▾ ${t('ri.routeModels')} (${entry.models.length})` : `▸ ${t('ri.routeModels')} (${entry.models.length})`}
+                </button>
+              )}
+            </div>
+            {isOpen &&
+              entry.models.map((model) => (
+                <div key={`${entry.provider}/${model.id}`} style={{ ...C.routeRow, paddingLeft: 16, borderTop: 0 }}>
+                  <span style={{ ...C.routeName, fontWeight: 400, color: 'var(--dsw-alias-label-secondary)' }}>
+                    {model.name || model.id}
+                  </span>
+                  {segment(`${entry.provider}/${model.id}`)}
+                </div>
+              ))}
+          </React.Fragment>
+        )
+      })}
+    </div>
+  )
+}
+
+/** 工具预算红线（provider 的单请求工具上限，如 grok 的 350）。 */
+function BudgetCard(props: { state: McpView; t: Props['t']; loadMcp: () => void }): React.ReactElement {
+  const { state, t, loadMcp } = props
+  const [draft, setDraft] = useState<string>(state.toolBudget === null ? '' : String(state.toolBudget))
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const over = state.toolBudget !== null && state.toolsAllEnabled > state.toolBudget
+
+  const save = useCallback(
+    async (value: number | null) => {
+      setBusy(true)
+      setErr(null)
+      try {
+        await panelPost('/api/mcp-skill-panel/config', { toolBudget: value })
+        loadMcp()
+      } catch (error) {
+        setErr(error instanceof Error ? error.message : String(error))
+      } finally {
+        setBusy(false)
+      }
+    },
+    [loadMcp],
+  )
+
+  return (
+    <div style={C.card}>
+      <div style={C.cardTop}>
+        <h3 style={C.cardTitle}>
+          {t('ri.budgetLabel')}
+          {state.toolBudget !== null && (
+            <Badge
+              color={over ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-success-primary)'}
+              bg={over ? 'var(--dsw-alias-state-error-tertiary)' : 'var(--dsw-alias-state-success-tertiary)'}
+            >
+              {over
+                ? t('ri.budgetOver', { used: state.toolsAllEnabled, budget: state.toolBudget })
+                : t('ri.budgetOk', { used: state.toolsAllEnabled, budget: state.toolBudget })}
+            </Badge>
+          )}
+        </h3>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <input
+            style={C.budgetInput}
+            inputMode="numeric"
+            placeholder="350"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          <button
+            type="button"
+            style={C.bulkBtn(busy)}
+            disabled={busy}
+            onClick={() => {
+              const parsed = Number.parseInt(draft, 10)
+              void save(Number.isFinite(parsed) && parsed > 0 ? parsed : null)
+            }}
+          >
+            {t('ri.budgetSet')}
+          </button>
+          <button
+            type="button"
+            style={C.bulkBtn(busy)}
+            disabled={busy}
+            onClick={() => {
+              setDraft('')
+              void save(null)
+            }}
+          >
+            {t('ri.budgetClear')}
+          </button>
+        </div>
+      </div>
+      <p style={C.cardDesc}>{t('ri.budgetHint')}</p>
+      {err && <div style={C.error}>{err}</div>}
     </div>
   )
 }
@@ -799,6 +1154,17 @@ export function ensureToolToken(): Promise<string | null> {
   return toolTokenPromise
 }
 
+/** 带令牌的写端点 POST（工具批量 / 按模型覆盖 / 预算共用）。 */
+async function panelPost<T extends { ok: boolean; error?: string }>(path: string, body: unknown): Promise<T> {
+  const token = await ensureToolToken()
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (token) headers['x-panel-token'] = token
+  const res = await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) })
+  const parsed = (await res.json()) as T
+  if (!parsed.ok) throw new Error(parsed.error ?? `${path} failed`)
+  return parsed
+}
+
 function McpPanel(props: {
   state: McpView
   t: Props['t']
@@ -814,6 +1180,28 @@ function McpPanel(props: {
   // 工具行禁用开关临时态（立即生效后由 loadMcp 校准）
   const [toolBusy, setToolBusy] = useState<Record<string, boolean>>({})
   const [toolErr, setToolErr] = useState<string | null>(null)
+  // 每个 server 的工具过滤词（450 工具的 server 不过滤根本没法用）
+  const [toolFilter, setToolFilter] = useState<Record<string, string>>({})
+  // 批量操作进行中的 server（禁用按钮防重入）
+  const [bulkBusy, setBulkBusy] = useState<Record<string, boolean>>({})
+  const overBudget = state.toolBudget !== null && state.toolsAllEnabled > state.toolBudget
+
+  const toolBulk = useCallback(
+    async (serverName: string, disabled: boolean, toolNames?: string[]) => {
+      setBulkBusy((prev) => ({ ...prev, [serverName]: true }))
+      setToolErr(null)
+      try {
+        await panelPost('/api/mcp-skill-panel/mcp/toolBulk', { serverName, disabled, toolNames })
+        loadMcp()
+      } catch (err) {
+        setToolErr(err instanceof Error ? err.message : String(err))
+        loadMcp()
+      } finally {
+        setBulkBusy((prev) => ({ ...prev, [serverName]: false }))
+      }
+    },
+    [loadMcp],
+  )
 
   const toolToggle = useCallback(async (row: McpRow, tool: NonNullable<McpRow['toolList']>[number]) => {
     const key = `${row.entryId}:${tool.name}`
@@ -851,15 +1239,43 @@ function McpPanel(props: {
           <span style={C.statValue}>{state.mcpDisabled}</span>
           <span style={C.statLabel}>{t('ri.statMcpDisabled', { n: state.mcpDisabled })}</span>
         </div>
+        {/* 有效口径：分子是实际进入上下文的工具数，分母是该 server 注册的总数。
+            批量禁用后这里立刻变化 —— 否则整个批量操作没有任何可见反馈。 */}
         <div style={C.stat}>
-          <span style={C.statValue}>{state.mcpToolsTotal}</span>
-          <span style={C.statLabel}>{t('ri.statMcpTools', { n: state.mcpToolsTotal })}</span>
+          <span style={C.statValue}>
+            {state.mcpToolsEnabledTotal}
+            {state.mcpToolsEnabledTotal !== state.mcpToolsTotal && (
+              <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--dsw-alias-label-tertiary)' }}>
+                {' '}/ {state.mcpToolsTotal}
+              </span>
+            )}
+          </span>
+          <span style={C.statLabel}>
+            {t('ri.statMcpToolsEffective', { enabled: state.mcpToolsEnabledTotal, total: state.mcpToolsTotal })}
+          </span>
         </div>
         <div style={C.stat}>
-          <span style={C.statValue}>~{formatK(state.mcpTokensTotal)}k</span>
-          <span style={C.statLabel}>{t('ri.statMcpTokens', { n: formatK(state.mcpTokensTotal) })}</span>
+          <span style={C.statValue}>~{formatK(state.mcpTokensEnabledTotal)}k</span>
+          <span style={C.statLabel}>
+            {t('ri.statMcpTokensEffective', {
+              enabled: formatK(state.mcpTokensEnabledTotal),
+              total: formatK(state.mcpTokensTotal),
+            })}
+          </span>
+        </div>
+        <div style={C.stat}>
+          <span style={{ ...C.statValue, color: overBudget ? 'var(--dsw-alias-state-error-primary)' : undefined }}>
+            {state.toolsAllEnabled}
+            {state.toolBudget !== null && (
+              <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--dsw-alias-label-tertiary)' }}>
+                {' '}/ {state.toolBudget}
+              </span>
+            )}
+          </span>
+          <span style={C.statLabel}>{t('ri.statToolsAll', { n: state.toolsAllEnabled })}</span>
         </div>
       </div>
+      <BudgetCard state={state} t={t} loadMcp={loadMcp} />
       {toolErr && <div style={C.error}>{toolErr}</div>}
       {state.mcp.length === 0 && <div style={C.empty}>{t('ri.empty')}</div>}
       {state.mcp.map((row) => {
@@ -870,6 +1286,17 @@ function McpPanel(props: {
         const effDisabled = applyMode === 'next-session' && row.pending ? (row.desired ?? row.disabled) : row.disabled
         const isOpen = Boolean(expanded[row.entryId])
         const toolList = row.toolList ?? []
+        const filterText = toolFilter[row.entryId] ?? ''
+        const needle = filterText.trim().toLowerCase()
+        const filtered = needle.length > 0
+        // 过滤同时匹配工具名与描述：找「和 use case 有关的」比记全名更常见。
+        const visibleTools = filtered
+          ? toolList.filter(
+              (tool) =>
+                tool.name.toLowerCase().includes(needle) || tool.description.toLowerCase().includes(needle),
+            )
+          : toolList
+        const isBulkBusy = Boolean(bulkBusy[row.serverName])
         return (
           <div key={row.entryId} style={C.card}>
             <div style={C.cardTop}>
@@ -920,28 +1347,68 @@ function McpPanel(props: {
             {toolList.length > 0 && (
               <>
                 <button type="button" style={C.toolToggleBtn} onClick={() => setExpanded((prev) => ({ ...prev, [row.entryId]: !prev[row.entryId] }))}>
-                  {isOpen ? `▾ ${t('ri.toolListHide')} (${toolList.length})` : `▸ ${t('ri.toolListShow')} (${toolList.length})`}
+                  {isOpen
+                    ? `▾ ${t('ri.toolListHide')} (${row.toolsEnabled}/${toolList.length})`
+                    : `▸ ${t('ri.toolListShow')} (${row.toolsEnabled}/${toolList.length})`}
                 </button>
                 {isOpen && (
-                  <div style={C.toolList}>
-                    {toolList.map((tool) => {
-                      const tBusy = toolBusy[`${row.entryId}:${tool.name}`]
-                      return (
-                        <div key={tool.name} style={C.toolRow}>
-                          <button
-                            type="button"
-                            style={{ ...C.toolSwitch(tool.disabled), ...(tBusy ? C.toggleDisabled : {}) }}
-                            disabled={tBusy}
-                            onClick={() => void toolToggle(row, tool)}
-                          >
-                            {tBusy ? t('ri.pending') : tool.disabled ? t('ri.enable') : t('ri.disable')}
-                          </button>
-                          <span style={C.toolName}>{tool.name.replace(/^mcp__[^_]+__/, '')}</span>
-                          <span style={C.toolDesc}>{tool.description || '—'}</span>
-                        </div>
-                      )
-                    })}
-                  </div>
+                  <>
+                    <div style={C.toolBar}>
+                      <input
+                        style={C.toolFilterInput}
+                        placeholder={t('ri.toolFilter')}
+                        value={filterText}
+                        onChange={(event) => setToolFilter((prev) => ({ ...prev, [row.entryId]: event.target.value }))}
+                      />
+                      {/* 有过滤词时按钮只作用于筛出的子集 —— 「先搜 code_ 再全禁」是
+                          450 工具 server 上唯一可操作的工作流。 */}
+                      <button
+                        type="button"
+                        style={C.bulkBtn(isBulkBusy)}
+                        disabled={isBulkBusy || visibleTools.length === 0}
+                        onClick={() => void toolBulk(row.serverName, true, filtered ? visibleTools.map((tool) => tool.name) : undefined)}
+                      >
+                        {filtered
+                          ? t('ri.toolBulkDisableFiltered', { n: visibleTools.length })
+                          : t('ri.toolBulkDisableAll')}
+                      </button>
+                      <button
+                        type="button"
+                        style={C.bulkBtn(isBulkBusy)}
+                        disabled={isBulkBusy || visibleTools.length === 0}
+                        onClick={() => void toolBulk(row.serverName, false, filtered ? visibleTools.map((tool) => tool.name) : undefined)}
+                      >
+                        {filtered
+                          ? t('ri.toolBulkEnableFiltered', { n: visibleTools.length })
+                          : t('ri.toolBulkEnableAll')}
+                      </button>
+                      <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
+                        {t('ri.toolEnabledOf', { enabled: row.toolsEnabled, total: toolList.length })}
+                      </span>
+                    </div>
+                    <div style={C.toolList}>
+                      {visibleTools.length === 0 && (
+                        <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>{t('ri.toolNoMatch')}</div>
+                      )}
+                      {visibleTools.map((tool) => {
+                        const tBusy = toolBusy[`${row.entryId}:${tool.name}`]
+                        return (
+                          <div key={tool.name} style={C.toolRow}>
+                            <button
+                              type="button"
+                              style={{ ...C.toolSwitch(tool.disabled), ...(tBusy ? C.toggleDisabled : {}) }}
+                              disabled={tBusy}
+                              onClick={() => void toolToggle(row, tool)}
+                            >
+                              {tBusy ? t('ri.pending') : tool.disabled ? t('ri.enable') : t('ri.disable')}
+                            </button>
+                            <span style={C.toolName}>{tool.name.replace(/^mcp__[^_]+__/, '')}</span>
+                            <span style={C.toolDesc}>{tool.description || '—'}</span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </>
                 )}
               </>
             )}
