@@ -28,9 +28,12 @@ export declare const CONTROL_TOOL_NAMES: ReadonlySet<string>;
  */
 export declare function normalizeToolName(serverName: string, toolName: string): string;
 /**
- * 归一化 mcp_call 的 arguments 参数（2026-08-24 修补）：type:'json' 参数的编译产物
- * 不带 type 标注，模型直连 Tool call 时倾向把参数字典填成 JSON 字符串（实测 flash 与
- * mimo 两系均会出现）。这里循环安全解析为对象后再透传：
+ * 归一化 mcp_call 的 arguments 参数（2026-08-24 修补；2026-09-16 注释修正，审查 WARN-4）：
+ * 起因是 `type:'json'` 参数的编译产物不带 type 标注，模型直连 Tool call 时倾向把参数字典
+ * 填成 JSON 字符串（实测 flash 与 mimo 两系均会出现）。**该起因已消失**：参数自 2026-09-16
+ * （0f4794a）起改 `type:'object' + additionalProperties`，字符串在进 execute 前即被参数校验拒绝，
+ * 模型路径到不了这里 —— 本函数现在只服务**直调/内部路径**（gatewayCall 等）的兜底。
+ * 这里循环安全解析为对象后再透传：
  * - 值以 { / [ 开头 → 直接按容器 JSON 解析；
  * - 值以 " 开头（引号包裹层）→ 解包后若内层仍是容器形态才继续剥，防止误改合法标量入参；
  * - 解析失败或非字典形态 → 保留原值交由远端给出可读错误。

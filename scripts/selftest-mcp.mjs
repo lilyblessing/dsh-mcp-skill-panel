@@ -639,6 +639,61 @@ await checkAsync('setToolsDisabledBulk：与单点开关同表同源（未注册
   assert.equal(index.disabledToolsOf('bulk-src').size, 0)
 })
 
+// ── G1 三态解析（审查 BLOCK-1 回归护栏）：/mcp/toolBulk 的 toolNames 语义 ─────────
+// 只有 undefined 表示「全部」；显式数组一律精确执行（[] = 合法空操作）；
+// 非数组 / 非空却 0 命中 → 拒绝。此前「非空数组 ? 交集 : 全部」会把 [] 变成全量禁用。
+const BULK_KNOWN = ['mcp__s__a', 'mcp__s__b', 'mcp__s__c']
+
+check('resolveToolBulkTargets：字段缺失 = 全部工具（唯一表示「全部」的形态）', () => {
+  assert.deepEqual(index.resolveToolBulkTargets(BULK_KNOWN, undefined), {
+    targets: ['mcp__s__a', 'mcp__s__b', 'mcp__s__c'],
+    ignored: [],
+  })
+})
+
+check('resolveToolBulkTargets：显式 [] = 合法空操作（绝不落进「全部」分支）', () => {
+  const r = index.resolveToolBulkTargets(BULK_KNOWN, [])
+  assert.deepEqual(r, { targets: [], ignored: [] })
+  // BLOCK-1 原缺陷形态：结果长度等于 known 全长即「全部」——空操作必须不是它
+  assert.notEqual(r.targets.length, BULK_KNOWN.length)
+})
+
+check('resolveToolBulkTargets：非空数组与 known 求交（known 序 + 去重），未识别项入 ignored', () => {
+  assert.deepEqual(
+    index.resolveToolBulkTargets(BULK_KNOWN, ['mcp__s__c', 'mcp__s__a', 'mcp__s__a']),
+    { targets: ['mcp__s__a', 'mcp__s__c'], ignored: [] },
+  )
+  // WARN-1：给了 3 个只认识 1 个 → 另 2 个必须可见，不能静默丢弃
+  assert.deepEqual(
+    index.resolveToolBulkTargets(BULK_KNOWN, ['mcp__s__b', 'mcp__other__x', 'bare_name']),
+    { targets: ['mcp__s__b'], ignored: ['mcp__other__x', 'bare_name'] },
+  )
+})
+
+check('resolveToolBulkTargets：非空数组但 0 命中 → 报错（不静默 no-op）', () => {
+  for (const names of [['mcp__other__x'], ['bare_name', 'mcp__zzz__t']]) {
+    const r = index.resolveToolBulkTargets(BULK_KNOWN, names)
+    assert.ok(r.error, `expected error for ${JSON.stringify(names)}`)
+    assert.equal(r.targets, undefined)
+  }
+})
+
+check('resolveToolBulkTargets：非数组（字符串/数字/对象/null/boolean）→ 报错，不降级为「全部」', () => {
+  for (const value of ['mcp__s__a', 42, { names: ['mcp__s__a'] }, null, true]) {
+    assert.equal(
+      index.resolveToolBulkTargets(BULK_KNOWN, value).error,
+      'toolNames must be an array of tool full names',
+      `expected rejection for ${JSON.stringify(value)}`,
+    )
+  }
+})
+
+check('resolveToolBulkTargets：数组含非字符串项 → 报错（点名的必须是全名数组）', () => {
+  const r = index.resolveToolBulkTargets(BULK_KNOWN, ['mcp__s__a', 7])
+  assert.ok(r.error, 'expected error')
+  assert.ok(String(r.error).includes('not a string'), `unexpected message: ${r.error}`)
+})
+
 // F1 写端点鉴权：/mcp/toolBulk 走 handleAny([...], true)（漏传 → routes.ts 的
 // fail-fast 断言在 makeRoutes 期抛错，整块面板不可用，故此处以源码守卫兜底）
 check('路由守卫：/mcp/toolBulk 必须带 guardPosts（handleAny([...], true)）', () => {

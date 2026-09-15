@@ -38,7 +38,7 @@ import { isMcpEntry, serverNameOf } from './mcp-entry'
 import { findStandingEntryById, standingDiag, standingMcpEntries, findStandingEntryByServer } from './standing-rows'
 import { parseMcpServersJson, serversToPatchYaml, serversToRows, type McpServers, type McpRowConfig } from './mcp-convert'
 import { remountWorkspace, projectServerOwner, getActiveWorkspace } from './project-mcp'
-import { disabledToolsOf, setToolDisabled, setToolsDisabledBulk } from './tool-disable'
+import { disabledToolsOf, setToolDisabled, setToolsDisabledBulk, resolveToolBulkTargets } from './tool-disable'
 import type { McpCallController } from './mcpcall'
 import type { CatalogRuntime, Config } from './index'
 import { messageOf } from './util'
@@ -1273,12 +1273,16 @@ export function makeRoutes(
           method: 'POST',
           run: async (req) => {
             // 工具级批量禁用/启用：面板的「全部禁用 / 全部启用 / 按当前过滤」。
-            // toolNames 省略 = 该 server 面板视图里的全部工具（live schemas，缺失时
-            // 回退 catalog 快照 —— 与逐个开关看到的列表完全同源，不会漏项）。
+            // toolNames **三态**（判定实现在 resolveToolBulkTargets，纯函数可直测）：
+            //   · 省略/缺字段 = 该 server 面板视图里的全部工具（live schemas，缺失时回退
+            //     catalog 快照 —— 与逐个开关看到的列表完全同源，不会漏项）；
+            //   · 显式数组 = 精确集合（[] 为合法空操作：不写盘、changed=0、仍 200）；
+            //   · 非数组，或非空却一条都不匹配 → 400（不静默降级为「全部」也不静默 no-op）。
+            // 命中数少于点名数时，未识别的名字由响应 ignoredToolNames 回传（目录漂移可见化）。
             const parsed = JSON.parse((await readBody(req)) || '{}') as {
               serverName?: string
               disabled?: boolean
-              toolNames?: string[]
+              toolNames?: unknown
               session?: string
             }
             if (typeof parsed.serverName !== 'string' || parsed.serverName.length === 0) throw new Error('serverName is required')
@@ -1293,11 +1297,13 @@ export function makeRoutes(
               // 而不是静默写 0 条让用户以为已生效。
               throw new Error(`no tool catalog for ${serverName} (enable it once so its tools can be discovered)`)
             }
-            const requested = Array.isArray(parsed.toolNames) && parsed.toolNames.length > 0
-              ? known.filter((tool) => parsed.toolNames?.includes(tool.name)).map((tool) => tool.name)
-              : known.map((tool) => tool.name)
-            // E2：内核一次 state.json 读-改-写（绝不 N 次写盘）
-            const changed = await setToolsDisabledBulk(serverName, requested, parsed.disabled)
+            const resolved = resolveToolBulkTargets(known.map((tool) => tool.name), parsed.toolNames)
+            if ('error' in resolved) throw new Error(resolved.error)
+            // E2：内核一次 state.json 读-改-写（绝不 N 次写盘）。
+            // 目标为空（显式 `[]`）= 合法空操作：连内核都不进，天然不写盘。
+            const changed = resolved.targets.length === 0
+              ? 0
+              : await setToolsDisabledBulk(serverName, resolved.targets, parsed.disabled)
             invalidateMcp()
             // E1：与 /mcp/toolToggle 同形（disabledTools 为全名数组），另给计数与翻转条数
             const disabledTools = [...disabledToolsOf(serverName)]
@@ -1307,6 +1313,9 @@ export function makeRoutes(
               disabledTools,
               disabledCount: disabledTools.length,
               changed,
+              // WARN-1：客户端点名了但不在当前 known 里的名字（60s 缓存可能已过期）——
+              // 调用方据此察觉「以为动了 N 条，实际只动了交集」的偏差。
+              ignoredToolNames: resolved.ignored,
             }
           },
         },

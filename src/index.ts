@@ -115,7 +115,8 @@ export { readState, writeState } from './state'
 // P1 会话边界：待生效队列与边界应用入口（selftest 直接测构建产物行为）
 export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending'
 // 工具级禁用作用域（selftest 回归护栏：全局 vs 项目工作区隔离）
-export { loadDisabledTools, setToolDisabled, setToolsDisabledBulk, isToolDisabled, disabledToolsOf } from './tool-disable'
+export { loadDisabledTools, setToolDisabled, setToolsDisabledBulk, isToolDisabled, disabledToolsOf, resolveToolBulkTargets } from './tool-disable'
+export type { ToolBulkTargets } from './tool-disable'
 // rc.1 standing 组合 preset 行解析（selftest 回归护栏：parsePresetMcpText 文本抽取 + mcp-anki 例外）
 export { parsePresetMcpText, findPresetRowByServerName, presetConfigOf } from './preset-mcp'
 export type { PresetMcpRow, PresetMcpClientConfig, PresetMcpParsed } from './preset-mcp'
@@ -143,10 +144,10 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
-  autoManage: Schema.boolean().description('MCP 中间层控制（停用的 MCP 经 mcp_search/mcp_call 按需调用）').default(false),
+  autoManage: Schema.boolean().description('MCP 中间层控制（停用的 MCP 经 dsh_mcp_search/dsh_mcp_call 按需调用）').default(false),
   keepAliveMs: Schema.number().min(1000).description('MCP 保活空闲回收窗口（ms）').default(30_000),
-  searchLimitDefault: Schema.number().min(1).description('mcp_search 缺省 top-K').default(8),
-  searchLimitMax: Schema.number().min(1).description('mcp_search top-K 上限').default(10),
+  searchLimitDefault: Schema.number().min(1).description('dsh_mcp_search 缺省 top-K').default(8),
+  searchLimitMax: Schema.number().min(1).description('dsh_mcp_search top-K 上限').default(10),
   serverSummary: Schema.dict(Schema.string()).description('MCP 能力摘要表（serverName → 一句话）'),
 })
 
