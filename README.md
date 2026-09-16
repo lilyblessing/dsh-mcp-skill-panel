@@ -137,9 +137,11 @@ dsh plugin --profile web add "github:lilyblessing/dsh-mcp-skill-panel#main"
 
 产物已入库（`lib/`），git 源一行安装，无需构建授权。安装后**重启 `dsh web`**（bundle 层在启动时合成，热更新无效），设置页即出现「MCP 与技能管理面板」入口。
 
+> 🎯 适配 DSH `0.1.5-rc2`；更早版本的 DSH 请先升级 DSH，再安装/更新本插件。
+
 > 📦 已发布到 **npm**：`dsh-mcp-skill-panel`（[npm 页面](https://www.npmjs.com/package/dsh-mcp-skill-panel)）。npm 版为预构建产物，安装可跳过 `allowBuilds` 构建授权，也可直接以包名安装；git 源方式始终可用。
 >
-> ⬆️ **升级**：git 源用户请在 DSH profile 目录执行 `pnpm update dsh-mcp-skill-panel`（`pnpm add` 对相同 spec 不会重解析 git 分支）；npm 用户 `pnpm add dsh-mcp-skill-panel@latest`（当前 npm latest = **0.5.3**）即可。npm 发版**滞后于仓库**（0.5.4 / 0.5.5 已下架），最新代码以**仓库**（git 源）为准。
+> ⬆️ **升级**：git 源用户请在 DSH profile 目录执行 `pnpm update dsh-mcp-skill-panel`（`pnpm add` 对相同 spec 不会重解析 git 分支）；npm 用户 `pnpm add dsh-mcp-skill-panel@latest` 即可（版本以 `npm view dsh-mcp-skill-panel version` 为准）。npm 发版**可能滞后于仓库**（0.5.4 / 0.5.5 曾发布后撤下），最新代码以**仓库**（git 源）为准。
 >
 > 🔁 **更新插件后必须重启 DSH**（与安装同理，bundle 层只在启动时合成）：只 `pnpm update` 而不重启时，浏览器已加载新客户端、宿主进程仍是旧代码（没有 `/models` 路由 → 404），覆盖卡会显示「端点未注册（更新插件后需重启 DSH）」的降级提示。**这是预期状态**，重启即恢复，不必排查网络或面板令牌。
 
@@ -165,7 +167,7 @@ dsh plugin --profile web add "github:lilyblessing/dsh-mcp-skill-panel#main"
 | POST | `/mcp/toggleBatch` | `[{ entryId, disabled }]` 批量启停（400ms 合并，单次失效） |
 | POST | `/mcp/applyPending` | 立即应用待生效队列（next-session 意图强制生效）；**需 body `{ confirm: true }`**，缺了即 400（该操作会让当前会话下一轮 100% miss 前缀缓存，故要求显式确认） |
 | GET\|POST | `/mcp/rowConfig` | body `{ server, set?, unset?, apply? }` 读/写某 MCP 行的挂载配置（`command`/`args`/`env`/`cwd`/`url`/`headers`…）；GET **开放但 env/headers 脱敏回显**，POST **需 `x-panel-token`**；写侧占位符即「保留原值」 |
-| GET | `/debug/rowConfig` | 只读取某 server 行的全量挂载配置 + 模块身份读数（运维排障用；env/headers 脱敏回显） |
+| GET\|POST | `/debug/rowConfig` | GET 只读取某 server 行的全量挂载配置 + 模块身份读数（运维排障用；env/headers 脱敏回显）；POST 为取证用写入（body `{ server, set?, unset?, update? }`，`update:false` 即 dry-run 只回报 `willWrite`，不碰运行时） |
 | POST | `/mcp/toolToggle` | `{ serverName, toolName, disabled }` 工具级禁用（全名 `mcp__<server>__<tool>`） |
 | POST | `/mcp/toolBulk` | `{ serverName, disabled, toolNames?, session? }` 工具级**批量**启停。`toolNames` **三态**：省略/缺字段 = 该 server 当前目录里的全部工具；数组 = 精确集合（`[]` 为合法空操作，200 + `changed:0`）；**非数组**、或非空却**一条都不匹配** → 400（不静默降级为「全部」）。目录不可得（从未启动且无快照）同样 400。响应 `{ serverName, disabled, disabledTools, disabledCount, changed, ignoredToolNames }`：`ignoredToolNames` = 点名了但不在当前目录视图里的项（60s 缓存可能已过期，据此察觉「以为动了 N 条、实际只动交集」） |
 | POST | `/mcp/preview` | `{ json }` 快速迁移预览：粘贴 mcpServers JSON → 解析 + YAML patch 转换（返回 warnings） |
