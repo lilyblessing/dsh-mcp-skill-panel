@@ -1174,9 +1174,11 @@ export function makeRoutes(
       path: `${API_PREFIX}/models`,
       handler: handle('GET', async (req) => {
         // 按模型覆盖的**数据源补齐**：provider 目录 + 每个 provider 的模型目录。
-        // 此前覆盖卡只能列出「当前解析路由的键 ∪ 覆盖表现有键」，于是绑定的会话与
-        // 用户实际在用的模型不一致时（/state 不带 session → host 按 roots[0] 解析），
+        // 此前覆盖卡只能列出「当前解析路由的键 ∪ 覆盖表现有键」，于是当面板会话与
+        // 用户实际在用的模型不一致时（当时 `/state` 不带 session → host 按 roots[0] 解析），
         // 面板连为那个模型预置规则的入口都没有。目录让「任何 provider/模型」都可点。
+        // 会话口径已改善：0.6.0 起面板**可用时**带 `?session=`（本端点即消费它），此时
+        // `active` 就是该会话解析出的路由；不带该参数时行为与旧版一致。
         // 读端点：不传 guarded（与 handleAny 的「读端点开放、写操作鉴权」一致）。
         // 目录本身带 TTL 缓存 + 单飞（见 modelsCatalog）：无鉴权调用的扇出上界
         // 锁死为 60s 一次，而不是每个请求一次；单次抓取另有 MODELS_FETCH_TIMEOUT_MS

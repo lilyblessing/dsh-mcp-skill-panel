@@ -584,10 +584,12 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
     autoManageByRoutePersisted: stateAutoManageByRoute(state ?? {}),
     autoManageMounted: deps.catalogRuntime.autoManageMounted,
     middleLayerHides: deps.catalogRuntime.middleLayerHides,
-    // 面板**绑定会话**的判定（顶部徽标：「面板绑定会话：开启 · grok/grok-4.6」）。
+    // 面板**会话**的判定（顶部徽标：「跟随当前会话 / 面板绑定会话：开启 · grok/grok-4.6」）。
     // agent 缺省/服务缺失 → source='no-route'，此时 on 回退总开关（保守维持旧行为）。
-    // 注意：/state 不带 session 参数，host 侧按 roots[0] 解析 —— 多会话并存时未必是
-    // 用户当前会话，故文案不得断言「本会话 / 当前会话」（卡片同时显示 sessionId 供核对）。
+    // 会话口径（0.6.0 会话透传后）：面板**可用时**随请求带 `?session=`（客户端 session-scope.ts），
+    // host 就按该会话解析；取不到会话时 `/state` 不带 session、host 按 roots[0] 解析（=旧行为）。
+    // 故文案必须以**回显的 sessionId** 为准：解析成功才可说「跟随当前会话」，否则只能说
+    // 「面板绑定会话」——判据在 views.tsx 的 sessionConfirmed，不得无条件断言「本会话」。
     // 投影走 model-route.ts 的 activeRouteView：与 /models 的 active 是同一份实现
     // （面板「当前路由」高亮必须与生效依据同源，两处不得各写一遍）。
     autoManageActive: activeRouteView(decision),

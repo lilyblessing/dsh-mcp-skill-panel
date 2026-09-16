@@ -268,8 +268,8 @@ sequenceDiagram
 - **控制工具的 `arguments` 必须是 JSON 对象**：`dsh_mcp_call` 的 `arguments` 声明为对象类型，**字符串形态会被参数校验前置拒绝**（报 `invalid arguments: "arguments" must be an object`）。这是有意的收紧（0.6.0 起）—— 旧版会把 JSON 字符串透明解析，现在按工具描述要求的对象形态传入即可。
 - 运行期写 SKILL.md 安全（skill-filesystem 的 watcher 本就预期文件被改）；运行期写预设组合文件会触发 dsh-agent-presets 的 stamp 重挂事故，插件刻意不做。
 - 能力摘要表（`dsh_mcp_search` 空查询）只覆盖有 catalog 快照或配置了 `serverSummary` 的 server；从未成功启动过的 server（如 codegraph）不会列出。**口径提示**：`middleLayerHides='all'` 时该表按「经中间层取用」表述，不再宣称 server「对模型可见」—— 可见与否以装配结果为准（此时连已启用的 server 也从模型面隐藏）。
-- **按模型覆盖的数据源（v0.6.0 补齐）**：面板**会**拉 provider/模型目录（`GET /models`，**60s TTL + 单飞**）—— 「无鉴权读端点不该把每次请求都放大到 adapter」仍是这条缓存的理由，但不再是「不拉目录」的理由。覆盖卡的行集合 = **可折叠的目录**（provider 行 + 模型行）∪ 其它已存在的键（运行期 ∪ 持久化（`autoManageByRoutePersisted`）；未被目录吃掉的键落在「其它键」区），因此**可以为任意 provider/模型预置规则，不必先切到它**；目录拉取失败时降级为「只列键」的旧行为，键照旧全部可见、可删（挂载失败后运行期表被清空的键，按「已保存，未生效」标注）。目录只影响**可点范围**，不影响 gate 语义（查表序 `provider/model` → `provider` → `autoManage` 与生效判定原样）。**限制**：高亮依据没变 —— 目录里的「当前路由」高亮与 `/models` 的 `active` 取自面板绑定会话（host 侧按 `roots[0]` 解析），多会话并存时未必是你正在看的那个会话（见下条）。
-- 面板是**进程级全局**设置区块：`/state` 不带 `session` 参数时，host 侧按 `roots[0]` 解析归属会话 —— 多会话并存时覆盖卡的「面板绑定会话」未必是你正在看的那个会话（卡片同时显示绑定的 `sessionId` 供核对）。
+- **按模型覆盖的数据源（v0.6.0 补齐）**：面板**会**拉 provider/模型目录（`GET /models`，**60s TTL + 单飞**）—— 「无鉴权读端点不该把每次请求都放大到 adapter」仍是这条缓存的理由，但不再是「不拉目录」的理由。覆盖卡的行集合 = **可折叠的目录**（provider 行 + 模型行）∪ 其它已存在的键（运行期 ∪ 持久化（`autoManageByRoutePersisted`）；未被目录吃掉的键落在「其它键」区），因此**可以为任意 provider/模型预置规则，不必先切到它**；目录拉取失败时降级为「只列键」的旧行为，键照旧全部可见、可删（挂载失败后运行期表被清空的键，按「已保存，未生效」标注）。目录只影响**可点范围**，不影响 gate 语义（查表序 `provider/model` → `provider` → `autoManage` 与生效判定原样）。**会话口径（0.6.0 会话透传）**：面板**可用时**把当前会话一并带上（`/state`、`/models` 带 `?session=`；`/skill/toggle`、`/mcp/toolBulk` 带 body 的 `session`），host 就按该会话解析 —— 高亮、`toolsAll*` 计数、preset/cwd 等**随会话的读数**跟随你正在用的那个会话（**解析成功时**：卡片以 host 回显的 `sessionId` 为准，措辞据此在「跟随当前会话」/「面板绑定会话」之间切换）。注意 per-server 的 tools/tokens 聚合走**进程级** standing scope，不随会话。两个写端点用的是该会话的**作用域**：`/skill/toggle` 据此决定改哪个技能域（同名技能在不同会话下可能落到不同文件），`/mcp/toolBulk` 据此把工具名解析成实际目标。**取不到会话时**（宿主未提供该能力）请求与旧版**逐字节相同**，host 仍按 `roots[0]` 解析（见下条）。
+- 面板是**进程级全局**设置区块：**可用时**它会带上当前会话（0.6.0 会话透传，见上条），高亮与随会话的读数（`toolsAll*` 计数、preset/cwd）跟随你正在用的会话（**解析成功时**，以 host 回显的 `sessionId` 为准）；**取不到会话时**才回退旧行为 —— `/state` 不带 `session`，host 侧按 `roots[0]` 解析归属会话。两种情形下卡片都会把 host 回显的 `sessionId`（没有则 `—`）显示出来供核对。
 - **控制端点鉴权**：写操作由进程级随机令牌（`x-panel-token`）保护，仅面板同源客户端自动携带；GET 只读开放。宿主 webServer 本身无鉴权层，若将监听地址改为 `0.0.0.0` 对外暴露，建议同时依赖外层网络隔离。
 
 ## 🛠️ 开发
@@ -339,7 +339,12 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 - 🧭 **`GET /models` 目录端点**（读端点，**无鉴权**，与其它读端点一致）：数据源是宿主 llm 服务（`ctx.inject` 捕获的 `routeServices.llm`）的 `listProviders()` / `listModels(provider)`；**60s TTL + 单飞**（`MODELS_TTL_MS = 60_000`）把这条开放端点的扇出上界锁死为 60s 一次（`listModels` 会逐个 provider 打到 adapter，可能触达网络）；结果按 provider 字典序。三条降级路径都**不抛**：`llm` 缺失 / `listProviders()` 抛错 → `providers: []`；单个 `listModels()` 抛错 → 只该 provider `models: []`。
 - 🖱️ **覆盖卡改可折叠的 provider/模型目录**：provider 行与模型行都能设置三态覆盖（键 = `provider` / `provider/model`），因此**任意 provider/模型都可预置规则，不必先切到它**；目录拉取失败 → 降级为「只列键」的旧行为；未被目录吃掉的键落在「其它键」区，运行期 ∪ 持久化的覆盖键仍然全部可见、可删。
 - 🔗 **`active` 与 `/state` 的 `autoManageActive` 同源**：两处都走 `src/model-route.ts` 的 `activeRouteView`（`{ on, source, provider, model }`，`source` 取值 `'model'` / `'provider'` / `'master'` / `'no-route'`）—— 面板高亮与 gate 生效依据不会再各写一份。
-- ⚠️ **诚实边界**：面板是**进程级** settings.section，`/state` 不带 `session` 参数时 host 侧按 `roots[0]` 解析会话 —— 多会话并存时，目录里的「当前路由」高亮未必是你正在看的那个会话（卡片已显示绑定的 `sessionId` 供核对）。
+- ⚠️ **诚实边界**：面板是**进程级** settings.section，**可用时**透传当前会话（0.6.0）→ 高亮与读数跟随你正在用的会话；**取不到会话时**回退：`/state` 不带 `session`，host 侧按 `roots[0]` 解析（卡片始终显示解析出的 `sessionId` 供核对）。
+
+#### 会话透传：面板跟随当前会话（可用时）
+
+- 🔗 **带上当前会话**：面板此前所有请求都不带会话，host 只能按 `roots[0]` 解析 —— 多会话并存时卡片显示的是启动期那个会话的数据，而不是你正在用的那个。现在从宿主 `settings.section` 槽位的标准 props（`useSessions`）取「当前会话」，随 `/state`、`/models`（`?session=`）与 `/skill/toggle`、`/mcp/toolBulk`（body 的 `session`）一起发给 host。host 侧**一直支持**这两个参数，本次**没有新增任何端点、没有改动 gate 语义**。
+- 🛡️ **取不到就完全回退**：宿主未提供该能力（或当前无会话）时，四个请求与旧版本**逐字节相同**，host 仍按 `roots[0]` 解析 —— 向后兼容、可独立回退。卡片措辞随情形切换（「跟随当前会话」/「面板绑定会话」），两种情形都把解析出的 `sessionId` 显示出来供核对。
 
 ### v0.5.5（2026-09-08）— rc.1 空面板修复（standing 组合兜底）
 

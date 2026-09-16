@@ -151,13 +151,16 @@ export interface McpView {
   /** 中间层生效时隐藏哪些 server：'disabled'=仅手动停用的；'all'=全部 MCP。 */
   middleLayerHides: 'disabled' | 'all'
   /**
-   * 面板**绑定会话**（`/state` 不带 `session` 参数 → host 侧按 `roots[0]` 解析，
-   * 见 `collect.ts` 的 `resolveAgent`）实际生效的判定与依据 —— 顶部徽标用它显示
-   * 「面板绑定会话：开启 · grok/grok-4.6（provider 项）」这类信息。
+   * 面板**会话**实际生效的判定与依据 —— 顶部徽标用它显示
+   * 「跟随当前会话 / 面板绑定会话：开启 · grok/grok-4.6（provider 项）」这类信息。
+   * 会话来源见 `collect.ts` 的 `resolveAgent`：**可用时**由客户端随请求带 `?session=`
+   * （0.6.0 会话透传，见 `src/session-scope.ts`）；取不到会话时回退到不带参数的
+   * `/state` → host 按 `roots[0]` 解析，与旧版逐字节相同。
    *
-   * 措辞纪律：面板是**进程级全局** settings.section，多会话并存时它绑定的是
-   * `roots[0]`，未必是用户当前正在看的那个会话 —— 文案不得断言「本会话 / 当前会话」。
-   * 卡片同时显示 `{@link McpView.sessionId}`，便于人工交叉核对归属。
+   * 措辞纪律：判据是**回显的** `{@link McpView.sessionId}` 与所发会话相等（views.tsx 的
+   * `sessionConfirmed`）—— 只有解析成功才可断言「跟随当前会话」；host 对不可解析的会话 id
+   * 会静默回退 `roots[0]`，那时仍只能说「面板绑定会话」，不得断言「本会话 / 当前会话」。
+   * 卡片同时显示 `sessionId`，便于人工交叉核对归属。
    * source='no-route' = 本次解析不出模型（诊断装配/服务缺失），已保守回退总开关。
    */
   autoManageActive: {

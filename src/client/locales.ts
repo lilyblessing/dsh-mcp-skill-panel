@@ -155,10 +155,12 @@ export const en: Record<string, string> = {
   'ri.routeOn': 'Force on',
   'ri.routeOff': 'Force off',
   'ri.routeCurrent': 'resolved route',
-  // 措辞纪律（评审 cbc-N9 / 子代理 WARN-4）：/state 不带 session 参数 → host 侧按
-  // roots[0] 解析，多会话并存时可能不是用户当前那个会话 —— 故写「面板绑定会话」，
-  // 且卡片上同时显示绑定 sessionId 供核对，不得断言「本会话 / 当前会话」。
+  // 措辞纪律（评审 cbc-N9 / 子代理 WARN-4；0.6.0 会话透传后修订）：面板能拿到宿主
+  // useSessions 的「当前会话」时用它（routeActiveFollow），此时才可断言「跟随当前会话」；
+  // 取不到时（宿主不提供该 prop / 当前无会话）host 按 roots[0] 解析，仍只能说
+  // 「绑定到本面板的会话」—— 两种情形都把解析出的 sessionId 亮出来供核对。
   'ri.routeActive': 'Session bound to this panel: {state} · {route}',
+  'ri.routeActiveFollow': 'Following current session: {state} · {route}',
   'ri.routeActiveOn': 'middle layer ON',
   'ri.routeActiveOff': 'middle layer OFF',
   'ri.routeSourceModel': 'by model rule',
@@ -175,8 +177,8 @@ export const en: Record<string, string> = {
     'This override is persisted in state.json but is not in effect: the middle layer failed to mount this time, so the runtime table (what the gate actually reads) was cleared while your intent was kept. You can delete or re-set it here. It is retried on the next start.',
   'ri.routeEmpty': 'No route to show yet (no session model and no override).',
   // provider / model catalog (data source for the override table; GET /models)
-  // 措辞纪律：目录来自宿主的 llm 服务，是**进程级**读数，不是「本会话可用的模型」——
-  // 面板绑定的会话未必是用户当前看的那个（见 ri.routeActive 的注释），不得那样写。
+  // 措辞纪律：目录来自宿主的 llm 服务，是**进程级**读数（provider/模型的完整清单），
+  // 不是「本会话可用的模型」—— 不得那样写（与会话透传无关，另见 ri.routeActive 注释）。
   'ri.routeCatalogHint':
     'The catalog below comes from the host llm service: you can preset a rule for any provider or model without switching to it first.',
   'ri.routeCatalogEmpty':
@@ -353,10 +355,12 @@ export const zh: Record<string, string> = {
   'ri.routeOn': '强制开',
   'ri.routeOff': '强制关',
   'ri.routeCurrent': '当前解析到的路由',
-  // 措辞纪律（评审 cbc-N9 / 子代理 WARN-4）：/state 不带 session 参数 → host 侧按
-  // roots[0] 解析，多会话并存时可能不是用户当前那个会话 —— 故写「面板绑定会话」，
-  // 且卡片上同时显示绑定 sessionId 供核对，不得断言「本会话 / 当前会话」。
+  // 措辞纪律（评审 cbc-N9 / 子代理 WARN-4；0.6.0 会话透传后修订）：面板能拿到宿主
+  // useSessions 的「当前会话」时用它（routeActiveFollow），此时才可断言「跟随当前会话」；
+  // 取不到时（宿主不提供该 prop / 当前无会话）host 按 roots[0] 解析，仍只能说
+  // 「面板绑定会话」—— 两种情形都把解析出的 sessionId 亮出来供核对。
   'ri.routeActive': '面板绑定会话：{state} · {route}',
+  'ri.routeActiveFollow': '跟随当前会话：{state} · {route}',
   'ri.routeActiveOn': '中间层已生效',
   'ri.routeActiveOff': '中间层未生效',
   'ri.routeSourceModel': '按模型规则',
@@ -373,8 +377,8 @@ export const zh: Record<string, string> = {
     '该覆盖项已持久化进 state.json，但当前不生效：本次中间层挂载失败，运行期表（gate 实际读的那张表）被清空，而你的意图被保留。可在此删除或重设，下次启动会重试挂载。',
   'ri.routeEmpty': '暂无可列出的路由（无会话模型且没有覆盖项）。',
   // provider / 模型目录（覆盖表的数据源；GET /models）
-  // 措辞纪律：目录来自宿主的 llm 服务，是**进程级**读数，不是「本会话可用的模型」——
-  // 面板绑定的会话未必是用户当前看的那个（见 ri.routeActive 的注释），不得那样写。
+  // 措辞纪律：目录来自宿主的 llm 服务，是**进程级**读数（provider/模型的完整清单），
+  // 不是「本会话可用的模型」—— 不得那样写（与会话透传无关，另见 ri.routeActive 注释）。
   'ri.routeCatalogHint': '下方目录来自宿主的 llm 服务：可为任意 provider 或模型预置规则，不必先切到该模型。',
   'ri.routeCatalogEmpty': '宿主 llm 服务未提供 provider 目录（精简组合下没有 llm 目录）。下方仍列出已配置的键。',
   'ri.routeCatalogModels': '{n} 个模型',

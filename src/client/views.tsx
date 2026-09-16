@@ -7,11 +7,23 @@ import React, { useCallback, useEffect, useState } from 'react'
 import type { McpRow, McpView, SkillRow, SkillsView } from '../shared-types'
 import { AddMcpModal } from './add-mcp'
 import { AddSkillModal } from './add-skill'
+import { readCurrentSession, sessionField, withSessionParam } from '../session-scope'
 
 interface Props {
   /** 由 locale 插槽注入：NS 字典的翻译函数 */
   t: (key: string, params?: Record<string, string | number>) => string
   close?: () => void
+  /**
+   * 宿主 `settings.section` 槽位的标准 props 之一（`dsh-client-ui-session` 对
+   * `GlobalStandardProps` 的 module augmentation；runner 的 slot-catalog 亦声明
+   * `standardProps` 含 `useSessions`）。用途：把**当前会话**透传给 host，使面板不必
+   * 再只按 `roots[0]` 解析会话（多会话并存时那是启动期的会话，不是用户正在看的那个）。
+   *
+   * 本仓不引宿主类型，这里声明最小契约；DSH 仍是 0.1.x-rc、`standardProps` 会随版本
+   * 重生成，故调用侧一律**防御式取用**（`typeof === 'function'`）：宿主不提供该 prop 时
+   * 面板回退旧行为（host 按 roots[0] 解析），不报错。
+   */
+  useSessions?: (selector: (state: { current?: unknown }) => unknown) => unknown
 }
 
 const C = {
@@ -446,6 +458,15 @@ const CACHE_WARN_AUTO_DISMISS_MS = 12_000
 
 export function RuntimeInventorySection(props: Props): React.ReactElement {
   const { t } = props
+  // 会话透传（0.6.0）：可用时把「当前会话」带给 host（/state、/models、/skill/toggle、
+  // /mcp/toolBulk 四处），取不到时 currentSession = undefined，四处请求与旧版本逐字节相同。
+  // hooks 规则：useSessions 是宿主注入的 hook，必须位于组件顶层（不在 if/循环/回调里）。
+  // 这里的 typeof 判空是**跨宿主版本的兼容**写法：宿主始终提供该 prop 时等价于无条件调用；
+  // 若宿主在组件生命期内让该 prop 出现/消失，hook 数量变化会**响亮报错**（而非静默错值）——
+  // 那属于宿主契约变更，应随宿主版本升级一并处理（独立审查 NIT-4）。
+  const sessionsHook = typeof props.useSessions === 'function' ? props.useSessions : undefined
+  const rawSession = sessionsHook ? sessionsHook((s) => s?.current) : undefined
+  const currentSession = readCurrentSession(rawSession)
   const [tab, setTab] = useState<'mcp' | 'skill'>('mcp')
   const [mcp, setMcp] = useState<McpView | null>(null)
   const [skills, setSkills] = useState<SkillsView | null>(null)
@@ -480,7 +501,7 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
     const ref = part === 'mcp' ? mcpSeq : skillsSeq
     const seq = ++ref.current
     setError(null)
-    fetch(`/api/mcp-skill-panel/state?part=${part}`)
+    fetch(withSessionParam(`/api/mcp-skill-panel/state?part=${part}`, currentSession))
       .then((res) => res.json() as Promise<{ ok: boolean; state?: McpView | SkillsView; error?: string }>)
       .then((body) => {
         if (!body.ok || !body.state) throw new Error(body.error ?? 'bad response')
@@ -491,7 +512,7 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
       .catch((err: unknown) => {
         if (seq === ref.current) setError(err instanceof Error ? err.message : String(err))
       })
-  }, [])
+  }, [currentSession])
 
   const loadMcp = useCallback(() => load('mcp'), [load])
   const loadSkills = useCallback(() => load('skills'), [load])
@@ -536,7 +557,7 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
       fetch(path, {
         method: 'POST',
         headers,
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, ...sessionField(currentSession) }),
       })
         .then((res) => res.json() as Promise<{ ok: boolean; error?: string }>)
         .then((body) => {
@@ -550,7 +571,7 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
         })
         .finally(() => setBusy((prev) => ({ ...prev, [key]: false })))
     },
-    [t, loadMcp, loadSkills, ensureToken],
+    [t, loadMcp, loadSkills, ensureToken, currentSession],
   )
 
   // P1 批量合并：MCP toggle 先入队，400ms 去抖窗口合并为一次 toggleBatch。
@@ -792,7 +813,7 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
             onToggle={toggleAutoManage}
             loadMcp={loadMcp}
           />
-          <RouteOverridesCard state={view as McpView} t={t} loadMcp={loadMcp} />
+          <RouteOverridesCard state={view as McpView} t={t} loadMcp={loadMcp} session={currentSession} />
           <ApplyTimingCard
             applyMode={applyMode}
             hasPending={hasPending}
@@ -805,7 +826,7 @@ export function RuntimeInventorySection(props: Props): React.ReactElement {
             showWarn={showWarn}
             setBusy={setBusy}
           />
-          <McpPanel state={view as McpView} t={t} busy={busy} onToggle={toggleMcp} statusOf={mcpStatus} applyMode={applyMode} loadMcp={loadMcp} />
+          <McpPanel state={view as McpView} t={t} busy={busy} onToggle={toggleMcp} statusOf={mcpStatus} applyMode={applyMode} loadMcp={loadMcp} session={currentSession} />
         </>
       )}
 
@@ -938,20 +959,25 @@ interface RouteProviderEntry {
  * 0.6.0 特性 4：按模型覆盖表（三态：跟随总开关 / 强制开 / 强制关）→ `config.autoManageByRoute`。
  *
  * 行集合（2026-09-16 补齐数据源）= **宿主 llm 服务的 provider/模型目录**（本卡片挂载时拉一次
- * `GET /models`）∪ 覆盖表现有键（运行期 ∪ **持久化**）∪ 面板绑定会话解析出的路由键。
- * 目录的作用：面板绑定的会话未必是用户在用的那个（`/state` 不带 session → host 侧按
- * `roots[0]` 解析），此前用户连「为那个模型预置规则」的入口都没有；有了目录，任意
+ * `GET /models`）∪ 覆盖表现有键（运行期 ∪ **持久化**）∪ 会话解析出的路由键。
+ * 目录的作用：此前用户连「为某个还没在用的模型预置规则」的入口都没有；有了目录，任意
  * provider/模型都可点，不必先切到它。目录拉取失败时降级为「只列键」的旧行为，不阻断卡片。
  *
- * 措辞纪律：面板是**进程级全局** settings.section，绑定的是 `roots[0]`，多会话并存时
- * 未必是用户当前正在看的会话 —— 文案只说「面板绑定会话」，不得断言「本会话 / 当前会话」。
+ * 会话口径（0.6.0 会话透传后）：`session` 由面板根组件从宿主 `useSessions` 取「当前会话」
+ * 透传下来（随 `/models` 一起发 `?session=`）。宿主不提供该 prop 或当前无会话时 `session`
+ * 为 undefined，请求与旧版本**逐字节相同**，此时 host 按 `roots[0]` 解析会话。
+ * 措辞纪律：只有**确实透传了会话**时才可断言「跟随当前会话」，否则仍只能说「面板绑定会话」。
+ * 注意：卡片高亮用的是 `state.autoManageActive`（来自 `/state`，随 loadMcp 刷新，本身已按
+ * 会话取），目录只提供**可点范围**、与会话无关 —— 故下面的挂载拉取仍是一次性的。
  */
 function RouteOverridesCard(props: {
   state: McpView
   t: Props['t']
   loadMcp: () => void
+  /** 当前会话 id（透传用）；undefined = 宿主未提供或不透传，请求保持旧行为 */
+  session?: string
 }): React.ReactElement {
-  const { state, t, loadMcp } = props
+  const { state, t, loadMcp, session } = props
   const [providers, setProviders] = useState<RouteProviderEntry[]>([])
   // provider 折叠状态：未交互过的 provider 跟随默认（当前路由那个展开），故用「?? 默认值」
   // 而不是初始化时写死一份 map —— 面板会话/路由可能在下一次轮询后变化。
@@ -969,7 +995,10 @@ function RouteOverridesCard(props: {
       status === 401 || status === 404
         ? t('ri.routeCatalogMissingEndpoint')
         : `HTTP ${status}`
-    fetch('/api/mcp-skill-panel/models')
+    // 会话参数当前**不影响渲染**：本卡片只消费 `providers`，host 返回的 `active`/`session`
+    // 无人读（高亮取自 /state 的 autoManageActive）。一旦将来有人开始消费 `active`，必须
+    // 同时把下面 `[]` 依赖改为随 `session`，否则挂载时快照的会话会变成陈旧高亮（审查 NIT-3）。
+    fetch(withSessionParam('/api/mcp-skill-panel/models', session))
       .then(async (res) => {
         // 先判 res.ok：4xx/5xx 的响应体不是本端点的契约形状（旧宿主返回的是 "not found" 之类的
         // 纯文本），直接 res.json() 会把 SyntaxError 抛给用户 —— 那是噪音，不是诊断信息。
@@ -1060,6 +1089,10 @@ function RouteOverridesCard(props: {
   }
 
   const active = state.autoManageActive
+  // 措辞判据 = 「host 确实按该会话解析了」，而不是「我们发了会话」：host 对不可解析的会话 id 会
+  // **静默回退** `roots[0]`（src/collect.ts 的 resolveAgent），此时若断言「跟随当前会话」等于替
+  // host 宣称一个它没确认的事实（独立审查 WARN-2）。解析成功时 host 回显的 sessionId 与传入值相等。
+  const sessionConfirmed = Boolean(session) && state.sessionId === session
   // 当前路由行：provider 级与 provider/model 级各一行（命中优先级 model > provider）。
   const activeKeys = [active.provider, active.provider && active.model ? `${active.provider}/${active.model}` : null].filter(
     (key): key is string => typeof key === 'string' && key.length > 0,
@@ -1131,11 +1164,14 @@ function RouteOverridesCard(props: {
       </div>
       <p style={C.cardDesc}>{t('ri.routeDesc')}</p>
       <p style={C.cardMeta}>
-        {t('ri.routeActive', { state: sourceLabel, route: routeLabel })}
+        {sessionConfirmed
+          ? t('ri.routeActiveFollow', { state: sourceLabel, route: routeLabel })
+          : t('ri.routeActive', { state: sourceLabel, route: routeLabel })}
         {' · '}
         {state.autoManageMounted ? t('ri.routeMounted') : t('ri.routeNotMounted')}
-        {/* 绑定会话 id：把上面那句「面板绑定会话」变成可核对的事实（面板是进程级全局
-            组件，/state 不带 session → host 侧按 roots[0] 解析，多会话时未必是当前会话）。 */}
+        {/* 会话 id：把上面那句变成可核对的事实。判据用 `sessionConfirmed`（**host 回显**的
+            sessionId 与所发会话相等）而不是「发过 session」—— host 对不可解析的 id 会静默回退
+            roots[0]，那时只能按旧措辞说「面板绑定会话」。显示一律以 host 回显为准。 */}
         {' · '}
         {t('ri.session')}: {state.sessionId ?? '—'}
       </p>
@@ -1452,8 +1488,10 @@ function McpPanel(props: {
   statusOf: (row: McpRow) => { label: string; color: string; bg: string; title?: string }
   applyMode: 'immediate' | 'next-session'
   loadMcp: () => void
+  /** 当前会话 id（透传用）；undefined = 宿主未提供或不透传，请求保持旧行为 */
+  session?: string
 }): React.ReactElement {
-  const { state, t, busy, onToggle, statusOf, applyMode, loadMcp } = props
+  const { state, t, busy, onToggle, statusOf, applyMode, loadMcp, session } = props
   // 工具级禁用精简：每个 server 展开的工具下拉（已折叠/展开）
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   // 工具行禁用开关临时态（立即生效后由 loadMcp 校准）
@@ -1492,7 +1530,7 @@ function McpPanel(props: {
           error?: string
           changed?: number
           ignoredToolNames?: string[]
-        }>('/api/mcp-skill-panel/mcp/toolBulk', { serverName, disabled, toolNames })
+        }>('/api/mcp-skill-panel/mcp/toolBulk', { serverName, disabled, toolNames, ...sessionField(session) })
         const changed = body.changed ?? 0
         const ignored = body.ignoredToolNames ?? []
         // changed = 真正翻转的条数（幂等点击可能为 0）；ignoredToolNames = 点名了但
@@ -1510,7 +1548,7 @@ function McpPanel(props: {
         setBulkBusy((prev) => ({ ...prev, [serverName]: false }))
       }
     },
-    [loadMcp, t],
+    [loadMcp, t, session],
   )
 
   const toolToggle = useCallback(async (row: McpRow, tool: NonNullable<McpRow['toolList']>[number]) => {

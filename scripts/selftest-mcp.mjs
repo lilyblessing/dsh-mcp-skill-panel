@@ -66,6 +66,8 @@ if (hostFilled.length > 0) {
 const convert = await import(pathToFileURL(join(root, 'lib', 'mcp-convert.js')).href)
 // 0.6.0：行级读数判定拆成零宿主依赖模块，纯逻辑护栏不再受宿主包解析环境影响。
 const rowDisplayMod = await import(pathToFileURL(join(root, 'lib', 'row-display.js')).href)
+// 0.6.0 会话透传：面板把「当前会话」拼进请求的纯逻辑（同样零宿主依赖，可直接 import）。
+const sessionScope = await import(pathToFileURL(join(root, 'lib', 'session-scope.js')).href)
 
 let failed = false
 let passed = 0
@@ -1664,6 +1666,64 @@ check('G3：hideAll 下空查摘要不再宣称 server「对模型可见」', ()
   )
   assert.ok(hidesAll.includes('10'), '数量仍需如实给出')
   assert.ok(hidesAll.includes('挂载'), 'hideAll 下 [开] 的语义应被说明为挂载态，而非模型可见')
+})
+
+// ── 会话透传（0.6.0：面板把「当前会话」带给 host；取不到会话时必须与不透传逐字节相同）─────
+check('readCurrentSession：非字符串 / 空串 / 全空白 → undefined', () => {
+  for (const value of [undefined, null, '', '   ', 123, true, {}, [], () => {}]) {
+    assert.equal(sessionScope.readCurrentSession(value), undefined, `应视为无会话：${String(value)}`)
+  }
+})
+check('readCurrentSession：字符串 trim 后返回', () => {
+  assert.equal(sessionScope.readCurrentSession('abc'), 'abc')
+  assert.equal(sessionScope.readCurrentSession(' ab '), 'ab')
+})
+check('withSessionParam：无会话时逐字节不变（向后兼容的硬要求）', () => {
+  assert.equal(sessionScope.withSessionParam('/x', undefined), '/x')
+  assert.equal(sessionScope.withSessionParam('/x?part=mcp', undefined), '/x?part=mcp')
+  assert.equal(sessionScope.withSessionParam('/x', ''), '/x')
+})
+check('withSessionParam：有会话时按既有 ? 选分隔符', () => {
+  assert.equal(sessionScope.withSessionParam('/x', 's1'), '/x?session=s1')
+  assert.equal(sessionScope.withSessionParam('/x?part=mcp', 's1'), '/x?part=mcp&session=s1')
+})
+check('withSessionParam：会话 id 被 urlencode', () => {
+  assert.equal(sessionScope.withSessionParam('/x', 'a b&c=d'), '/x?session=a%20b%26c%3Dd')
+})
+check('sessionField：无会话 → 空对象（展开后不新增 body 键）', () => {
+  assert.equal(Object.keys(sessionScope.sessionField(undefined)).length, 0)
+  assert.equal(Object.keys(sessionScope.sessionField('')).length, 0)
+})
+check('sessionField：有会话 → { session }', () => {
+  assert.deepEqual(sessionScope.sessionField('s1'), { session: 's1' })
+})
+check('接线护栏：四个吃 session 的请求都真的带上了会话（防「写了纯函数忘了接线」）', () => {
+  const clientSrc = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
+  // 打包器保留函数名（与 verify 对 ensureToolToken 的可见性同源），故断言「端点字面量附近
+  // 是否出现拼接调用」—— 漏接任一处都会失败，而不是只看纯函数存在。
+  // ⚠️ 这是**实现形态**断言（独立审查 NIT-1）：把 `...sessionField(x)` 等价重写成
+  // `...{ session: x }` 会误报 —— 请同步更新本断言，而不是绕过护栏。
+  const nearAny = (endpoint, probe, span = 260) => {
+    let from = 0
+    for (;;) {
+      const at = clientSrc.indexOf(endpoint, from)
+      if (at < 0) return false
+      if (clientSrc.slice(Math.max(0, at - span), at + span).includes(probe)) return true
+      from = at + endpoint.length
+    }
+  }
+  assert.ok(nearAny('/api/mcp-skill-panel/state', 'withSessionParam('), '/state 未接会话（应为 query 透传）')
+  assert.ok(nearAny('/api/mcp-skill-panel/models', 'withSessionParam('), '/models 未接会话（应为 query 透传）')
+  // /skill/toggle 走**共享 post 通道**：会话是在通道内部注入的，端点字面量旁边看不到
+  // sessionField —— 故这里断言「通道注入了当前会话」+「该端点确实走这条通道」。
+  assert.ok(
+    clientSrc.includes('sessionField(currentSession)'),
+    '共享 post 通道未注入当前会话（/skill/toggle 依赖它）',
+  )
+  assert.ok(nearAny('/api/mcp-skill-panel/skill/toggle', 'post(', 80), '/skill/toggle 必须走共享 post 通道')
+  assert.ok(nearAny('/api/mcp-skill-panel/mcp/toolBulk', 'sessionField('), '/mcp/toolBulk 未接会话（应为 body 透传）')
+  assert.ok((clientSrc.match(/withSessionParam\(/g) ?? []).length >= 2, 'query 透传应有两处调用')
+  assert.ok((clientSrc.match(/sessionField\(/g) ?? []).length >= 2, 'body 透传应有两处调用')
 })
 
 if (failed) {

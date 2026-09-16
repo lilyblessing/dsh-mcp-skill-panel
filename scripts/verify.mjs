@@ -5,9 +5,13 @@ import { fileURLToPath } from 'node:url'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 let failed = false
+// 注意：check 必须**返回布尔** —— 多处用法是 `if (check(...)) { …细粒度断言… }`。
+// 早先这里没有 return（返回 undefined），使那些内层断言恒不执行：row-display 与 session-scope
+// 两组「零依赖独立产物」的内层断言其实一直是死代码（2026-09-16 独立审查 WARN-1，实测输出为证）。
 const check = (ok, label) => {
   if (!ok) failed = true
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${label}`)
+  return ok
 }
 
 const nodeOut = join(root, 'lib', 'index.js')
@@ -48,6 +52,21 @@ if (existsSync(clientOut)) {
     const src = readFileSync(rowDisplayOut, 'utf8')
     check(!/^\s*import\s/m.test(src), 'row-display has zero imports (host-free, selftest-loadable)')
     check(/export\s*\{[^}]*rowDisplay/.test(src), 'row-display exports rowDisplay')
+  }
+}
+
+// 0.6.0 会话透传：session-scope 同样必须是零依赖独立产物（selftest 直接 import 它）。
+{
+  const sessionScopeOut = join(root, 'lib', 'session-scope.js')
+  if (check(existsSync(sessionScopeOut), `session-scope standalone bundle exists: ${sessionScopeOut}`)) {
+    const src = readFileSync(sessionScopeOut, 'utf8')
+    check(!/^\s*import\s/m.test(src), 'session-scope has zero imports (host-free, selftest-loadable)')
+    check(
+      /export\s*\{[^}]*readCurrentSession/.test(src) &&
+        /export\s*\{[^}]*withSessionParam/.test(src) &&
+        /export\s*\{[^}]*sessionField/.test(src),
+      'session-scope exports readCurrentSession / withSessionParam / sessionField',
+    )
   }
 }
 

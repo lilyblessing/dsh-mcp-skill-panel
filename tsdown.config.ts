@@ -93,6 +93,22 @@ export default defineConfig([
     },
   },
   {
+    // 面板会话作用域（纯逻辑）单独产物，供 scripts/selftest-mcp.mjs 自测：
+    // 面板把「当前会话」透传给 host 的拼接逻辑（取不到会话时必须与不透传逐字节相同）。
+    entry: ['src/session-scope.ts'],
+    format: ['esm'],
+    outDir: 'lib',
+    target: 'node22',
+    platform: 'node',
+    external: [/^@deepseek-ai\//, /^node:/],
+    dts: false,
+    clean: false,
+    sourcemap: false,
+    outputOptions: {
+      entryFileNames: 'session-scope.js',
+    },
+  },
+  {
     entry: ['src/client/index.ts'],
     // cjs：ModuleLoader factory 提供 require/module/exports，import 必须转成 require 调用
     format: ['cjs'],
