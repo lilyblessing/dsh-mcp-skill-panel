@@ -162,7 +162,7 @@ export function listServer(catalog: Catalog, server: string, offset = 0, limit =
 }
 
 /** catalog 文件路径：<dir>/catalog.json。 */
-export function catalogFileFor(dir: string): string {
+function catalogFileFor(dir: string): string {
   return `${dir.replace(/[\\/]$/, '')}/catalog.json`
 }
 

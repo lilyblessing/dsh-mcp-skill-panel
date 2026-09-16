@@ -71,8 +71,6 @@ export interface ServerListing {
     source: string | null;
 }
 export declare function listServer(catalog: Catalog, server: string, offset?: number, limit?: number): ServerListing;
-/** catalog 文件路径：<dir>/catalog.json。 */
-export declare function catalogFileFor(dir: string): string;
 /** 从目录加载 catalog；文件不存在 / 解析失败时返回空 catalog。 */
 export declare function loadCatalog(dir: string): Promise<Catalog>;
 /** 原子写回 catalog（tmp + rename，0600）。调用方负责 mkdir。 */

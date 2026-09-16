@@ -36,7 +36,6 @@ export declare function setRowFlag(text: string, rowId: string, key: string, val
 export declare function setRowConfigKeys(text: string, rowId: string, set: Record<string, string>, remove?: string[]): string;
 /** 允许通过面板编辑的挂载配置键（与 mcp-convert.ts 的挂载形态一致）。 */
 export declare const EDITABLE_CONFIG_KEYS: readonly ["transport", "command", "args", "env", "cwd", "url", "headers", "toolCallTimeoutMs", "failOnStartupError"];
-export type EditableConfigKey = (typeof EDITABLE_CONFIG_KEYS)[number];
 /**
  * 0.6.0：把配置值序列化成**单行 YAML**（写入预设文件用）。
  *

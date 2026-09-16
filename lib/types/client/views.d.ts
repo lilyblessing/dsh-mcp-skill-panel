@@ -10,5 +10,4 @@ interface Props {
     close?: () => void;
 }
 export declare function RuntimeInventorySection(props: Props): React.ReactElement;
-export declare function ensureToolToken(): Promise<string | null>;
 export {};

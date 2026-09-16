@@ -1,7 +1,8 @@
 /**
  * preset 行句柄来源（0.5.7）—— 模型侧可见性 / 面板开关 / mcp_call 唤醒的公共咽喉。
  *
- * 背景与断点（2026-09-13 实测取证，详见 README 变更日志 v0.5.7）：
+ * 背景与断点（2026-09-13 实测取证，详见 README 变更日志 v0.6.0 的
+ * 「preset 行句柄 + 临时拉起闭环 + 已安装能力表」一节）：
  * dsh 0.1.2-rc.1 起 preset 行挂在 standing 组合，**不在 `ctx.loader.entries()`
  * 也不在 `ctx.loader.resolve()` 可达域**（resolve 恒抛 "cannot resolve entry"）。
  * 0.5.5/0.5.6 因此把所有 preset 行逻辑降级成「快照读取 + 意图排队」：
@@ -56,15 +57,11 @@ declare let diag: {
     lastPresetIds: string[];
     lastRowCount: number;
 };
-/** 宿主是否提供了 standing 读取口（false = 整体降级，调用方按空结果处理）。 */
-export declare function standingApiAvailable(): boolean;
 /**
  * 全进程所有 preset 的 standing 挂载（**无 agent 参数**，装配同步路径也可用）。
  * 过滤掉没有 tree / tree 无 entries() 的项（防御畸形挂载）。
  */
 export declare function presetMounts(): StandingMount[];
-/** 按 presetId 取第一份挂载（省略 presetId = 取任一，单 preset 部署够用）。 */
-export declare function presetMount(presetId?: string): StandingMount | undefined;
 /**
  * 在 standing 树里按 serverName 找 MCP 行。先遍历 `livePresetMounts()`；
  * 无挂载且给了 agentCtx 时再用 `standingMountFor(agentCtx)` 兜一次

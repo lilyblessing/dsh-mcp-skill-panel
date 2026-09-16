@@ -239,8 +239,6 @@ export const EDITABLE_CONFIG_KEYS = [
   'failOnStartupError',
 ] as const
 
-export type EditableConfigKey = (typeof EDITABLE_CONFIG_KEYS)[number]
-
 /**
  * 未转义的普通标量可直接裸写的字符集。
  * 首字符另有限制：不能是 `- ? : , [ ] { } # & * ! | > ' " % @ \`` 等 YAML 指示符开头

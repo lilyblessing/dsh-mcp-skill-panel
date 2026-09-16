@@ -180,25 +180,6 @@ export interface McpCallController {
     }>;
 }
 export declare function msgOf(error: unknown): string;
-/** 可执行一个注册工具的最小视图（宿主 ctx 或调用方 agent ctx 的 tools 服务）。 */
-interface ToolView {
-    label: string;
-    tools: {
-        get(name: string, scope?: object): unknown;
-        execute(exec: unknown): Promise<unknown>;
-    } | undefined;
-    scope: object | undefined;
-}
-/**
- * 0.6.2：从「已确认注册了工具」的那个视图直接取 schema 快照。
- * 与 index.ts 的 `getSchemasView` 读同一份 dsh-tools 服务，只是**用命中视图自己的
- * scope**，避免换口径重读采空（0.6.1 实测的采空原因）。
- */
-export declare function schemasOfView(view: ToolView | undefined): Array<{
-    name?: unknown;
-    description?: unknown;
-    parameters?: unknown;
-}>;
 /**
  * 0.6.3：能力表采集的逐阶段痕迹。
  *

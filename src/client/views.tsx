@@ -1324,7 +1324,7 @@ function ApplyTimingCard(props: {
 
 /** 进程级随机令牌的模块级缓存（工具级禁用端点用；令牌全程不变，复用免重复请求）。 */
 let toolTokenPromise: Promise<string | null> | null = null
-export function ensureToolToken(): Promise<string | null> {
+function ensureToolToken(): Promise<string | null> {
   if (!toolTokenPromise) {
     toolTokenPromise = fetch('/api/mcp-skill-panel/token')
       .then((r) => r.json())

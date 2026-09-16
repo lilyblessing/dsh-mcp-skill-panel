@@ -353,23 +353,6 @@ const INVENTORY_FAIL_TTL_MS = 5 * 60_000
 const inventoryFailUntil = new Map<string, number>()
 
 /**
- * 0.6.2：从「已确认注册了工具」的那个视图直接取 schema 快照。
- * 与 index.ts 的 `getSchemasView` 读同一份 dsh-tools 服务，只是**用命中视图自己的
- * scope**，避免换口径重读采空（0.6.1 实测的采空原因）。
- */
-export function schemasOfView(view: ToolView | undefined): Array<{ name?: unknown; description?: unknown; parameters?: unknown }> {
-  if (!view?.tools) return []
-  try {
-    const svc = view.tools as unknown as {
-      schemas?: (scope?: object) => Array<{ name?: unknown; description?: unknown; parameters?: unknown }>
-    }
-    return svc.schemas?.(view.scope as object | undefined) ?? []
-  } catch {
-    return []
-  }
-}
-
-/**
  * 0.6.3：能力表采集的逐阶段痕迹。
  *
  * 为什么必须加：0.6.0→0.6.2 连续两次"采空"，而外部只能看到两个布尔

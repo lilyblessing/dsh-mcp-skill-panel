@@ -10,8 +10,6 @@ import type { McpCallController } from './mcpcall';
 import type { CatalogRuntime } from './index';
 /** 分域缓存 TTL：事件驱动失效为主，TTL 只是兜底（事件丢失场景） */
 export declare const DOMAIN_TTL_MS = 60000;
-/** 已确认的 skill 状态在 collectState 中覆盖 snapshot 旧值的有效期 */
-export declare const CONFIRMED_SKILL_TTL_MS = 60000;
 /** skill toggle 确认轮询间隔（ctx.timeout，随 ctx 生命周期）。 */
 export declare const SKILL_TOGGLE_POLL_MS = 80;
 /**
