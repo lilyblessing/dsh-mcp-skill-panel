@@ -84,6 +84,9 @@ jobs:
       - name: Selftest (catalog / preset logic)
         run: node scripts/selftest-mcp.mjs
 
+      - name: Selftest (rowConfig / preset text)
+        run: node scripts/selftest-rowconfig.mjs
+
       - name: Selftest (P1 session-boundary apply chain)
         run: node scripts/selftest-pending.mjs
 
@@ -91,12 +94,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: lib-${{ github.sha }}
-          path: |
-            lib/index.js
-            lib/catalog.js
-            lib/client.js
-            lib/mcp-convert.js
-            lib/types
+          path: lib/**
           if-no-files-found: error
 
       - name: Create GitHub App token (for protected main push)

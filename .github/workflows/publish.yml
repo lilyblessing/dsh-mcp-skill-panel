@@ -11,8 +11,9 @@ name: publish
 #        Workflow filename   : publish.yml   ← 必须与本文件名完全一致
 #        Environment name    : 留空
 #        Allowed actions     : npm publish
-#   3) 之后每个新版本：bump package.json version → 推 main（build.yml 自动重建 lib）→ 发 GitHub Release（或打 v* tag），
-#      本流水线即自动发布；provenance 由 trusted publishing 自动附加，无需 --provenance、无需 NODE_AUTH_TOKEN。
+#   3) 之后每个新版本：bump package.json version → 推 main（build.yml 自动重建 lib）→ 发 GitHub Release，
+#      本流水线即自动发布（**触发器只有 `release: [published]` 事件**；仅 `git push` 一个 v* tag
+#      不会触发本流水线）；provenance 由 trusted publishing 自动附加，无需 --provenance、无需 NODE_AUTH_TOKEN。
 #
 # 注意：Trusted Publishing 要求 npm CLI >= 11.5.1（node 22 自带 npm 10），故先全局升级 npm。
 
