@@ -32,19 +32,28 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Catalog, CatalogEntry } from './catalog'
 import { snapshotFromSchemas, loadCatalog, saveCatalog } from './catalog'
-import { installMcpVisibilityFilter } from './filter'
+import { installMcpVisibilityFilter, type AssemblyGate } from './filter'
 import type { McpControlCtx, McpCallController } from './mcpcall'
-import { createMcpCallController, installMcpControlTools } from './mcpcall'
-
-export { normalizeToolName, normalizeArguments, msgOf } from './mcpcall'
+import { createMcpCallController, installMcpControlTools, inventoryTraceDiag } from './mcpcall'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
+import { standingMcpEntries, findStandingEntryByServer, installedMcpRows } from './standing-rows'
+import { createGatewayState, disposeGatewayState, disposeGatewayStateSync, ensureOpenMounts } from './gateway'
+
+export { normalizeToolName, normalizeArguments, msgOf, gatewayCall } from './mcpcall'
+export type { GatewayCallOpts, GatewayCallState } from './mcpcall'
+// 中间层控制工具名（命名前缀铁律见 mcpcall.ts：不得以 mcp_ 开头）
+export { MCP_SEARCH_TOOL, MCP_CALL_TOOL, CONTROL_TOOL_NAMES } from './mcpcall'
+// 空查能力摘要表的口径文案（selftest 回归护栏：G3 —— hideAll 下不得宣称「对模型可见」）
+export { buildSummaryHeader } from './mcpcall'
 import type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
 import { createDomainCaches, getSchemasView, resolveCollectScopeKey, type DomainCaches } from './collect'
-import { listPresetMcpRows } from './preset-mcp'
-import { makeRoutes } from './routes'
-import { readState, writeState, setStateAiOwner, clearStateAiOwner } from './state'
+import { findPresetRowByServerName, type PresetMcpRow } from './preset-mcp'
+import { makeRoutes, setRowConfigApplyHook } from './routes'
+import { readState, writeState, setStateAiOwner, clearStateAiOwner, stateAutoManageByRoute, stateMiddleLayerHides } from './state'
+import { installRouteServices, resolveRoute, routeDecision, type RouteDecision, type RouteServices } from './model-route'
 import { syncPresetFiles } from './preset'
 import { applyPendingMcp } from './pending'
 import { installProjectMcp, rebuildOwnersFromState } from './project-mcp'
@@ -54,20 +63,79 @@ import { messageOf } from './util'
 export type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
 export type { DomainCaches } from './collect'
 // schemas 视图合并 + 状态徽标判定（selftest 回归护栏）
-export { mergeSchemas, computeStatus } from './collect'
+export { mergeSchemas, computeStatus, rowDisplay } from './collect'
 // 预设文件文本操作（selftest 回归护栏 + 潜在外部复用）
 export { setRowFlag, setSkillFlag, rowDisabledState, syncPresetFiles, isValidSkillName, buildSkillMd } from './preset'
 // 项目 MCP 扫描（selftest 回归护栏：根目录先读、子目录覆盖的去重规则）
 export { scanWorkspaceMcp } from './project-mcp'
 // 项目 MCP 运行时装配（外部复用/端到端验证：手动安装、按工作空间重扫、owner 查询）
 export { installProjectMcp, remountWorkspace, projectServerOwner, projectServerName } from './project-mcp'
-export { readState, writeState } from './state'
+// P4 网关常驻态（自测回归护栏：挂载决策/视野隔离/自检断言纯逻辑）
+export { createGatewayState, isolateChildScope, decideMount, checkChildVisible, disposeGatewayState, disposeGatewayStateSync, ensureOpenMounts, gatewayEntryId, gatewayServerOfEntryId, GATEWAY_ENTRY_PREFIX } from './gateway'
+export type { GatewayState, EnsureOpenMountsResult } from './gateway'
+
+/** P5（D5）：/debug 只读网关挂载面（无 secrets）。模块级单例由 apply 赋值。 */
+import type { GatewayState as GatewayStateType } from './gateway'
+
+let debugGatewayState: GatewayStateType | null = null
+
+export function gatewayStateForDebug(): { mounted: string[]; lastCheck: GatewayStateType['lastCheck'] } {
+  if (!debugGatewayState) return { mounted: [], lastCheck: null }
+  return { mounted: [...debugGatewayState.mounts.keys()].sort(), lastCheck: debugGatewayState.lastCheck }
+}
+
+/**
+ * 0.5.8：/debug 只读曝光「临时启用控制器」的内部状态。
+ *
+ * 取证教训（0.5.7 首次实测「拉起后是否自动回收」）：当时只有「最终没关」这一个
+ * 事实，看不到 aiEnabled 集合是否真的收下了这个 server，也看不到回收器每轮的
+ * 判定输入，导致一轮实验不可判。此函数与 `reaperDiagnostics()` 一起把那条链
+ * 全部落成读数：`aiOwned`（回收器唯一作用域）+ 每轮 keepAliveMs/候选/跳过原因。
+ */
+let debugControllerStatus: (() => Array<{ server: string; refCount: number; lastUsed: number }>) | null = null
+
+export function controllerStatusForDebug(): {
+  aiOwned: Array<{ server: string; refCount: number; lastUsed: number; idleMs: number }>
+} {
+  if (!debugControllerStatus) return { aiOwned: [] }
+  const now = Date.now()
+  return { aiOwned: debugControllerStatus().map((row) => ({ ...row, idleMs: now - row.lastUsed })) }
+}
+
+/** 0.6.3：能力表采集的逐阶段痕迹（/debug 的 inventoryTrace）。 */
+export function inventoryTraceForDebug(): unknown {
+  return inventoryTraceDiag()
+}
+
+/** P5（W3）：/debug/collect 先挂载后快照的挂载入口（无 control 闭包时 no-op）。 */
+let debugEnsureOpenMounts: (() => Promise<unknown>) | null = null
+export function ensureOpenMountsForDebug(): Promise<unknown> {
+  if (!debugEnsureOpenMounts) return Promise.resolve(undefined)
+  return debugEnsureOpenMounts()
+}
+export { readState, writeState, stateAutoManageByRoute, stateMiddleLayerHides, stateToolBudget } from './state'
 // P1 会话边界：待生效队列与边界应用入口（selftest 直接测构建产物行为）
 export { applyPendingMcp, pendingMcp, pendingMcpCount, type PendingMcpEntry } from './pending'
 // 工具级禁用作用域（selftest 回归护栏：全局 vs 项目工作区隔离）
-export { loadDisabledTools, setToolDisabled, isToolDisabled, disabledToolsOf } from './tool-disable'
+export { loadDisabledTools, setToolDisabled, setToolsDisabledBulk, isToolDisabled, disabledToolsOf, resolveToolBulkTargets } from './tool-disable'
+export type { ToolBulkTargets } from './tool-disable'
 // rc.1 standing 组合 preset 行解析（selftest 回归护栏：parsePresetMcpText 文本抽取 + mcp-anki 例外）
-export { parsePresetMcpText } from './preset-mcp'
+export { parsePresetMcpText, findPresetRowByServerName, presetConfigOf } from './preset-mcp'
+export type { PresetMcpRow, PresetMcpClientConfig, PresetMcpParsed } from './preset-mcp'
+// 按模型分流（selftest 回归护栏：三级回退 + 查表优先级）
+export { resolveRoute, routeDecision, routeKey, type ModelRoute, type RouteDecision } from './model-route'
+// 面板 /models 数据源的纯逻辑（selftest 护栏：TTL 判定 + 三条降级路径）与
+// /state、/models 共用的判定投影。导出理由同 model-route：routes.ts 被 tsdown
+// 打进 index 的 bundle，selftest 只能经构建产物 index 取用。
+export { activeRouteView, fetchProviderCatalog, modelsCacheFresh, type ActiveRouteView, type ProviderCatalogEntry } from './model-route'
+// /models 的目录缓存实现（TTL + 单飞）在 routes.ts（与端点同文件、与 MODELS_TTL_MS
+// 同处）；导出它纯粹是为了 selftest 能断言「并发共享同一次抓取」——缓存是模块级
+// 状态，没有 Node 侧的第二个入口。__resetModelsCache 是它的失效出口（自测专用）。
+export { modelsCatalog, __resetModelsCache } from './routes'
+// 装配可见性过滤（selftest 回归护栏：G1 控制工具只投放给 gate 打开的模型 + G3 hideAll 语义）。
+// 导出理由：filter.ts 被 tsdown 打进带哈希的 chunk（lib/mcpcall-*.mjs），selftest 无法按路径 import，
+// 只能经构建产物 index 取用 —— 与 model-route 的导出同法。
+export { installMcpVisibilityFilter, type AssemblyGate } from './filter'
 
 export const name = 'runtime-inventory'
 
@@ -81,7 +149,7 @@ export interface Config {
   autoManage?: boolean
   /** 保活回收窗口（ms）。默认 30_000。 */
   keepAliveMs?: number
-  /** mcp_search 缺省 top-K。默认 5。 */
+  /** mcp_search 缺省 top-K。默认 8（P3 网关定稿；线3 bench 平均 tok 最小拐点）。 */
   searchLimitDefault?: number
   /** mcp_search top-K 上限。默认 10。 */
   searchLimitMax?: number
@@ -90,10 +158,10 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
-  autoManage: Schema.boolean().description('MCP 中间层控制（停用的 MCP 经 mcp_search/mcp_call 按需调用）').default(false),
+  autoManage: Schema.boolean().description('MCP 中间层控制（停用的 MCP 经 dsh_mcp_search/dsh_mcp_call 按需调用）').default(false),
   keepAliveMs: Schema.number().min(1000).description('MCP 保活空闲回收窗口（ms）').default(30_000),
-  searchLimitDefault: Schema.number().min(1).description('mcp_search 缺省 top-K').default(5),
-  searchLimitMax: Schema.number().min(1).description('mcp_search top-K 上限').default(10),
+  searchLimitDefault: Schema.number().min(1).description('dsh_mcp_search 缺省 top-K').default(8),
+  searchLimitMax: Schema.number().min(1).description('dsh_mcp_search top-K 上限').default(10),
   serverSummary: Schema.dict(Schema.string()).description('MCP 能力摘要表（serverName → 一句话）'),
 })
 
@@ -118,10 +186,42 @@ export interface CatalogRuntime {
   persisting: boolean
   /** 磁盘加载是否已完成（完成前跳过采集，防止空快照覆盖磁盘 last-good）。 */
   loaded: boolean
-  /** AI 中间层当前生效状态（面板开关可动态切换）。 */
+  /** AI 中间层总开关当前值（面板可动态切换）。 */
   autoManage: boolean
-  /** 动态切换 AI 中间层（过滤 + mcp_search/mcp_call + 回收器）。 */
-  applyAutoManage: (on: boolean) => void
+  /** 按模型覆盖表当前值（键为 provider 或 provider/model；P3b）。 */
+  autoManageByRoute: Record<string, boolean>
+  /** 中间层生效时隐藏哪些 server：'disabled'=仅手动停用的（默认）；'all'=全部 MCP。 */
+  middleLayerHides: 'disabled' | 'all'
+  /**
+   * 中间层是否**已实际挂载**（过滤 + 控制工具 + 回收器装上了）。
+   *
+   * 与 autoManage 总开关不是一回事：总开关关但覆盖表里有 true 项时仍会挂载
+   * （见 {@link autoManageNeeded}）。G2 的不变量：任一会话 `decisionFor(agent).on`
+   * 为真 ⇒ 本字段必为真；挂载失败时会被强制回落（见 applyAutoManage 的 catch）。
+   */
+  autoManageMounted: boolean
+  /**
+   * 动态应用 AI 中间层配置（过滤 + 控制工具 + 回收器）。
+   *
+   * 挂载条件 = 总开关 on **或**覆盖表里存在 true 项（{@link autoManageNeeded}）；
+   * 具体某次装配是否生效由 {@link CatalogRuntime.decisionFor} 按模型路由决定。
+   * 省略 byRoute/hides 时沿用当前值（`/config` 部分字段更新用）。
+   */
+  applyAutoManage: (on: boolean, byRoute?: Record<string, boolean>, hides?: 'disabled' | 'all') => void
+  /**
+   * 某 agent（缺省=当前解析不到）当前的中间层判定，面板与诊断共用。
+   *
+   * P3b：`routeDecision(resolveRoute(routeServices, agent), autoManage, autoManageByRoute)`
+   * —— 三级回退解析出的模型（provider/model）先查精确项、再查 provider 项、最后回退总开关。
+   * 服务缺失/诊断装配（无 agent）时静默降级，只走总开关（到位情况见 diag.routeServices）。
+   */
+  decisionFor: (agent: Agent | undefined) => RouteDecision
+  /**
+   * 可选服务 holder（sessionProjections / agentDefaultModel / llm），路由解析用。
+   * 漏掉任一服务时 resolveRoute 静默降级（只走剩下的回退级），故到位情况必须
+   * 可见 —— 见 diag.routeServices（/debug 原样回显）。
+   */
+  routeServices: RouteServices
   /** 最近一次成功写盘时间（防抖合并用）。 */
   lastPersistAt: number | null
   /** 防抖挂起的写盘 timer（ctx.timeout 创建，ctx 销毁自动清理）。 */
@@ -141,6 +241,19 @@ export interface CatalogRuntime {
     lastAgentList: number | null
     loadedAt: number | null
     loadedServers: number | null
+    /**
+     * C1（评审风险 1）：路由服务（sessionProjections / agentDefaultModel / llm）
+     * 是否**已到位**。三者任一缺失时按模型分流会静默降级为只看总开关（无报错），
+     * 所以必须在 /debug 的返回里显式回显（/debug 的 `diag` 段原样回传本对象）。
+     */
+    routeServices: { projections: boolean; defaultModel: boolean; llm: boolean }
+    /**
+     * P3b（评审 §6 风险 5 / G2）：中间层挂载态与路由配置的**当下**读数。
+     * getter 而非快照 —— applyAutoManage 可被 /config 动态调用，/debug 每次读到的
+     * 必须是当时的值。与 /debug 里并列的 `gateway.mounted`（网关实际拉起的行）配合，
+     * 即可核对「needed 与网关挂载态一致」：mounted=true 时 gateway.mounted 才有意义。
+     */
+    middleware: { mounted: boolean; master: boolean; byRoute: Record<string, boolean>; hides: 'disabled' | 'all' }
   }
 }
 
@@ -150,7 +263,10 @@ function findMcpEntry(ctx: Context, serverName: string): Entry | undefined {
     if (!isMcpEntry(entry)) continue
     if (serverNameOf(entry) === serverName) return entry
   }
-  return undefined
+  // 0.5.7：preset 行的真句柄来源（dsh 0.1.2-rc.1 起 preset 行不在 loader 可达域）。
+  // 这一处兜底同时救活三条通路：面板 toggle 的 entry.update、mcp_call 的
+  // ensureEnabled（临时拉起关着的行）、startIdleReaper（用完即关）。
+  return findStandingEntryByServer(serverName)
 }
 
 /** server 自己的注册/调用超时阈值。 */
@@ -249,10 +365,17 @@ async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime, caches: Do
     }
     runtime.diag.lastMcpTools = mcpTools
     runtime.diag.lastScope = mcpTools > 0
-    for (const entry of ctx.loader.entries()) {
+    // 0.6.5：采集循环同样要覆盖 preset 行。原实现只见 loader 行（`ctx.loader.entries()`），
+    // 而 preset 行挂在 standing 组合 → 永远采不到 → 面板上"关掉的 server"在 catalog 里
+    // 没有快照（实测：snapshotEnabled 能看到 57 个 MCP 工具，却从不为 calcmcp 写一条）。
+    // 先合并两侧行、按 serverName 去重，再对**运行中的行**采快照（行级 enabled 语义不变）。
+    const rowsByName = new Map<string, Entry>()
+    for (const entry of [...ctx.loader.entries(), ...standingMcpEntries()]) {
       if (!isMcpEntry(entry)) continue
+      if (!rowsByName.has(serverNameOf(entry))) rowsByName.set(serverNameOf(entry), entry)
+    }
+    for (const [serverName, entry] of rowsByName) {
       if (entry.disabled) continue
-      const serverName = serverNameOf(entry)
       let tools: CatalogEntry[]
       try {
         tools = snapshotFromSchemas(schemas, serverName)
@@ -271,8 +394,13 @@ async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime, caches: Do
     // 失效清理（v0.4.5 → v0.4.6 修复）：
     // 保护：loader 视图为空（组合未挂载 / 启动时序 / realm 隔离异常）时跳过 prune，
     // 绝不删除 last-good —— 0.4.5 曾因 alive 集合为空把 catalog 全部清空并写盘。
+    //
+    // 0.6.0 修复：「alive」从 loader 行扩到**已安装行（loader ∪ standing）**。
+    // 原实现只看 loader，而 preset 行不在 loader 里 → 用户关掉一行后它立刻掉出
+    // alive → 快照被 prune 删掉 → mcp_search 再也搜不到（P1 实验失败的直接机制）。
+    // 现在只要配置里还有这一行就保留快照，关掉只是"不运行"，不代表"没安装"。
     const alive = new Set<string>()
-    for (const entry of ctx.loader.entries()) {
+    for (const entry of [...ctx.loader.entries(), ...standingMcpEntries()]) {
       if (!isMcpEntry(entry)) continue
       alive.add(serverNameOf(entry))
     }
@@ -301,12 +429,40 @@ async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime, caches: Do
 function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config, caches: DomainCaches): McpControlCtx {
   // 默认值与 Config schema 的 .default() 一致：schema 生效后 config 必有值，
   // ?? 是「config 未经 schema 直接传入」时的防御性兜底（P2-10 收敛说明）。
-  // preset 超时缓存（presetId+serverName → 超时/ms，有效 60s）：inventory+resolve+read
-  // 每次 mcp_call 都做太重，key 含 presetId（切 preset 即换 key，天然失效）。
-  const presetTimeoutCache = new Map<string, { at: number; timeout: number | undefined }>()
+  // preset 行缓存（presetId+serverName → standing 行，有效 60s）：inventory+
+  // resolve+read 每次 mcp_call 都做太重，key 含 presetId（切 preset 即换 key，
+  // 天然失效）。resolvePresetRow 与 presetTimeoutMs 共用同一缓存条目。
+  // 注意（WARN-2）：disabled/running 快照最长过期 60s；面板开关后同会话重试
+  // 可能仍按旧快照放行/拒绝（fail-closed 方向：开→关走超时失败，关→开被误拒），
+  // 下次会话/60s 后收敛。上限 500 条防异常 server 名撑大（含 ghost 负缓存）。
+  const presetRowCache = new Map<string, { at: number; row: PresetMcpRow | undefined }>()
+  const cachedPresetRow = async (
+    agent: Agent | undefined,
+    serverName: string,
+  ): Promise<PresetMcpRow | undefined> => {
+    try {
+      const live = agent ?? ctx.agents.roots()[0] ?? ctx.agents.list()[0]
+      const presetId = live ? (ctx.agentPresets.composedPreset(live.ctx) ?? null) : null
+      if (!presetId) return undefined
+      const key = `${presetId}\0${serverName}`
+      const hit = presetRowCache.get(key)
+      if (hit && Date.now() - hit.at < 60_000) return hit.row
+      const row = await findPresetRowByServerName(ctx, presetId, serverName)
+      presetRowCache.set(key, { at: Date.now(), row })
+      // 有界：异常 server 名高频 miss 时 ghost 负缓存不无限膨胀
+      if (presetRowCache.size > 500) {
+        const oldest = presetRowCache.keys().next()
+        if (!oldest.done) presetRowCache.delete(oldest.value)
+      }
+      return row
+    } catch {
+      return undefined
+    }
+  }
   return {
     keepAliveMs: config.keepAliveMs ?? 30_000,
-    searchLimitDefault: config.searchLimitDefault ?? 5,
+    // P3 定稿：searchLimitDefault=8/searchLimitMax=10（与 Config schema .default() 一致）。
+    searchLimitDefault: config.searchLimitDefault ?? 8,
     searchLimitMax: config.searchLimitMax ?? 10,
     serverSummary: config.serverSummary ?? {},
     getCatalog: () => runtime.catalog,
@@ -316,20 +472,28 @@ function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config, 
     persistCatalog: () => persistCatalog(() => ctx, runtime),
     resolveEntry: (serverName) => findMcpEntry(ctx, serverName),
     serverTimeoutMs: (serverName) => serverTimeoutMs(ctx, serverName),
-    presetTimeoutMs: async (serverName) => {
-      // rc.1 standing 组合兜底（窄场景）：仅 loader 有行但缺 toolCallTimeoutMs 时补读；
-      // loader 无行的 mcp_call 预设行仍返回「不在 loader 中」（预设行直通是后续修复）。
+    // 0.5.6 预设行直通：call() 在 loader miss 时按 serverName 找当前会话
+    // preset 的 standing 行（调用方 agent 优先，无则 roots[0]/list[0]，
+    // 与 collect.ts:127-136 resolveAgent 同规则；差异：collect 侧 agent 缺席
+    // 时 presetId 直接 null，本处回落 roots[0]/list[0] 的 agent）。禁用的预设行由调用方拒绝，
+    // 这里只做定位（返回 disabled/running 快照供调用方判定）。
+    resolvePresetRow: async (serverName, agent) => cachedPresetRow(agent, serverName),
+    // P1 直读：同一缓存条目透出全量挂载 config（网关 P4 重建 client 行用）。
+    resolvePresetConfig: async (serverName, agent) => {
       try {
-        const agent = ctx.agents.roots()[0] ?? ctx.agents.list()[0]
-        const presetId = agent ? (ctx.agentPresets.composedPreset(agent.ctx) ?? null) : null
-        if (!presetId) return undefined
-        const key = `${presetId}\0${serverName}`
-        const hit = presetTimeoutCache.get(key)
-        if (hit && Date.now() - hit.at < 60_000) return hit.timeout
-        const { rows } = await listPresetMcpRows(ctx, presetId)
-        const timeout = rows.find((r) => r.serverName === serverName)?.toolCallTimeoutMs
-        presetTimeoutCache.set(key, { at: Date.now(), timeout })
-        return timeout
+        const row = await cachedPresetRow(agent, serverName)
+        return row?.config
+      } catch {
+        return undefined
+      }
+    },
+    presetTimeoutMs: async (serverName) => {
+      // rc.1 standing 组合兜底：loader 有行但缺 toolCallTimeoutMs 时补读；
+      // loader 无行的已启用预设行由 call() 预设直通分支处理（含超时直取），
+      // 这里保留作 loader 行的超时补读（与 resolvePresetRow 共行来源）。
+      try {
+        const row = await cachedPresetRow(undefined, serverName)
+        return row?.toolCallTimeoutMs
       } catch {
         return undefined
       }
@@ -337,10 +501,69 @@ function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config, 
     setAiOwner: (entryId, at) => setStateAiOwner(entryId, at),
     clearAiOwner: (entryId) => clearStateAiOwner(entryId),
     snapshotEnabled: () => snapshotEnabled(ctx, runtime, caches),
+    requestSnapshot: () => snapshotEnabled(ctx, runtime, caches),
+
+    /**
+     * 0.6.0：按需采集能力表（mcp_search 命中「已安装但无快照」的关闭行时）。
+     * 行此刻已被调用方临时拉起，这里只负责采 schema 快照 + 落 catalog.json。
+     */
+    collectInventory: async (serverName) => {
+      const schemas = await resolveScopeSchemas(ctx, caches)
+      const tools = snapshotFromSchemas(schemas, serverName)
+      if (tools.length === 0) return null
+      const next = { ...runtime.catalog, [serverName]: { tools, fetchedAt: Date.now(), source: 'live' as const } }
+      runtime.catalog = next
+      runtime.dirty = true
+      void persistCatalog(() => ctx, runtime)
+      return { tools: tools.length, joined: false }
+    },
+
+    /** 0.6.0：已安装的 MCP server 清单（含用户关闭的，来自 standing 树）。 */
+    installedInventory: () => installedMcpRows().map((row) => ({ server: row.serverName, open: row.open })),
+
+    /**
+     * P3b（G3 / 评审风险 7）：中间层隐藏范围的**当下值**（函数式读取，非快照 ——
+     * /config 可动态切换）。能力摘要表按它换口径，否则摘要会宣称 server
+     * 「已打开并对模型可见」，与 hideAll 下本次装配的实际可见性直接矛盾。
+     */
+    middleLayerHides: () => runtime.middleLayerHides,
+
+    /**
+     * 0.6.2：由调用方（命中视图）采到的 schema 落 catalog —— **首选**采集路径。
+     * 0.6.1 的采空 bug 正是口径不一致所致（见 mcpcall.ts collectInventory 注释），
+     * 这里只做过滤与落盘，采集口径由调用方给定。
+     */
+    storeInventory: async (serverName, schemas) => {
+      const tools = snapshotFromSchemas(schemas, serverName)
+      if (tools.length === 0) return null
+      runtime.catalog = { ...runtime.catalog, [serverName]: { tools, fetchedAt: Date.now(), source: 'live' as const } }
+      runtime.dirty = true
+      void persistCatalog(() => ctx, runtime)
+      return { tools: tools.length, joined: false }
+    },
   }
 }
 
 /* ── 插件主体 ──────────────────────────────────────────────────────────── */
+
+/**
+ * 中间层是否需要挂载（P3b；评审 §3-G 第 5 条 / §3-I）。
+ *
+ * 挂载条件不是「总开关 on」而是「有任何模型可能用到」：总开关关 + `grok: true`
+ * 也必须挂 —— 控制工具注册表是进程级的一份，不挂的话覆盖项永远无法生效
+ * （被覆盖的模型会看到 dsh_mcp_search，但 preset 关态行拉不起来）。
+ *
+ * G2 一致性不变量（由 selftest 穷举 master × 覆盖表 × 模型验证）：
+ * 任一会话 `routeDecision(...).on === true` ⇒ 本函数必为 true。
+ * 两者读的是同一份输入（master + 覆盖表），所以只要挂载不失败就不会出现
+ * 「gate 打开但网关没挂」；挂载失败时 applyAutoManage 会把覆盖表清空兜住。
+ * @param master - 总开关（state.json 的 config.autoManage）。
+ * @param byRoute - 覆盖表（键为 provider 或 provider/model）。
+ * @returns 是否需要挂载中间层。
+ */
+export function autoManageNeeded(master: boolean, byRoute: Readonly<Record<string, boolean>>): boolean {
+  return master || Object.values(byRoute).some((value) => value === true)
+}
 
 export function apply(ctx: Context, config: Config = {}): void {
   // 启动早期加载 MCP 工具级禁用集合（memory Map，装配过滤同步读）。
@@ -358,6 +581,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   // 启动早期物化 MCP 启停意图（仅当无会话在跑时；有会话则下次重启再物化）。
   // 不阻塞 apply；失败只记日志，不拖累插件挂载。
+  // 0.6.0：同一管线也物化「更多配置」改过的挂载配置（见 preset.syncPresetFiles 的 config 段）。
   void syncPresetFiles(ctx).then(
     (count) => {
       if (count > 0) ctx.logger.info(`runtime-inventory: materialized ${count} MCP row state(s) into preset composition`)
@@ -366,6 +590,20 @@ export function apply(ctx: Context, config: Config = {}): void {
       ctx.logger.warn(`runtime-inventory: preset sync skipped: ${messageOf(error)}`)
     },
   )
+
+  // 0.6.0「更多配置」的热应用钩子：路由层不碰 loader，经此改 live entry 的 config。
+  // 实测依据（2026-09-13）：entry.update({ config }) 在 standing 行上干净生效、不丢行、1.2s。
+  // 与写预设文件是两件事——意图落盘 + 启动物化才是持久化路径（铁律不破）。
+  setRowConfigApplyHook(async (server, nextConfig) => {
+    const entry = findStandingEntryByServer(server)
+    if (!entry) return { ok: false, error: `standing 行未找到：${server}` }
+    try {
+      await entry.update({ config: nextConfig })
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: messageOf(error) }
+    }
+  })
 
   // 私有 catalog 内存态（面板联动 + 中间层共用）：采集对两种模式都启用（只读、
   // 无模型影响），autoManage=false 时仅面板停用态显示目录工具数。
@@ -376,7 +614,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     loaded: false,
     // 初始值由下方 applyAutoManage 赋值（control/controller 构建后）
     autoManage: false,
+    autoManageByRoute: {},
+    middleLayerHides: 'disabled',
+    autoManageMounted: false,
     applyAutoManage: () => {},
+    // 初始值由下方 installRouteServices / decisionFor 赋值（服务 holder 建立后）
+    decisionFor: () => ({ on: false, source: 'master', route: undefined }),
+    routeServices: {},
     lastPersistAt: null,
     persistTimer: undefined,
     tokenCache: new Map(),
@@ -392,6 +636,26 @@ export function apply(ctx: Context, config: Config = {}): void {
       lastAgentList: null,
       loadedAt: null,
       loadedServers: null,
+      // getter 而非快照：ctx.inject 的回调可能晚于 apply 落地（服务随宿主插件
+      // 注册才出现），/debug 每次读都要看到**当下**的到位情况。
+      get routeServices() {
+        const holder = catalogRuntime.routeServices
+        return {
+          projections: holder.projections !== undefined,
+          defaultModel: holder.defaultModel !== undefined,
+          llm: holder.llm !== undefined,
+        }
+      },
+      // G2 读数（getter，同上理由）：/debug 里与 gateway.mounted 并列，供人工核对
+      // 「needed（mounted）与网关实际挂载态一致」。
+      get middleware() {
+        return {
+          mounted: catalogRuntime.autoManageMounted,
+          master: catalogRuntime.autoManage,
+          byRoute: { ...catalogRuntime.autoManageByRoute },
+          hides: catalogRuntime.middleLayerHides,
+        }
+      },
     },
   }
   // 启动早期加载持久化 catalog（last-good 兜底）；失败置空不阻塞。
@@ -473,49 +737,124 @@ export function apply(ctx: Context, config: Config = {}): void {
   // 装配可见性（v0.4.2+）：每回合构建一次 server → 可见性 Map（单次 loader 遍历），
   // 过滤时 O(1) 查表。用户打开的 server 可见（disabled=false 且非 AI 临时启用）；
   // 停用或 AI 临时启用的 server 对模型过滤，经 mcp_search/mcp_call 按需调用。
+  // P5（D3）：网关 gw- 行是 loader 常驻行，open（!disabled）天然可见——无需显式 put；
+  // closed 行无实例即无工具（filter ??true 兜底仅影响畸形名，不影响 closed 行）。
   const buildVisibility = (): ReadonlyMap<string, boolean> => {
     const map = new Map<string, boolean>()
-    for (const entry of ctx.loader.entries()) {
-      if (!isMcpEntry(entry)) continue
+    // 0.5.7 修：原先只遍历 ctx.loader.entries()，而 preset 行（dsh 0.1.2-rc.1 起挂在
+    // standing 组合）不在其中 → map 恒空 → filter.ts 的 `?? true` 兜底放行全部 MCP 工具
+    // → 可见性层整体空转（实测 globalMcpTools=0 / scopedMcpTools=30 即此现场）。
+    // 现在改为「loader 行 ∪ standing 行」并集；行的 disabled 仍是唯一事实源。
+    const put = (entry: Entry): void => {
+      if (!isMcpEntry(entry)) return
       const serverName = serverNameOf(entry)
-      map.set(serverName, !entry.disabled && !controller.isAiEnabled(serverName))
+      const visible = !entry.disabled && !controller.isAiEnabled(serverName)
+      // 同一 serverName 出现多次时「隐藏优先」：同 scope 内重复注册本就不合法，
+      // 真出现时保守取不可见，避免把已停用的 server 工具放给模型。
+      const prev = map.get(serverName)
+      map.set(serverName, prev === undefined ? visible : prev && visible)
     }
+    for (const entry of ctx.loader.entries()) put(entry)
+    for (const entry of standingMcpEntries()) put(entry)
     return map
   }
+  // 按模型分流（P3a 接线 + P3b 判定）：可选服务 holder + 每次装配的判定入口。
+  // 服务缺失（三个字段任一 undefined）时静默降级 —— 到位情况见 diag.routeServices。
+  const routeServices = installRouteServices(ctx)
+  catalogRuntime.routeServices = routeServices
+  // P3b：判定 = 三级回退解出模型 → 查覆盖表（provider/model → provider）→ 总开关。
+  // 空覆盖表时与旧行为逐字等价（只看总开关），故升级零配置零行为变化。
+  catalogRuntime.decisionFor = (agent: Agent | undefined): RouteDecision =>
+    routeDecision(resolveRoute(routeServices, agent), catalogRuntime.autoManage, catalogRuntime.autoManageByRoute)
+  // 装配期 gate：每次装配按**该会话的模型**决定控制工具投放与否 + 隐藏范围。
+  // 读的是运行时字段（非快照），所以 /config 改覆盖表后无需重挂即对下一轮生效。
+  const gateFor = (agent: Agent | undefined): AssemblyGate => ({
+    on: catalogRuntime.decisionFor(agent).on,
+    hideAll: catalogRuntime.middleLayerHides === 'all',
+  })
   let autoDisposers: Array<() => void> = []
-  catalogRuntime.applyAutoManage = (on: boolean) => {
+  // P4 网关常驻态：随 autoManage 开关创建/释放（restrict lift + mounts 清理，
+  // 不碰 standing 本体，靠 fiber unwind）。
+  // P5（B2/D1）：gw- 行建在 loader root 树，fiber 不回收——关闭/卸载走 dispose
+  // 同步释放（fire-and-forget remove）；开启走 ensureOpenMounts 挂载 open 行。
+  const gatewayState = createGatewayState()
+  debugGatewayState = gatewayState
+  debugControllerStatus = () => controller.status()
+  debugEnsureOpenMounts = () => ensureOpenMounts({ ctx, control, state: gatewayState })
+  // BLOCK-1（评审 §4）：本函数**整段手工重写**，不套 PR 的 hunk —— PR hunk 的上下文里
+  // 没有本分支的 disposeGatewayStateSync 与 ensureOpenMounts 两行，接受 theirs 会让
+  // 网关 restrict 不 lift、gw- 行不 remove（0.1.0 旧代实例冲突事故形态），且 preset
+  // 关态行永远拉不起来。逐项并集见下：
+  //   ① disposeGatewayStateSync 保留在最前；
+  //   ② needed（{@link autoManageNeeded}）取代原来的布尔 on 作挂载条件；
+  //   ③ installMcpVisibilityFilter 多传 gateFor（按模型分流）；
+  //   ④ installMcpControlTools → reaper → autoDisposers = disposers（顺序不动）；
+  //   ⑤ autoManageMounted 在挂载成功后置位；
+  //   ⑥ ensureOpenMounts 保持在 needed 分支尾部。
+  catalogRuntime.applyAutoManage = (on: boolean, byRoute?: Record<string, boolean>, hides?: 'disabled' | 'all') => {
     for (const d of autoDisposers) d()
     autoDisposers = []
+    disposeGatewayStateSync(ctx, gatewayState)
     catalogRuntime.autoManage = on
-    if (!on) return
+    if (byRoute !== undefined) catalogRuntime.autoManageByRoute = byRoute
+    if (hides !== undefined) catalogRuntime.middleLayerHides = hides
+    // 挂载条件不是「总开关 on」而是「有任何模型可能用到」：总开关关 + grok:true
+    // 也要挂，否则覆盖项永远无法生效（控制工具注册表是进程级的一份）。
+    const needed = autoManageNeeded(on, catalogRuntime.autoManageByRoute)
+    catalogRuntime.autoManageMounted = false
+    if (!needed) return
     const disposers: Array<() => void> = []
     try {
-      disposers.push(installMcpVisibilityFilter(ctx, buildVisibility))
+      disposers.push(installMcpVisibilityFilter(ctx, buildVisibility, gateFor))
       disposers.push(installMcpControlTools(ctx, control, controller))
       const offReaper = controller.startIdleReaper()
       disposers.push(() => offReaper())
     } catch (error) {
       for (const d of disposers) d()
       catalogRuntime.autoManage = false
+      // G2：挂载失败时不得留下能把 gate 打开的覆盖项 —— 否则出现「覆盖项 true 但网关
+      // 未挂」：被覆盖的模型拿到 gate 打开的装配（控制工具投放），而 preset 关态行
+      // 拉不起来。清空覆盖表让 decisionFor 恒回退到已置 false 的总开关，
+      // 与 autoManageMounted=false 严格一致（state.json 里的用户意图不动）。
+      catalogRuntime.autoManageByRoute = {}
       ctx.logger.warn(`mcp-skill-panel: autoManage enable failed: ${messageOf(error)}`)
       return
     }
     autoDisposers = disposers
+    catalogRuntime.autoManageMounted = true
+    // P5：open 行网关挂载（fire-and-forget；失败记 lastCheck + errors，不抛）。
+    // 必须在 needed 分支尾部：preset 关态行靠它拉起（BLOCK-1 第 6 项）。
+    void ensureOpenMounts({ ctx, control, state: gatewayState }).catch((error: unknown) => {
+      ctx.logger.warn(`mcp-skill-panel: gateway ensureOpenMounts failed: ${messageOf(error)}`)
+    })
   }
   // 插件卸载兜底：释放当前挂载的中间层（effect disposer 手动调用后 fiber 卸载不再重复）。
   ctx.effect(
     () => () => {
       for (const d of autoDisposers) d()
+      disposeGatewayStateSync(ctx, gatewayState)
     },
     'mcp-skill-panel: autoManage teardown',
   )
   // 初始：config 默认 → state.json 的面板值覆盖（异步，立即生效）。
-  catalogRuntime.applyAutoManage(Boolean(config.autoManage))
+  catalogRuntime.applyAutoManage(Boolean(config.autoManage), {}, 'disabled')
+  // 去冗余重挂（保留分支原语义）：state.json 的 (总开关, 覆盖表, 隐藏范围) 与刚应用的
+  // 三元组完全相同时不重挂 —— applyAutoManage 会 dispose/register 控制工具 → tools/change
+  // → 全会话前缀 100% miss（评审 §3-I 红线）。PR 在此处是无条件重挂，移植时改回守卫。
+  let appliedKey = JSON.stringify([Boolean(config.autoManage), {}, 'disabled'])
   void readState().then((state) => {
-    if (typeof state.config?.autoManage === 'boolean' && state.config.autoManage !== Boolean(config.autoManage)) {
-      catalogRuntime.applyAutoManage(state.config.autoManage)
-      ctx.logger.info(`mcp-skill-panel: autoManage = ${state.config.autoManage} (from panel state)`)
-    }
+    const master = typeof state.config?.autoManage === 'boolean' ? state.config.autoManage : Boolean(config.autoManage)
+    const byRoute = stateAutoManageByRoute(state)
+    const hides = stateMiddleLayerHides(state)
+    const key = JSON.stringify([master, byRoute, hides])
+    if (key === appliedKey) return
+    appliedKey = key
+    catalogRuntime.applyAutoManage(master, byRoute, hides)
+    const overrides = Object.keys(byRoute).length
+    ctx.logger.info(
+      `mcp-skill-panel: autoManage = ${master}, hides = ${hides}` +
+        `${overrides > 0 ? ` (+${overrides} per-model override(s))` : ''} (from panel state)`,
+    )
   })
 
   // P1 会话边界生效（v0.5.0）：next-session 模式下，新会话首次请求前应用待生效队列。

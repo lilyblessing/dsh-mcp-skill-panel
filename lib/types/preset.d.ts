@@ -17,6 +17,39 @@ import type { Context } from '@deepseek-ai/cordis';
  * 下次启动被误判「外部修改」而删掉 state 条目（obsidian 设置丢失事故）。
  */
 export declare function setRowFlag(text: string, rowId: string, key: string, value: boolean): string;
+/**
+ * 0.6.0：在组合文件中对 `- id: <rowId>` 行做**任意标量键**的设置/删除（通用版 setRowFlag）。
+ *
+ * 为什么必须是文本编辑而不是 yaml.dump：预设文件里允许 `!!js` 表达式与注释，
+ * dump 会丢掉它们（setRowFlag 的注释已记录这条）。
+ *
+ * 关键语义：**只改 config: 块内的同名键**，不碰行级键（disabled/name 等）。
+ * 早先实现曾把 config 块挂到行级，本函数按缩进判别：
+ *   - config: 行缩进记为 base；
+ *   - 子键缩进 > base 即认为属于 config 块；
+ *   - 键是标量（单行 `key: value`）才替换，多行值（`|` / 嵌套 map）保守跳过并报错，
+ *     避免把用户的复杂配置改坏。
+ *
+ * @param set 要写入/覆盖的键（值须已序列化为 YAML 标量文本）
+ * @param remove 要删除的键
+ */
+export declare function setRowConfigKeys(text: string, rowId: string, set: Record<string, string>, remove?: string[]): string;
+/** 允许通过面板编辑的挂载配置键（与 mcp-convert.ts 的挂载形态一致）。 */
+export declare const EDITABLE_CONFIG_KEYS: readonly ["transport", "command", "args", "env", "cwd", "url", "headers", "toolCallTimeoutMs", "failOnStartupError"];
+/**
+ * 0.6.0：把配置值序列化成**单行 YAML**（写入预设文件用）。
+ *
+ * 保守策略：只在确认安全时才裸写，其余一律单引号包裹（YAML 单引号里 `'` 需写成 `''`）。
+ * 数组/对象用 flow 风格（与预设里既有的 `args: ['serve', '--mcp']` 一致）。
+ * `!!js` 表达式写回**标签形态**（与 dsh 自己的 `represent` 一致），不退化成
+ * `{ __jsExpr: ... }`：两者求值等价（`interpolate` 认 `__jsExpr` 键），但标签形态
+ * 保住文件原有写法，改配置不会把用户的表达式写成另一种方言。
+ */
+export declare function configValueToYaml(value: unknown): string;
+/** 把一组配置键/值转成 setRowConfigKeys 需要的「已序列化标量」形态。 */
+export declare function configSetToYaml(set: Record<string, unknown>): Record<string, string>;
+/** 把配置对象转成用于"是否已物化"比对的稳定文本（键排序，避免顺序抖动导致重复写）。 */
+export declare function configKeysToYamlText(config: Record<string, unknown>): string;
 /** SKILL.md frontmatter 的 disable-model-invocation 键注入/移除（kebab-case 是唯一合法形式）。 */
 export declare function setSkillFlag(text: string, value: boolean): string;
 /** skill 名是否合法（kebab-case，前端预校验与后端落盘共用）。 */

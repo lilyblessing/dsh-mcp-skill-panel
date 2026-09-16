@@ -15,6 +15,7 @@ import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
 import { isMcpEntry, serverNameOf } from './mcp-entry'
 import type { McpCallController } from './mcpcall'
 import { rowDisabledState } from './preset'
+import { findStandingEntryById, standingMcpEntries } from './standing-rows'
 import { readState, writeState, type StateFile } from './state'
 import { messageOf } from './util'
 
@@ -35,6 +36,20 @@ export interface PendingDeps {
 }
 
 /**
+ * 解析待生效意图对应的行句柄：loader 优先，preset 行回落 standing 树（0.5.7）。
+ * 两者都 miss 才视为行已失效（调用方清队列）。
+ */
+function resolvePendingEntry(ctx: Context, entryId: string): Entry | undefined {
+  try {
+    const entry = ctx.loader.resolve(entryId) as Entry | undefined
+    if (entry) return entry
+  } catch {
+    /* preset 行必然抛 "cannot resolve entry" → 走 standing 兜底 */
+  }
+  return findStandingEntryById(entryId)
+}
+
+/**
  * 应用整条待生效队列：对每项 entry.update(desired)；用户启用方向 markUserEnabled
  * （清 AI 标记 → 转为「用户打开」语义，回收器不再回收）。成功即从队列清除；
  * 失败保留（下个边界重试）。返回实际应用数。调用方负责收尾 single invalidateMcp。
@@ -45,9 +60,10 @@ export async function applyPendingMcp(deps: PendingDeps): Promise<number> {
   // ① 内存队列（本进程内 next-session 记下的意图）
   for (const [entryId, pending] of [...pendingMcp.entries()]) {
     try {
-      // loader.resolve 需要完整嵌套 id；行不存在/非 MCP 行时视为已失效，直接清队列
-      const entry = ctx.loader.resolve(entryId) as Entry
-      if (!isMcpEntry(entry)) {
+      // loader.resolve 需要完整嵌套 id；行不存在/非 MCP 行时视为已失效，直接清队列。
+      // 0.5.7：preset 行不在 loader 可达域，回落 standing 树句柄（否则意图永远应用不了）。
+      const entry = resolvePendingEntry(ctx, entryId)
+      if (!entry || !isMcpEntry(entry)) {
         pendingMcp.delete(entryId)
         continue
       }
@@ -84,7 +100,10 @@ async function applyStateResidue(deps: PendingDeps, state: StateFile | undefined
   let residueCleared = false
   // 按 file 分组：同一文件只读盘一次
   const byFile = new Map<string, { entry: Entry; rowState: NonNullable<NonNullable<StateFile['mcp']>[string]>[string] }[]>()
-  for (const entry of ctx.loader.entries()) {
+  // 0.5.7 修：原先只遍历 ctx.loader.entries()，preset 行不在其中 → 本函数对 preset 行
+  // **恒为 0 应用**，state.json 的 desired 永远悬着（实测 desired=false 而 disabled=false
+  // 并存）。改为「loader 行 ∪ standing 行」，行句柄一律来自 standing 树。
+  for (const entry of [...ctx.loader.entries(), ...standingMcpEntries()]) {
     if (!isMcpEntry(entry)) continue
     if (pendingMcp.has(entry.id)) continue
     const tree = entry.parent?.tree as { filename?: string } | undefined

@@ -7,7 +7,6 @@ export const en: Record<string, string> = {
   'ri.skillTab': 'Skills',
   'ri.refresh': 'Refresh',
   'ri.loading': 'Loading…',
-  'ri.error': 'Failed: {error}',
   'ri.empty': 'No data yet.',
   'ri.session': 'Session',
   'ri.preset': 'Preset',
@@ -15,8 +14,27 @@ export const en: Record<string, string> = {
   // stats
   'ri.statMcpServers': '{n} servers',
   'ri.statMcpDisabled': '{n} disabled',
-  'ri.statMcpTools': '{n} tools',
-  'ri.statMcpTokens': '~{n}k tokens',
+  // 有效统计 / 工具预算（0.6.0 移植 PR #17 特性 2/3）
+  // 口径纪律：这里是「工具级启用数」（扣掉工具级禁用），**不是**「实际进入上下文」——
+  // server 级隐藏（AI 临时启用 / hideAll）与 project-mcp 工作区过滤都未计入。
+  // 分母限定：`mcpToolsTotal` 只统计**已挂载 server** 的注册工具（走 schemas 注册表视图），
+  // 与行级计数器的目录快照分母不同源，故文案必须带上这个限定词（评审 cbc-N4 / 子代理 NIT-4）。
+  'ri.statMcpToolsEffective': '{enabled} / {total} MCP tools enabled (mounted servers only)',
+  'ri.statMcpTokensEffective': '~{enabled}k / ~{total}k tokens',
+  'ri.statToolsAll': '{n} tools total',
+  'ri.toolEnabledCaliber': 'Tools enabled at the tool level (disabled tools are dropped when the prompt is assembled). Server-level hiding and workspace filtering are not counted.',
+  'ri.budgetLabel': 'Tool budget',
+  'ri.budgetOver': '{used} / {budget} tools — over budget',
+  'ri.budgetOk': '{used} / {budget} tools',
+  'ri.budgetSet': 'Set',
+  'ri.budgetClear': 'Clear',
+  'ri.budgetInvalid': 'Enter a positive whole number (e.g. 350). Nothing was changed — use "Clear" to remove the budget.',
+  'ri.budgetHint':
+    'Some providers cap the number of tools per request (grok: ~350 — verify with your provider). Counts every tool in the request, not just MCP ones.',
+  'ri.budgetSourceRequest':
+    'Counted from the assembled tool list of this session\u2019s last logged request (real value, one turn behind).',
+  'ri.budgetSourceRegistry':
+    'No request logged yet — falling back to the tool registry, which does not subtract server-level hiding. Treat it as an estimate.',
   'ri.statSkills': '{n} skills',
   'ri.statSkillsVisible': '{n} model-visible',
   // mcp card
@@ -24,6 +42,9 @@ export const en: Record<string, string> = {
   'ri.statusDisabled': 'Disabled',
   'ri.statusIdle': 'No tools',
   'ri.statusFailed': 'Failed',
+  'ri.statusUnregistered': 'Not registered',
+  'ri.statusUnregisteredHint':
+    'The row is enabled and running but has registered 0 tools — the subprocess likely failed to start or is idling (e.g. a missing project index). Tools still listed below come from the cached catalog; dsh_mcp_call will retry once before failing.',
   'ri.toolsCount': '{n} tools',
   'ri.tokensCount': '~{n}k tokens',
   'ri.transport': 'transport',
@@ -41,8 +62,6 @@ export const en: Record<string, string> = {
   'ri.addMcpPreviewNames': 'Parsed',
   'ri.addMcpConfirm': 'Add',
   'ri.addMcpCancel': 'Close',
-  'ri.addMcpSuccess': 'Added {n} {target} MCP(s).',
-  'ri.addMcpSkipped': 'Skipped {n} (existing/failed): {names}',
   'ri.addMcpError': 'Failed: {error}',
   'ri.projectBadge': 'Project',
   // add skill (create skill modal)
@@ -58,14 +77,34 @@ export const en: Record<string, string> = {
   'ri.addSkillBodyPh': 'Define how the model behaves when this skill activates. e.g.\n# codemap\n## Commands\n## When to Use\n## Output Interpretation\n## Examples',
   'ri.addSkillConfirm': 'Create',
   'ri.addSkillCancel': 'Cancel',
-  'ri.addSkillSuccess': 'Skill created: {path}',
   'ri.addSkillError': 'Failed: {error}',
   'ri.toolListShow': 'Tools',
   'ri.toolListHide': 'Tools',
+  // more-config drawer (0.6.0)
+  'ri.moreConfig': 'More config…',
+  'ri.cfgTitle': 'Mount config',
+  'ri.cfgClose': 'Close',
+  'ri.cfgSave': 'Save & apply',
+  'ri.cfgTransport': 'transport (stdio | streamable-http)',
+  'ri.cfgCommand': 'command (required for stdio)',
+  'ri.cfgArgs': 'args (one per line)',
+  'ri.cfgCwd': 'cwd (working directory of the child process)',
+  'ri.cfgUrl': 'url (required for streamable-http)',
+  'ri.cfgHeaders': 'headers (key=value per line)',
+  'ri.cfgEnv': 'env (key=value per line)',
+  'ri.cfgTimeout': 'toolCallTimeoutMs',
+  'ri.cfgFailOnStartup': 'failOnStartupError (true | false)',
+  'ri.cfgSavedLive': 'Saved. Applied live — the server restarted with the new config.',
+  'ri.cfgSavedRestart': 'Intent saved, but live apply failed: {err}. It will be materialized into the preset on next restart.',
+  'ri.cfgNextSessionHint': 'Apply mode is "next session": live apply still runs now; the preset file is written at startup.',
+  'ri.cfgMissingCwdHint': 'No cwd set. MCP servers that resolve their project from the working directory (e.g. codegraph) will register zero tools until cwd points at the project root.',
   // skill card
   'ri.skillSource': 'source: {source}',
   'ri.modelVisible': 'Model',
   'ri.modelHidden': 'Hidden',
+  'ri.modelViaMiddleLayer': 'Middle layer',
+  'ri.modelViaMiddleLayerHint':
+    'Not directly visible to the model this turn: the middle layer hides every MCP server (hide scope = all) for models the middle layer is active on, so these tools are dropped from the assembled tool list and reached via dsh_mcp_search / dsh_mcp_call instead. The server itself keeps running.',
   'ri.userVisible': 'User',
   // toggles
   'ri.toggleOffHint': 'Release context: tools disappear immediately.',
@@ -82,19 +121,86 @@ export const en: Record<string, string> = {
   'ri.applyImmediate': 'Immediate',
   'ri.applyNextSession': 'Next session',
   'ri.applyModeDesc':
-    "How manual toggles differ from on-demand middle-layer calls:\n· Immediate (default): a manual toggle changes the model-visible tools on the very next turn, invalidating this session's prefix cache from that turn onward — billed at miss rate (~5-12.5× hit). Use when you need to release/restore context right away.\n· Next session: a manual toggle only records intent; the current session keeps its toolset unchanged for all remaining turns (zero cache invalidation, zero extra cost) and applies at the next new session (before its first request) or after a DSH restart. Note: the current session will NOT release context just because you turned an MCP off (use \"Apply pending\" to force it).\n· Both modes: on-demand calls to disabled MCPs via the AI middle layer (mcp_search / mcp_call) always work — they temporarily enable and call outside the model request and never change your per-turn prefix, so they never cause a cache miss. Only manual toggles change the prefix.",
+    "How manual toggles differ from on-demand middle-layer calls:\n· Immediate (default): a manual toggle changes the model-visible tools on the very next turn, invalidating this session's prefix cache from that turn onward — billed at miss rate (~5-12.5× hit). Use when you need to release/restore context right away.\n· Next session: a manual toggle only records intent; the current session keeps its toolset unchanged for all remaining turns (zero cache invalidation, zero extra cost) and applies at the next new session (before its first request) or after a DSH restart. Note: the current session will NOT release context just because you turned an MCP off (use \"Apply pending\" to force it).\n· Both modes: on-demand calls to disabled MCPs via the AI middle layer (dsh_mcp_search / dsh_mcp_call) always work — they temporarily enable and call outside the model request and never change your per-turn prefix, so they never cause a cache miss. Only manual toggles change the prefix.",
   'ri.applyPendingBtn': 'Apply pending now',
   'ri.applyDeferredHint': 'Intent recorded; it takes effect at the next new session or after a DSH restart.',
   'ri.pendingBadge': 'Pending',
+  'ri.aiOwnedBadge': 'AI (temp)',
+  'ri.aiOwnedHint':
+    'Temporarily enabled by the model via dsh_mcp_call (AI middle layer). Stays invisible to the model and is auto-disabled after ~30s idle — unlike you opening it yourself: no cache cost, no permanent tool prefix.',
+  'ri.applyPendingConfirm':
+    'Apply pending changes now? This makes the tool prefix change on the very next turn — this session loses its prefix cache (KV-Cache 100% miss, ~5-12.5× hit rate) at that turn. Continue?',
   'ri.appliedPending': 'Applied {n} pending change(s).',
   // autoManage switch
   'ri.autoManageTitle': 'AI Middle Layer',
   'ri.autoManageOn': 'On',
   'ri.autoManageOff': 'Off',
   'ri.autoManageDescOn':
-    'Disabled MCP servers stay hidden from the model and are used on demand via mcp_search / mcp_call (keep-alive enable + idle reaping). Servers you enabled stay directly visible (e.g. memory for recall, filesystem for IO); AI-temporarily-enabled servers never pollute context. Manually enabled servers are never auto-disabled.',
+    'Disabled MCP servers stay hidden from the model and are used on demand via dsh_mcp_search / dsh_mcp_call (keep-alive enable + idle reaping). Servers you enabled stay directly visible (e.g. memory for recall, filesystem for IO); AI-temporarily-enabled servers never pollute context. Manually enabled servers are never auto-disabled.',
   'ri.autoManageDescOff':
     'Off: tools of enabled MCP servers are directly visible to the model (classic mode).',
+  // middle-layer hide scope (property 5a): 'all' also hides servers you enabled
+  'ri.hidesLabel': 'Middle layer hides',
+  'ri.hidesDisabled': 'Disabled servers only',
+  'ri.hidesAll': 'All MCP servers',
+  'ri.hidesDescDisabled':
+    'Only the servers you switched off go behind the middle layer. Servers you left enabled stay fully visible to the model — a single 450-tool server can blow past a provider tool cap on its own.',
+  'ri.hidesDescAll':
+    'Every MCP server is hidden from models where the middle layer is active, including the ones you enabled, and is reached via dsh_mcp_search / dsh_mcp_call instead. Servers keep running, so a model whose route has the middle layer off still sees all their tools directly.',
+  // per-model override (property 4)
+  'ri.routeTitle': 'Per-model override',
+  'ri.routeDesc':
+    'Decide the middle layer per model route. Lookup order: provider/model → provider → master switch. An override set to "Force on" also mounts the middle layer while the master switch is off.',
+  'ri.routeInherit': 'Follow master',
+  'ri.routeOn': 'Force on',
+  'ri.routeOff': 'Force off',
+  'ri.routeCurrent': 'resolved route',
+  // 措辞纪律（评审 cbc-N9 / 子代理 WARN-4；0.6.0 会话透传后修订）：面板能拿到宿主
+  // useSessions 的「当前会话」时用它（routeActiveFollow），此时才可断言「跟随当前会话」；
+  // 取不到时（宿主不提供该 prop / 当前无会话）host 按 roots[0] 解析，仍只能说
+  // 「绑定到本面板的会话」—— 两种情形都把解析出的 sessionId 亮出来供核对。
+  'ri.routeActive': 'Session bound to this panel: {state} · {route}',
+  'ri.routeActiveFollow': 'Following current session: {state} · {route}',
+  'ri.routeActiveOn': 'middle layer ON',
+  'ri.routeActiveOff': 'middle layer OFF',
+  'ri.routeSourceModel': 'by model rule',
+  'ri.routeSourceProvider': 'by provider rule',
+  'ri.routeSourceMaster': 'by master switch',
+  'ri.routeSourceNoRoute': 'model unknown — master switch only',
+  'ri.routeUnknown': 'unknown model',
+  'ri.routeNoRouteHint':
+    'No session model was resolved for this view (diagnostic assembly or a missing route service), so only the master switch is evaluated — per-model overrides cannot take effect here. This is not "the override did nothing": the route itself is unknown.',
+  'ri.routeMounted': 'Middle layer mounted (control tools available to models allowed by the table).',
+  'ri.routeNotMounted': 'Middle layer not mounted.',
+  'ri.routePersistedOnly': 'saved, not in effect',
+  'ri.routePersistedHint':
+    'This override is persisted in state.json but is not in effect: the middle layer failed to mount this time, so the runtime table (what the gate actually reads) was cleared while your intent was kept. You can delete or re-set it here. It is retried on the next start.',
+  'ri.routeEmpty': 'No route to show yet (no session model and no override).',
+  // provider / model catalog (data source for the override table; GET /models)
+  // 措辞纪律：目录来自宿主的 llm 服务，是**进程级**读数（provider/模型的完整清单），
+  // 不是「本会话可用的模型」—— 不得那样写（与会话透传无关，另见 ri.routeActive 注释）。
+  'ri.routeCatalogHint':
+    'The catalog below comes from the host llm service: you can preset a rule for any provider or model without switching to it first.',
+  'ri.routeCatalogEmpty':
+    'The host llm service reported no providers (a reduced setup has no llm directory). Configured keys are still listed below.',
+  'ri.routeCatalogModels': '{n} models',
+  'ri.routeCatalogExpand': 'Expand / collapse this provider\u2019s models',
+  'ri.routeCatalogNoModels': 'This provider reported no models.',
+  'ri.routeCatalogFailed': 'Provider catalog unavailable: {error} — showing configured keys only.',
+  // 401/404 = 宿主进程还是旧代码（更新插件后未重启）：浏览器已加载新客户端，宿主没注册 /models。
+  // 措辞只说「端点未注册 + 重启」，不猜用户的操作顺序。
+  'ri.routeCatalogMissingEndpoint': 'endpoint not registered (restart DSH after updating the plugin)',
+  'ri.routeConfigured': 'Other keys (configured or resolved route)',
+  // bulk tool control (property 1)
+  'ri.toolFilter': 'Filter tools…',
+  'ri.toolBulkDisableAll': 'Disable all',
+  'ri.toolBulkEnableAll': 'Enable all',
+  'ri.toolBulkDisableFiltered': 'Disable {n} filtered',
+  'ri.toolBulkEnableFiltered': 'Enable {n} filtered',
+  'ri.toolBulkDone': '{n} tool(s) changed.',
+  'ri.toolBulkIgnored': '{n} name(s) not recognized (the catalog may have changed).',
+  'ri.toolEnabledOf': '{enabled} of {total} tools enabled',
+  'ri.toolNoMatch': 'No tool matches the filter.',
 }
 
 export const zh: Record<string, string> = {
@@ -103,7 +209,6 @@ export const zh: Record<string, string> = {
   'ri.skillTab': '技能',
   'ri.refresh': '刷新',
   'ri.loading': '加载中…',
-  'ri.error': '加载失败：{error}',
   'ri.empty': '暂无数据',
   'ri.session': '会话',
   'ri.preset': '预设',
@@ -111,8 +216,25 @@ export const zh: Record<string, string> = {
   // stats
   'ri.statMcpServers': '{n} 个服务器',
   'ri.statMcpDisabled': '{n} 个已停用',
-  'ri.statMcpTools': '{n} 个工具',
-  'ri.statMcpTokens': '约 {n}k token',
+  // 有效统计 / 工具预算（0.6.0 移植 PR #17 特性 2/3）
+  // 口径纪律：这里是「工具级启用数」（扣掉工具级禁用），**不是**「实际进入上下文」——
+  // server 级隐藏（AI 临时启用 / hideAll）与 project-mcp 工作区过滤都未计入。
+  // 分母限定：`mcpToolsTotal` 只统计**已挂载 server** 的注册工具（schemas 注册表视图），
+  // 与行级计数器的目录快照分母不同源（评审 cbc-N4 / 子代理 NIT-4）。
+  'ri.statMcpToolsEffective': 'MCP 工具启用 {enabled} / {total}（分母仅含已挂载 server）',
+  'ri.statMcpTokensEffective': '约 {enabled}k / {total}k token',
+  'ri.statToolsAll': '全部工具 {n} 个',
+  'ri.toolEnabledCaliber':
+    '工具级启用数：被禁用的工具在装配提示词时被剔除（server 级隐藏与工作区过滤不计入这个数）。',
+  'ri.budgetLabel': '工具预算',
+  'ri.budgetOver': '{used} / {budget} 个工具 —— 已超预算',
+  'ri.budgetOk': '{used} / {budget} 个工具',
+  'ri.budgetSet': '设置',
+  'ri.budgetClear': '清除',
+  'ri.budgetInvalid': '请输入正整数（如 350）。本次未改动任何设置 —— 要清空预算请点「清除」。',
+  'ri.budgetHint': '部分 provider 对单次请求的工具数有上限（grok 约 350，请以实际为准）。这里统计请求内的全部工具，不只是 MCP 工具。',
+  'ri.budgetSourceRequest': '取数口径：本会话上一次已落盘请求的装配后工具表（真值，有一轮延迟）。',
+  'ri.budgetSourceRegistry': '尚无已落盘请求 —— 回退工具注册表估算（不扣 server 级隐藏），仅供参考。',
   'ri.statSkills': '{n} 个技能',
   'ri.statSkillsVisible': '{n} 个模型可见',
   // mcp card
@@ -120,6 +242,9 @@ export const zh: Record<string, string> = {
   'ri.statusDisabled': '已停用',
   'ri.statusIdle': '无工具',
   'ri.statusFailed': '异常',
+  'ri.statusUnregistered': '未注册工具',
+  'ri.statusUnregisteredHint':
+    '该行已启用且在运行，但**零工具注册** —— 子进程多半没起来或空转（如缺项目索引）。下方列出的工具来自目录快照，不代表当前可用；dsh_mcp_call 会重试一次后失败。',
   'ri.toolsCount': '{n} 个工具',
   'ri.tokensCount': '约 {n}k token',
   'ri.transport': '传输',
@@ -137,12 +262,28 @@ export const zh: Record<string, string> = {
   'ri.addMcpPreviewNames': '解析到',
   'ri.addMcpConfirm': '确认添加',
   'ri.addMcpCancel': '关闭',
-  'ri.addMcpSuccess': '已添加 {n} 个{target} MCP。',
-  'ri.addMcpSkipped': '跳过 {n} 个（已存在/失败）：{names}',
   'ri.addMcpError': '操作失败：{error}',
   'ri.projectBadge': '项目',
   'ri.toolListShow': '工具',
   'ri.toolListHide': '工具',
+  // 「更多配置」抽屉（0.6.0）
+  'ri.moreConfig': '更多配置…',
+  'ri.cfgTitle': '挂载配置',
+  'ri.cfgClose': '关闭',
+  'ri.cfgSave': '保存并应用',
+  'ri.cfgTransport': 'transport（stdio | streamable-http）',
+  'ri.cfgCommand': 'command（stdio 必填）',
+  'ri.cfgArgs': 'args（每行一项）',
+  'ri.cfgCwd': 'cwd（子进程工作目录）',
+  'ri.cfgUrl': 'url（streamable-http 必填）',
+  'ri.cfgHeaders': 'headers（每行 key=value）',
+  'ri.cfgEnv': 'env（每行 key=value）',
+  'ri.cfgTimeout': 'toolCallTimeoutMs',
+  'ri.cfgFailOnStartup': 'failOnStartupError（true | false）',
+  'ri.cfgSavedLive': '已保存并热应用——该 server 已按新配置重启。',
+  'ri.cfgSavedRestart': '意图已保存，但热应用失败：{err}。下次重启会物化进预设文件。',
+  'ri.cfgNextSessionHint': '当前生效时机为「下次生效」：热应用仍立即执行，预设文件在启动时写入。',
+  'ri.cfgMissingCwdHint': '当前没有 cwd。按工作目录解析项目的 MCP（如 codegraph）在 cwd 指向项目根之前会注册零个工具。',
   // 创建技能弹窗
   'ri.addSkill': '创建技能',
   'ri.addSkillDropTitle': '上传进行智能解析',
@@ -156,12 +297,14 @@ export const zh: Record<string, string> = {
   'ri.addSkillBodyPh': '定义该技能激活时模型应如何行为。例如：\n# codemap\n## Commands\n## When to Use\n## Output Interpretation\n## Examples',
   'ri.addSkillConfirm': '确认',
   'ri.addSkillCancel': '取消',
-  'ri.addSkillSuccess': '技能已创建：{path}',
   'ri.addSkillError': '操作失败：{error}',
   // skill card
   'ri.skillSource': '来源：{source}',
   'ri.modelVisible': '模型可见',
   'ri.modelHidden': '模型隐藏',
+  'ri.modelViaMiddleLayer': '经中间层取用',
+  'ri.modelViaMiddleLayerHint':
+    '本轮模型看不到它：中间层隐藏范围为「全部 MCP server」且本模型走中间层，这些工具已被装配过滤整条剔除，改经 dsh_mcp_search / dsh_mcp_call 取用（server 仍在运行）。',
   'ri.userVisible': '用户可用',
   // toggles
   'ri.toggleOffHint': '释放上下文：工具立即从模型目录消失。',
@@ -178,17 +321,82 @@ export const zh: Record<string, string> = {
   'ri.applyImmediate': '立即生效',
   'ri.applyNextSession': '下次会话生效',
   'ri.applyModeDesc':
-    '用户手动启停开关 与 AI 中间层调用的区别：\n· 立即生效（默认）：手动开关会在下一轮对话立即改变模型看到的工具集，导致该轮起前缀缓存 100% 失效、按 miss 费率计费（约为 hit 的 5~12.5 倍）；适合需要马上释放/恢复上下文时。\n· 下次会话生效：手动开关只记录意图，当前会话全程工具集不变（零缓存失效、零额外费用），直到新开一个会话（其首次请求前）或重启 DSH 才生效；注意此时当前会话不会因为你关掉某 MCP 而立刻释放上下文（可用"立即应用"强制生效）。\n· 两者共同点：AI 中间层对已停用 MCP 的按需调用（mcp_search / mcp_call）始终可用——它在模型请求之外临时启用并调用，不改变每轮请求前缀，因此不会造成缓存 miss；只有"手动开关"才会改变前缀、从而可能造成 miss。',
+    '用户手动启停开关 与 AI 中间层调用的区别：\n· 立即生效（默认）：手动开关会在下一轮对话立即改变模型看到的工具集，导致该轮起前缀缓存 100% 失效、按 miss 费率计费（约为 hit 的 5~12.5 倍）；适合需要马上释放/恢复上下文时。\n· 下次会话生效：手动开关只记录意图，当前会话全程工具集不变（零缓存失效、零额外费用），直到新开一个会话（其首次请求前）或重启 DSH 才生效；注意此时当前会话不会因为你关掉某 MCP 而立刻释放上下文（可用"立即应用"强制生效）。\n· 两者共同点：AI 中间层对已停用 MCP 的按需调用（dsh_mcp_search / dsh_mcp_call）始终可用——它在模型请求之外临时启用并调用，不改变每轮请求前缀，因此不会造成缓存 miss；只有"手动开关"才会改变前缀、从而可能造成 miss。',
   'ri.applyPendingBtn': '立即应用待生效变更',
   'ri.applyDeferredHint': '已记录意图，将在下次（新）会话或 DSH 重启后生效。',
   'ri.pendingBadge': '待生效',
+  'ri.aiOwnedBadge': 'AI 临时启用',
+  'ri.aiOwnedHint':
+    '该行由模型经 dsh_mcp_call 临时启用（AI 中间层）。它对模型保持不可见，空闲约 30s 后自动关闭——与你手动打开不同：不占上下文、不改每轮工具前缀、无缓存代价。',
+  'ri.applyPendingConfirm':
+    '立即应用待生效变更？该操作会让工具前缀在下一轮发生变化——本次会话在该轮丢失前缀缓存（KV-Cache 100% miss，费率约为 hit 的 5–12.5 倍）。确认继续？',
   'ri.appliedPending': '已应用 {n} 项待生效变更。',
   // autoManage 开关
   'ri.autoManageTitle': 'AI 中间层',
   'ri.autoManageOn': '已开启',
   'ri.autoManageOff': '已关闭',
   'ri.autoManageDescOn':
-    '停用的 MCP 服务器对模型隐藏，需要时经 mcp_search / mcp_call 按需调用（保活启用 + 空闲回收）；你手动打开的服务器保持模型可见（如 memory 高灵敏召回、filesystem 直接读写）；AI 临时启用的服务器不会污染上下文。用户手动启用的服务器不会被自动停用。',
+    '停用的 MCP 服务器对模型隐藏，需要时经 dsh_mcp_search / dsh_mcp_call 按需调用（保活启用 + 空闲回收）；你手动打开的服务器保持模型可见（如 memory 高灵敏召回、filesystem 直接读写）；AI 临时启用的服务器不会污染上下文。用户手动启用的服务器不会被自动停用。',
   'ri.autoManageDescOff':
     '关闭后：已启用 MCP 服务器的工具直接对模型可见（经典模式）。',
+  // 中间层隐藏范围（特性 5a）：'all' 连已启用的 server 也从模型面隐藏
+  'ri.hidesLabel': '中间层隐藏',
+  'ri.hidesDisabled': '仅手动停用的 server',
+  'ri.hidesAll': '全部 MCP server',
+  'ri.hidesDescDisabled':
+    '只有你手动停用的 server 走中间层；保持启用的 server 仍对模型完全可见 —— 单个 450 工具的 server 就足以顶穿 provider 的工具数上限。',
+  'ri.hidesDescAll':
+    '对中间层生效的模型隐藏**全部** MCP server（含你手动启用的），一律经 dsh_mcp_search / dsh_mcp_call 取用。server 保持运行，所以中间层未生效的模型照样直接看到全部工具。',
+  // 按模型覆盖（特性 4）
+  'ri.routeTitle': '按模型覆盖',
+  'ri.routeDesc':
+    '按模型路由决定中间层是否生效。查表顺序：provider/model → provider → 总开关。覆盖项设为「强制开」时，即使总开关关闭也会挂载中间层。',
+  'ri.routeInherit': '跟随总开关',
+  'ri.routeOn': '强制开',
+  'ri.routeOff': '强制关',
+  'ri.routeCurrent': '当前解析到的路由',
+  // 措辞纪律（评审 cbc-N9 / 子代理 WARN-4；0.6.0 会话透传后修订）：面板能拿到宿主
+  // useSessions 的「当前会话」时用它（routeActiveFollow），此时才可断言「跟随当前会话」；
+  // 取不到时（宿主不提供该 prop / 当前无会话）host 按 roots[0] 解析，仍只能说
+  // 「面板绑定会话」—— 两种情形都把解析出的 sessionId 亮出来供核对。
+  'ri.routeActive': '面板绑定会话：{state} · {route}',
+  'ri.routeActiveFollow': '跟随当前会话：{state} · {route}',
+  'ri.routeActiveOn': '中间层已生效',
+  'ri.routeActiveOff': '中间层未生效',
+  'ri.routeSourceModel': '按模型规则',
+  'ri.routeSourceProvider': '按 provider 规则',
+  'ri.routeSourceMaster': '按总开关',
+  'ri.routeSourceNoRoute': '模型未知 —— 只看总开关',
+  'ri.routeUnknown': '未知模型',
+  'ri.routeNoRouteHint':
+    '本次没有解析出会话模型（诊断装配或路由服务缺失），因此只有总开关参与判定 —— 按模型覆盖在此无从生效。这不是「覆盖没起作用」，而是路由本身未知。',
+  'ri.routeMounted': '中间层已挂载（控制工具对表中的模型可见）。',
+  'ri.routeNotMounted': '中间层未挂载。',
+  'ri.routePersistedOnly': '已保存，未生效',
+  'ri.routePersistedHint':
+    '该覆盖项已持久化进 state.json，但当前不生效：本次中间层挂载失败，运行期表（gate 实际读的那张表）被清空，而你的意图被保留。可在此删除或重设，下次启动会重试挂载。',
+  'ri.routeEmpty': '暂无可列出的路由（无会话模型且没有覆盖项）。',
+  // provider / 模型目录（覆盖表的数据源；GET /models）
+  // 措辞纪律：目录来自宿主的 llm 服务，是**进程级**读数（provider/模型的完整清单），
+  // 不是「本会话可用的模型」—— 不得那样写（与会话透传无关，另见 ri.routeActive 注释）。
+  'ri.routeCatalogHint': '下方目录来自宿主的 llm 服务：可为任意 provider 或模型预置规则，不必先切到该模型。',
+  'ri.routeCatalogEmpty': '宿主 llm 服务未提供 provider 目录（精简组合下没有 llm 目录）。下方仍列出已配置的键。',
+  'ri.routeCatalogModels': '{n} 个模型',
+  'ri.routeCatalogExpand': '展开 / 折叠该 provider 的模型列表',
+  'ri.routeCatalogNoModels': '该 provider 未返回模型。',
+  'ri.routeCatalogFailed': 'provider 目录不可用：{error} —— 已降级为只列出已配置的键。',
+  // 401/404 = 宿主进程还是旧代码（更新插件后未重启）：浏览器已加载新客户端，宿主没注册 /models。
+  // 措辞只说「端点未注册 + 重启」，不猜用户的操作顺序。
+  'ri.routeCatalogMissingEndpoint': '端点未注册（更新插件后需重启 DSH）',
+  'ri.routeConfigured': '其它键（已配置或当前解析到的路由）',
+  // 工具批量控制（特性 1）
+  'ri.toolFilter': '过滤工具…',
+  'ri.toolBulkDisableAll': '全部禁用',
+  'ri.toolBulkEnableAll': '全部启用',
+  'ri.toolBulkDisableFiltered': '禁用筛出的 {n} 个',
+  'ri.toolBulkEnableFiltered': '启用筛出的 {n} 个',
+  'ri.toolBulkDone': '已改动 {n} 个工具。',
+  'ri.toolBulkIgnored': '有 {n} 条未识别（目录可能已变）。',
+  'ri.toolEnabledOf': '{total} 个工具中启用 {enabled} 个',
+  'ri.toolNoMatch': '没有匹配的工具。',
 }

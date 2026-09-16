@@ -3,3 +3,10 @@ node_modules/
 .DS_Store
 *.tmp
 .dsh/
+
+# 临时/部署/子代理产物（根锚定，勿用非锚定通配以免误伤 docs/images/）
+/.deploy/
+/.scratch/
+/.subagent/
+/*.webp
+/*.png

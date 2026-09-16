@@ -8,7 +8,19 @@ interface Props {
     /** 由 locale 插槽注入：NS 字典的翻译函数 */
     t: (key: string, params?: Record<string, string | number>) => string;
     close?: () => void;
+    /**
+     * 宿主 `settings.section` 槽位的标准 props 之一（`dsh-client-ui-session` 对
+     * `GlobalStandardProps` 的 module augmentation；runner 的 slot-catalog 亦声明
+     * `standardProps` 含 `useSessions`）。用途：把**当前会话**透传给 host，使面板不必
+     * 再只按 `roots[0]` 解析会话（多会话并存时那是启动期的会话，不是用户正在看的那个）。
+     *
+     * 本仓不引宿主类型，这里声明最小契约；DSH 仍是 0.1.x-rc、`standardProps` 会随版本
+     * 重生成，故调用侧一律**防御式取用**（`typeof === 'function'`）：宿主不提供该 prop 时
+     * 面板回退旧行为（host 按 roots[0] 解析），不报错。
+     */
+    useSessions?: (selector: (state: {
+        current?: unknown;
+    }) => unknown) => unknown;
 }
 export declare function RuntimeInventorySection(props: Props): React.ReactElement;
-export declare function ensureToolToken(): Promise<string | null>;
 export {};

@@ -67,14 +67,6 @@ export function snapshotFromSchemas(
   return out
 }
 
-/** 按空白 / 下划线 / 连字符切分小写化。 */
-function tokenize(text: string): string[] {
-  return String(text)
-    .toLowerCase()
-    .split(/[\s_-]+/)
-    .filter(Boolean)
-}
-
 /** 从工具参数 JSON Schema 提取参数名集合（properties 键）。 */
 function paramNamesOf(parameters: unknown): Set<string> {
   const names = new Set<string>()
@@ -88,26 +80,35 @@ function paramNamesOf(parameters: unknown): Set<string> {
 }
 
 /**
- * 关键词全文检索 top-K。
- * 打分：工具名命中 3 / 工具名前缀 2 / 描述命中 2 / 描述前缀 1 / 参数名 1。
+ * 关键词全文检索 top-K（P3 网关定稿：加权 B）。
+ * 打分（bench `.scratch/mvt-5-search-bench.mjs` 实测定稿，加权 B）：
+ * 工具裸名 substring 15 / server 名 substring 3 / 描述 substring 6 /
+ * 参数名命中 3 / 公名 haystack（server/bare 拼接）substring 兜底 +1。
+ * substring 而非 token 精确命中：中文连写（“读文件”）不切分也能命中。
  * 返回按分数降序（同分按 server、name 字典序稳定）的命中数组。
  */
-export function searchCatalog(catalog: Catalog, query: string, limit = 5): SearchHit[] {
-  const tokens = tokenize(query)
-  if (tokens.length === 0) return []
+export function searchCatalog(catalog: Catalog, query: string, limit = 8, scopedTo?: string): SearchHit[] {
+  const q = String(query).toLowerCase()
+  const terms = q.split(/[\s,，。、/\\|]+/).filter(Boolean)
+  if (terms.length === 0) return []
+  // 0.6.8：`scopedTo` 把打分限定在单个 server 内 —— 这是"上百个工具时模型怎么找到
+  // 该调哪个"的正解：按需、有界地检索，而不是把全表灌进上下文。
+  const pool = scopedTo !== undefined ? Object.entries(catalog).filter(([s]) => s === scopedTo) : Object.entries(catalog)
   const scored: Array<{ hit: SearchHit; score: number }> = []
-  for (const [server, serverInfo] of Object.entries(catalog)) {
+  for (const [server, serverInfo] of pool) {
     for (const tool of serverInfo.tools) {
-      const nameTokens = tokenize(tool.name)
-      const descTokens = tokenize(tool.description)
-      const paramTokens = paramNamesOf(tool.parameters)
+      const bare = tool.name.split('__').pop() ?? tool.name
+      const nameHay = `${server}/${bare}`.toLowerCase()
+      const descHay = String(tool.description ?? '').toLowerCase()
+      const paramHay = [...paramNamesOf(tool.parameters)].join(' ')
+      const serverHay = String(server).toLowerCase()
       let score = 0
-      for (const token of tokens) {
-        if (nameTokens.includes(token)) score += 3
-        else if (nameTokens.some((t) => t.startsWith(token))) score += 2
-        if (descTokens.includes(token)) score += 2
-        else if (descTokens.some((t) => t.startsWith(token))) score += 1
-        if (paramTokens.has(token)) score += 1
+      for (const term of terms) {
+        if (bare.toLowerCase().includes(term)) score += 15
+        if (serverHay.includes(term)) score += 3
+        if (descHay.includes(term)) score += 6
+        if (paramHay.includes(term)) score += 3
+        if (nameHay.includes(term)) score += 1
       }
       if (score > 0) scored.push({ hit: { server, tool }, score })
     }
@@ -123,17 +124,45 @@ export function searchCatalog(catalog: Catalog, query: string, limit = 5): Searc
 }
 
 /**
- * 列出某 server 的全部工具（精简：name + description）。
- * 返回 undefined 表示该 server 不在 catalog 中。
+ * 列出某 server 的全部工具（精简：name + description；L2 无 schema）。
+ * 分页：offset/limit（1..200，缺省 0/20；P3 网关定稿 limit=20）。
+ *
+ * 0.6.0 起**不再用 `undefined` 混表"server 不存在"**：server 可能确实已安装、
+ * 只是能力表还没采过（用户关掉且从未运行过的行）。调用方据此区分三态并给出
+ * 不同的 hint，而不是一律回 `found:false`（那正是 P1 实验失败的现场）。
  */
-export function listServer(catalog: Catalog, server: string): Array<{ name: string; description: string }> | undefined {
+export interface ServerListing {
+  /** 已安装且有快照 */
+  found: boolean
+  /** 该 server 有快照（tools 数组可能为空） */
+  hasSnapshot: boolean
+  tools: Array<{ name: string; description: string }>
+  totalCount: number
+  fetchedAt: number | null
+  source: string | null
+}
+
+export function listServer(catalog: Catalog, server: string, offset = 0, limit = 20): ServerListing {
+  const start = Math.max(0, Math.floor(Number(offset) || 0))
+  const size = Math.min(200, Math.max(1, Math.floor(Number(limit) || 20)))
   const serverInfo = catalog[server]
-  if (!serverInfo) return undefined
-  return serverInfo.tools.map((tool) => ({ name: tool.name, description: tool.description }))
+  if (!serverInfo) {
+    return { found: false, hasSnapshot: false, tools: [], totalCount: 0, fetchedAt: null, source: null }
+  }
+  const totalCount = serverInfo.tools.length
+  const tools = serverInfo.tools.slice(start, start + size).map((tool) => ({ name: tool.name, description: tool.description }))
+  return {
+    found: true,
+    hasSnapshot: true,
+    tools,
+    totalCount,
+    fetchedAt: serverInfo.fetchedAt ?? null,
+    source: serverInfo.source ?? null,
+  }
 }
 
 /** catalog 文件路径：<dir>/catalog.json。 */
-export function catalogFileFor(dir: string): string {
+function catalogFileFor(dir: string): string {
   return `${dir.replace(/[\\/]$/, '')}/catalog.json`
 }
 

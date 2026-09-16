@@ -5,13 +5,11 @@
  * 分域缓存句柄。依赖方向：本模块只被 routes.ts / index.ts 消费。
  */
 import type { Context } from '@deepseek-ai/cordis';
-import type { McpRow, McpView, SkillsView } from './shared-types';
+import type { McpView, SkillsView } from './shared-types';
 import type { McpCallController } from './mcpcall';
 import type { CatalogRuntime } from './index';
 /** 分域缓存 TTL：事件驱动失效为主，TTL 只是兜底（事件丢失场景） */
 export declare const DOMAIN_TTL_MS = 60000;
-/** 已确认的 skill 状态在 collectState 中覆盖 snapshot 旧值的有效期 */
-export declare const CONFIRMED_SKILL_TTL_MS = 60000;
 /** skill toggle 确认轮询间隔（ctx.timeout，随 ctx 生命周期）。 */
 export declare const SKILL_TOGGLE_POLL_MS = 80;
 /**
@@ -85,13 +83,8 @@ export declare function resolveAgent(ctx: Context, sessionId: string | undefined
 export declare function resolveCollectScopeKey(ctx: Context, sessionId: string | undefined): Promise<object | undefined>;
 /** scope key 解析来源（/debug scopeDiag 展示用）。 */
 export declare function scopeKeySource(): 'agent' | 'standing' | null;
-/** 行状态徽标判定（纯函数，selftest 表驱动回归）。
- * 语义（2026-08-27 发布前独立审查修正）：active/idle 以 **liveTools**（真实注册）
- * 为准——displayTools 含 catalog 快照兜底，用它判定 active 会掩盖「scope 解析
- * 失败但 catalog 有旧快照」的故障现场（面板显示健康而实际工具未注册）。
- * displayTools 仅用于 tools/tokens 数值展示与停用态回填。
- */
-export declare function computeStatus(disabled: boolean, running: boolean, liveTools: number): McpRow['status'];
+/** 行级读数判定已拆到 ./row-display（零宿主依赖，便于 selftest 独立加载）。 */
+export { computeStatus, modelVisibleScope, rowDisplay } from './row-display';
 /** MCP 工具聚合结果：per-server 工具数 + token 估算。tools/change 间隙复用，跳过 schemas 深克隆。 */
 export interface McpAggregate {
     byServer: Map<string, {

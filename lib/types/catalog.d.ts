@@ -41,21 +41,36 @@ export declare function snapshotFromSchemas(schemas: ReadonlyArray<{
     parameters?: unknown;
 }>, serverName: string): CatalogEntry[];
 /**
- * 关键词全文检索 top-K。
- * 打分：工具名命中 3 / 工具名前缀 2 / 描述命中 2 / 描述前缀 1 / 参数名 1。
+ * 关键词全文检索 top-K（P3 网关定稿：加权 B）。
+ * 打分（bench `.scratch/mvt-5-search-bench.mjs` 实测定稿，加权 B）：
+ * 工具裸名 substring 15 / server 名 substring 3 / 描述 substring 6 /
+ * 参数名命中 3 / 公名 haystack（server/bare 拼接）substring 兜底 +1。
+ * substring 而非 token 精确命中：中文连写（“读文件”）不切分也能命中。
  * 返回按分数降序（同分按 server、name 字典序稳定）的命中数组。
  */
-export declare function searchCatalog(catalog: Catalog, query: string, limit?: number): SearchHit[];
+export declare function searchCatalog(catalog: Catalog, query: string, limit?: number, scopedTo?: string): SearchHit[];
 /**
- * 列出某 server 的全部工具（精简：name + description）。
- * 返回 undefined 表示该 server 不在 catalog 中。
+ * 列出某 server 的全部工具（精简：name + description；L2 无 schema）。
+ * 分页：offset/limit（1..200，缺省 0/20；P3 网关定稿 limit=20）。
+ *
+ * 0.6.0 起**不再用 `undefined` 混表"server 不存在"**：server 可能确实已安装、
+ * 只是能力表还没采过（用户关掉且从未运行过的行）。调用方据此区分三态并给出
+ * 不同的 hint，而不是一律回 `found:false`（那正是 P1 实验失败的现场）。
  */
-export declare function listServer(catalog: Catalog, server: string): Array<{
-    name: string;
-    description: string;
-}> | undefined;
-/** catalog 文件路径：<dir>/catalog.json。 */
-export declare function catalogFileFor(dir: string): string;
+export interface ServerListing {
+    /** 已安装且有快照 */
+    found: boolean;
+    /** 该 server 有快照（tools 数组可能为空） */
+    hasSnapshot: boolean;
+    tools: Array<{
+        name: string;
+        description: string;
+    }>;
+    totalCount: number;
+    fetchedAt: number | null;
+    source: string | null;
+}
+export declare function listServer(catalog: Catalog, server: string, offset?: number, limit?: number): ServerListing;
 /** 从目录加载 catalog；文件不存在 / 解析失败时返回空 catalog。 */
 export declare function loadCatalog(dir: string): Promise<Catalog>;
 /** 原子写回 catalog（tmp + rename，0600）。调用方负责 mkdir。 */

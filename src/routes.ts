@@ -5,21 +5,43 @@
  * defineHandler 统一 method 校验 / 异步错误响应 / {ok:true,...} 包装。
  */
 import { randomBytes } from 'node:crypto'
+import { StringDecoder } from 'node:string_decoder'
 import type { Context } from '@deepseek-ai/cordis'
 import { mkdir, readFile, writeFile, rename, access } from 'node:fs/promises'
 import { basename, dirname, join, parse as parsePath } from 'node:path'
 import { homedir } from 'node:os'
-import { readState, writeState, stateApplyMode, type ApplyMode } from './state'
-import { setSkillFlag, rowDisabledState, isValidSkillName, buildSkillMd } from './preset'
+import { readState, writeState, stateApplyMode, stateAutoManageByRoute, stateMiddleLayerHides, stateToolBudget, type ApplyMode } from './state'
+import { setSkillFlag, rowDisabledState, isValidSkillName, buildSkillMd, EDITABLE_CONFIG_KEYS } from './preset'
 import { pendingMcp, applyPendingMcp } from './pending'
-import { findPresetRowByEntryId } from './preset-mcp'
+import { findPresetRowByEntryId, findPresetRowByServerName } from './preset-mcp'
+import { gatewayServerOfEntryId } from './gateway'
+
+/**
+ * B4：网关行 serverName → 当前会话 preset 行定位（entryId 映射不到 preset entryId，
+ * 按 serverName 精确匹配；presetId 取当前会话 composedPreset，无会话返回 undefined）。
+ */
+async function findPresetRowByServerNameLike(ctx: Context, serverName: string) {
+  try {
+    const { resolveAgent } = await import('./collect')
+    const agent = resolveAgent(ctx, undefined)
+    const presetId = agent ? (ctx.agentPresets.composedPreset(agent.ctx) ?? null) : null
+    if (!presetId) return undefined
+    const row = await findPresetRowByServerName(ctx, presetId, serverName)
+    if (!row) return undefined
+    return { presetId, row, presetPath: row.file }
+  } catch {
+    return undefined
+  }
+}
 import { resolveAgent, resolveCollectScopeKey, scopeKeySource, getSchemasView, mergeSchemas, collectMcp, collectSkills, confirmedSkills, pruneExpired, DOMAIN_TTL_MS, SKILL_TOGGLE_POLL_MS, type DomainCaches, type Deps } from './collect'
 import { isMcpEntry, serverNameOf } from './mcp-entry'
+import { findStandingEntryById, standingDiag, standingMcpEntries, findStandingEntryByServer } from './standing-rows'
 import { parseMcpServersJson, serversToPatchYaml, serversToRows, type McpServers, type McpRowConfig } from './mcp-convert'
 import { remountWorkspace, projectServerOwner, getActiveWorkspace } from './project-mcp'
-import { disabledToolsOf, setToolDisabled } from './tool-disable'
+import { disabledToolsOf, setToolDisabled, setToolsDisabledBulk, resolveToolBulkTargets } from './tool-disable'
 import type { McpCallController } from './mcpcall'
 import type { CatalogRuntime, Config } from './index'
+import { activeRouteView, fetchProviderCatalog, modelsCacheFresh, type ProviderCatalogEntry, type RouteServices } from './model-route'
 import { messageOf } from './util'
 
 const API_PREFIX = '/api/mcp-skill-panel'
@@ -32,6 +54,11 @@ const SKILL_TOGGLE_CONFIRM_MS = 5_000
 const PANEL_TOKEN = randomBytes(32).toString('hex')
 /** readBody 体积上限：防无界 body 累积（本地 DoS 向量）。 */
 const MAX_BODY_BYTES = 64 * 1024
+/** `/models` 的 provider/模型目录 TTL（ms）。见 modelsCatalog 的取舍注释。 */
+const MODELS_TTL_MS = 60_000
+/** `/models` 单次抓取的时间上界（ms）。见 modelsCatalog 的超时注释：本端点是**开放读端点**，
+ * 不能被一个卡住的 adapter 永久黏住（无超时 + 单飞 = 该 adapter 恢复前对所有调用者不可用）。 */
+const MODELS_FETCH_TIMEOUT_MS = 8_000
 
 type Req = import('node:http').IncomingMessage
 type Res = import('node:http').ServerResponse
@@ -52,17 +79,38 @@ function ok(res: Res, data: object): void {
   json(res, 200, { ok: true, ...data })
 }
 
+/**
+ * 读请求体（上限 MAX_BODY_BYTES 字节）。
+ *
+ * P1-2 修复（2026-09-15）：
+ *  ① 拼串改走 StringDecoder：原先 `body += String(chunk)`，多字节字符正好跨 chunk 边界时
+ *     两个半个字符各自被 String(chunk) 解成 U+FFFD（乱码）——任何含中文的 body
+ *     （例如中文 cwd / 中文 args / skill 描述）在多包到达下都会损坏。
+ *     长度同理改按字节计（Buffer.byteLength），不再按「解码后字符数」估。
+ *  ② 超限分支先解绑监听器再 destroy：原先只 destroy，request 上仍挂着 data/end/error
+ *     三个闭包（闭包持有已 reject 的 promise 与 body 累积串）→ 每个被拒请求泄漏一份。
+ *     正常结束同样显式解绑（同一 cleanup 路径）。
+ */
 function readBody(req: Req): Promise<string> {
   return new Promise((resolve, reject) => {
+    const decoder = new StringDecoder('utf8')
+    let bytes = 0
     let body = ''
     const onData = (chunk: Buffer | string) => {
-      body += String(chunk)
-      if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) {
+      bytes += Buffer.byteLength(chunk, 'utf8')
+      if (bytes > MAX_BODY_BYTES) {
+        // 先清理再 destroy：只移除本函数挂的监听器（不用 removeAllListeners，
+        // 避免误删宿主/其它插件挂在同一请求上的监听器）。
+        cleanup()
         req.destroy()
         reject(new Error(`body exceeds ${MAX_BODY_BYTES} bytes`))
+        return
       }
+      body += typeof chunk === 'string' ? chunk : decoder.write(chunk)
     }
     const onEnd = () => {
+      // decoder.end() 冲掉解码器里未凑齐的尾字节（截断的多字节序列在此处才成型）
+      body += decoder.end()
       cleanup()
       resolve(body)
     }
@@ -117,6 +165,11 @@ function handle(method: 'GET' | 'POST', run: (req: Req) => Promise<object>, guar
  * guardPosts 对 GET 也生效，/config 读取被锁 → 面板生效时机恒显示默认值）。
  */
 function handleAny(entries: Array<{ method: 'GET' | 'POST'; run: (req: Req) => Promise<object> }>, guardPosts = false): (req: Req, res: Res) => void {
+  // 2026-09-15 修复：含 POST 的合并路由漏传 guardPosts=true 会让写端点静默裸奔
+  // （/mcp/rowConfig、/debug/rowConfig 即此漏）。这里 fail-fast，新增路由不会再漏。
+  if (!guardPosts && entries.some((e) => e.method === 'POST')) {
+    throw new Error('handleAny: POST entries require guardPosts=true')
+  }
   return (req, res) => {
     const entry = entries.find((e) => e.method === req.method)
     if (!entry) {
@@ -138,11 +191,21 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
   } catch {
     entry = undefined
   }
+  // 0.5.7：preset 行不在 loader 可达域，但 standing 树里有真句柄 —— 兜底取回后
+  // 走下面正常的 live 分支（entry.update / 意图持久化都以 entry.parent.tree.filename
+  // 为准），于是面板开关对 preset 行**当场生效**，不再是恒 pending 的空意图。
+  if (!entry) entry = findStandingEntryById(entryId)
   // rc.1 standing 组合兜底：preset 行不在 loader.entries/resolve 里（resolve 抛
   // "cannot resolve entry"）。行以 source:'preset' 进面板，开关走 state.json
   // desired 意图（恒 pending），由 syncPresetFiles/applyStateResidue 物化/补齐。
-  if (!entry) {
-    const found = await findPresetRowByEntryId(ctx, entryId)
+  // P5（B4）：网关 gw- 行虽可 resolve，但 toggle 不走 live entry.update——走 preset
+  // 意图分支（意图→下次 ensureOpenMounts 不同步该行即等价关闭；开则意图清除后重挂）。
+  // 三键映射（B4）：entryId=gw-mcp-<server> ↔ serverName ↔ preset rowId。
+  if (!entry || gatewayServerOfEntryId(entryId) !== null) {
+    const gwServer = gatewayServerOfEntryId(entryId)
+    const found =
+      (gwServer ? await findPresetRowByServerNameLike(ctx, gwServer).catch(() => undefined) : undefined) ??
+      (await findPresetRowByEntryId(ctx, entryId).catch(() => undefined))
     if (found) {
       const state = await readState()
       state.mcp ??= {}
@@ -176,7 +239,8 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
         file: found.presetPath,
         applied: false,
         pending: true,
-        source: 'preset' as const,
+        // 网关行面板口径与 collect 一致（NIT-4）：collect 标 'gateway'，此处回 'gateway'。
+        source: 'gateway' as const,
       }
     }
   }
@@ -223,8 +287,51 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
   const deferred = mode === 'next-session'
   if (deferred) {
     pendingMcp.set(entryId, { entryId, file: (entry.parent?.tree as { filename?: string } | undefined)?.filename ?? null, rowId, disabled })
+    // 0.6.0：意图必须**同时落盘**。原实现只进内存队列，于是"记了意图但没开新会话就重启"
+    // 的用户设置会静默丢失（applyStateResidue 的 desired 兜底因此也永远无输入）。
+    // 与 preset 兜底分支（本文件 :184-185）语义对齐：desired=用户意图，lastApplied=文件现值。
+    const presetFile = (entry.parent?.tree as { filename?: string } | undefined)?.filename
+    if (typeof presetFile === 'string' && presetFile.length > 0) {
+      try {
+        const st = await readState()
+        st.mcp ??= {}
+        st.mcp[presetFile] ??= {}
+        let fileState: boolean | null = null
+        try {
+          fileState = rowDisabledState(await readFile(presetFile, 'utf8'), rowId)
+        } catch {
+          fileState = null
+        }
+        st.mcp[presetFile][rowId] = { desired: disabled, lastApplied: fileState }
+        await writeState(st)
+      } catch (error) {
+        ctx.logger.warn?.(`mcp-skill-panel: persist pending intent for "${entryId}" failed: ${messageOf(error)}`)
+      }
+    }
   } else {
     pendingMcp.delete(entryId)
+    // 0.6.0（关前补采能力表）：用户关掉一行后它就不再运行，schema 视图里随即没有它，
+    // 快照只能靠"关之前那一次"。这里先采一次写进 catalog.json，保证**关掉的 server
+    // 依然能被 mcp_search 检索到**（rc.8 语义：能力表属于"已安装"，不属于"在跑"）。
+    // 采集失败不阻断关闭（best-effort；失败时该 server 首调会自动拉起采集一次）。
+    //
+    // 0.6.7 前置守卫：**已有快照就跳过**。关前补采要临时拉起该行，而"快照保留"已由
+    // 0.6.1（prune 的 alive 纳入 standing 行）保证——对一个跑过一次的 server，关掉它
+    // 不会丢快照，此时再拉起采集纯属多余动作（实测 chrome：端点已死、白拉一次）。
+    // 只在"确实没有快照"时补采，语义等价而副作用更小。
+    if (disabled) {
+      const presetSnapshot = deps.catalogRuntime.catalog[serverNameOf(entry)]
+      const needsSnapshot = !presetSnapshot || presetSnapshot.tools.length === 0
+      if (needsSnapshot) {
+        try {
+          // 等待上限 1500ms：关闭是用户动作，不能因为该实例起不来（端点已死/启动慢）
+          // 而把关闭本身拖住 60 秒。采不到也不影响关闭——该 server 首调时会再按需采集。
+          await deps.controller?.fetchInventory(serverNameOf(entry), 1500)
+        } catch (error) {
+          ctx.logger.warn?.(`mcp-skill-panel: pre-close inventory snapshot for "${serverNameOf(entry)}" failed: ${messageOf(error)}`)
+        }
+      }
+    }
     await entry.update({ disabled })
     // 用户手动打开（!disabled）：清除 AI 临时启用标记（aiEnabled/计数/lastUsed +
     // state.json ai owner）—— 转为「用户打开」语义：模型立即可见、回收器不再回收。
@@ -309,6 +416,197 @@ async function toggleSkill(deps: Deps, skillName: string, disabled: boolean, ses
  */
 let fileWriteChain: Promise<unknown> = Promise.resolve()
 
+/** 0.6.0：配置合法性校验（UI 预校验与后端落盘共用同一套规则）。 */
+function validateRowConfig(config: Record<string, unknown>): void {
+  const transport = config.transport === undefined ? undefined : String(config.transport)
+  if (transport !== undefined && transport !== 'stdio' && transport !== 'streamable-http') {
+    throw new Error(`transport 只能是 stdio 或 streamable-http（收到 ${transport}）`)
+  }
+  const hasCommand = typeof config.command === 'string' && config.command.trim().length > 0
+  const hasUrl = typeof config.url === 'string' && config.url.trim().length > 0
+  if (transport === 'streamable-http') {
+    if (!hasUrl) throw new Error('streamable-http 需要 url')
+  } else if (transport === 'stdio' || (transport === undefined && hasCommand)) {
+    if (!hasCommand) throw new Error('stdio 需要 command')
+  } else if (!hasCommand && !hasUrl) {
+    throw new Error('需要 command（stdio）或 url（streamable-http）之一')
+  }
+  if (config.url !== undefined && !/^https?:\/\//i.test(String(config.url))) {
+    throw new Error('url 需以 http:// 或 https:// 开头')
+  }
+  if (config.args !== undefined && !Array.isArray(config.args)) throw new Error('args 必须是数组')
+  if (config.cwd !== undefined && (typeof config.cwd !== 'string' || config.cwd.length === 0)) {
+    throw new Error('cwd 必须是非空字符串')
+  }
+  if (config.toolCallTimeoutMs !== undefined) {
+    const n = Number(config.toolCallTimeoutMs)
+    if (!Number.isFinite(n) || n <= 0) throw new Error('toolCallTimeoutMs 必须是正数')
+  }
+  for (const mapKey of ['env', 'headers'] as const) {
+    const value = config[mapKey]
+    if (value === undefined) continue
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`${mapKey} 必须是键值对象`)
+    }
+  }
+}
+
+/**
+ * 0.6.0：把配置意图写进 state.json（运行期唯一安全的写面）。
+ * 结构：state.mcp[预设文件][行 id].config —— 启动早期由 syncPresetFiles 物化。
+ */
+async function writeRowConfigIntent(
+  server: string,
+  described: Record<string, unknown>,
+  config: Record<string, unknown>,
+): Promise<{ file: string; rowId: string; config: Record<string, unknown> }> {
+  const file = typeof described.file === 'string' ? described.file : null
+  const rowId = typeof described.rowId === 'string' ? described.rowId : null
+  if (!file || !rowId) throw new Error(`无法定位该行的预设文件/行 id（server=${server}）`)
+  const state = await readState()
+  state.mcp ??= {}
+  state.mcp[file] ??= {}
+  const prev = state.mcp[file][rowId]
+  // lastApplied 必须取**当前文件事实**，不能沿用面板快照（entry.disabled）。
+  // 2026-09-14 实测事故：codegraph 行没有 `disabled` 键 ⇒ rowDisabledState 返回 null，
+  // 而 entry.disabled 是 false；若把 false 记成 lastApplied，启动物化时 null !== false
+  // 被判成「文件被外部改过」→ 配置意图永不物化，且用户零提示。
+  let fileState: boolean | null = prev?.lastApplied ?? null
+  try {
+    fileState = rowDisabledState(await readFile(file, 'utf8'), rowId)
+  } catch {
+    /* 读盘失败：保留原值，启动物化会自行对齐 */
+  }
+  state.mcp[file][rowId] = {
+    // 启停意图沿用现值；配置意图记录本次完整配置（不含 configAppliedYaml → 触发物化）
+    desired: prev?.desired ?? false,
+    lastApplied: fileState,
+    config,
+  }
+  await writeState(state)
+  return { file, rowId, config }
+}
+
+let rowConfigApplyHook: ((server: string, config: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>) | null = null
+
+/** 由 index.ts 在 apply 里注入（热改 live entry 的 config）。 */
+export function setRowConfigApplyHook(
+  hook: (server: string, config: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>,
+): void {
+  rowConfigApplyHook = hook
+}
+
+async function applyRowConfigToLive(
+  server: string,
+  config: Record<string, unknown>,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!rowConfigApplyHook) return { ok: false, error: '热应用不可用（钩子未注入）' }
+  return rowConfigApplyHook(server, config)
+}
+
+/** 0.6.0：描述某个 standing 行的**全量挂载配置**与运行态（只读；/debug/rowConfig 与配置编辑共用）。 */
+async function describeRow(server: string): Promise<Record<string, unknown>> {
+  const entry = findStandingEntryByServer(server)
+  const out: Record<string, unknown> = {
+    server,
+    standing: standingDiag(),
+    entryFound: entry !== undefined,
+  }
+  if (!entry) return out
+  const cfg = (entry.options.config ?? {}) as Record<string, unknown>
+  const keep = ['serverName', 'transport', 'command', 'args', 'env', 'cwd', 'url', 'headers', 'toolCallTimeoutMs', 'failOnStartupError']
+  const safe: Record<string, unknown> = {}
+  for (const k of keep) if (cfg[k] !== undefined) safe[k] = cfg[k]
+  out.entryId = String(entry.id)
+  out.rowId = entry.options.id ?? null
+  out.disabled = entry.disabled === true
+  out.running = entry.fiber !== undefined
+  out.config = safe
+  out.configKeys = Object.keys(cfg)
+  // 预设文件里的声明（与 live 对比，判断是否有 drift）
+  const tree = entry.parent?.tree as { filename?: string } | undefined
+  out.file = tree?.filename ?? null
+  if (typeof out.file === 'string' && out.file.length > 0) {
+    try {
+      const text = await readFile(out.file, 'utf8')
+      out.fileHasCwd = /^\s*cwd:\s*/m.test(text) ? 'file-has-cwd-line' : 'no-cwd-in-file'
+    } catch (error) {
+      out.fileError = messageOf(error)
+    }
+  }
+  return out
+}
+
+/**
+ * GET 回传脱敏占位（P1-1，2026-09-15）。
+ *
+ * 问题：/mcp/rowConfig 与 /debug/rowConfig 的 GET 经 describeRow 回传 **求值后** 的
+ * env/headers（里面通常就是 token / API key），而这两个 GET 端点按设计**不要求**
+ * x-panel-token（「读端点开放、写操作鉴权」）——于是任何本地页面/脚本一发起 GET
+ * 就能把 secrets 原样取走，写侧却要令牌，防线是反的。
+ *
+ * 边界：脱敏**只发生在 GET/POST 响应体的组装处**，describeRow 内部仍返回真值
+ * （POST 的「live 现值 → set/unset」合并必须基于真值，否则改 cwd 会把 env 一并
+ * 写成占位符）；存储、live 配置、意图落盘一律不动，POST 写侧照收真值。
+ */
+const MASKED_VALUE = '***MASKED***'
+const MASK_KEYS = ['env', 'headers'] as const
+
+/** 浅拷 + 置换敏感段：键名保留（面板要能看出「有哪些 key」），值一律换成固定占位。 */
+function maskSecrets(config: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...config }
+  for (const key of MASK_KEYS) {
+    const value = out[key]
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) continue
+    const masked: Record<string, string> = {}
+    for (const name of Object.keys(value as Record<string, unknown>)) masked[name] = MASKED_VALUE
+    out[key] = masked
+  }
+  return out
+}
+
+/**
+ * F3b（2026-09-15）哨兵：**占位符即「保留原值」**。
+ *
+ * 问题：F3 让 GET 回传把 env/headers 的值换成 MASKED_VALUE，而面板 client
+ * （views.tsx RowConfigModal）是「读回显 → 进文本框 → 整体 POST 回写」结构：
+ * 用户打开弹窗只改 cwd 就点保存，也会把占位符当真值写回 → 真 token 被抹掉。
+ *
+ * 修法（纯后端，client 不动）：写侧把占位符解释成"这一条保持 live 现值"——
+ *   · 占位值 + live 有对应键 → 恢复 live 真值；
+ *   · 占位值 + live 无对应键 → **丢弃该条**（绝不把占位符本身存进去）；
+ *   · 非占位值 → 照收（真轮换 token 必须生效）；被 unset 删掉的键不会出现在 next 里。
+ * next[key] 非对象（字符串/数组/null）原样放过，交给 validateRowConfig 判错。
+ */
+function unmaskEcho(next: Record<string, unknown>, live: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...next }
+  for (const key of MASK_KEYS) {
+    const incoming = out[key]
+    if (incoming === null || typeof incoming !== 'object' || Array.isArray(incoming)) continue
+    const base = live[key]
+    const liveMap =
+      base !== null && typeof base === 'object' && !Array.isArray(base) ? (base as Record<string, unknown>) : {}
+    const merged: Record<string, unknown> = {}
+    for (const name of Object.keys(incoming as Record<string, unknown>)) {
+      const value = (incoming as Record<string, unknown>)[name]
+      if (value !== MASKED_VALUE) {
+        merged[name] = value
+        continue
+      }
+      if (Object.prototype.hasOwnProperty.call(liveMap, name)) merged[name] = liveMap[name]
+    }
+    out[key] = merged
+  }
+  return out
+}
+
+/** describeRow 回传体的脱敏包装（GET 回传与 POST 的 before/after/willWrite 回显共用）。 */
+function maskDescribed(described: Record<string, unknown>): Record<string, unknown> {
+  const config = described.config
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) return described
+  return { ...described, config: maskSecrets(config as Record<string, unknown>) }
+}
+
 /**
  * 定位 profile 的用户 patch 层（<profile>/cordis.patch.yml）。
  * 根树 backing 文件是 <profile>/cordis.yml（每次启动重置为 []），
@@ -323,10 +621,12 @@ function profilePatchPath(ctx: Context): string {
   throw new Error('无法定位 profile 补丁文件 cordis.patch.yml（未找到 cordis.yml 根树；请确认 profile 已正常挂载后重试）')
 }
 
-/** 已存在检查：loader 存活行或 patch 文本里已有同 id。 */
+/** 已存在检查：loader 存活行、standing 行或 patch 文本里已有同 id。 */
 function existingRowIds(ctx: Context, patchText: string): Set<string> {
   const ids = new Set<string>()
-  for (const entry of ctx.loader.entries()) {
+  // 0.6.6：必须同时看 standing 行。preset 行不在 loader 里（rc.1 起），只查 loader 会把
+  // 已安装的 server 全判成"不存在" → mcp/add 写出重复行 → serverName 同 scope 冲突。
+  for (const entry of [...ctx.loader.entries(), ...standingMcpEntries()]) {
     if (!isMcpEntry(entry)) continue
     ids.add(String(entry.options.id))
   }
@@ -436,6 +736,7 @@ interface McpServerConfigLike {
   url?: string
   headers?: Record<string, string>
   toolCallTimeoutMs?: number
+  failOnStartupError?: boolean
 }
 
 /* ── 添加 Skill（项目/全局） ───────────────────────────────────────────── */
@@ -497,6 +798,108 @@ async function addSkill(
     throw error
   }
   return { path: file }
+}
+
+/* ── /models 目录缓存（TTL + 单飞 + 抓取时间上界）───────────────────────── */
+
+interface ModelsCatalog {
+  providers: ProviderCatalogEntry[]
+  cached: boolean
+  fetchedAt: number | null
+}
+
+/** 上一次真实抓取的目录 + 在飞的抓取（单飞）。进程级：目录与面板一样是进程全局读数。 */
+const modelsCache: {
+  fetchedAt: number | null
+  providers: ProviderCatalogEntry[] | null
+  inflight: Promise<ProviderCatalogEntry[]> | null
+} = { fetchedAt: null, providers: null, inflight: null }
+
+/** 清空目录缓存（**仅供自测**：TTL 命中 / 失效 / 超时三条路径在 Node 侧的唯一入口）。 */
+export function __resetModelsCache(): void {
+  modelsCache.fetchedAt = null
+  modelsCache.providers = null
+  modelsCache.inflight = null
+}
+
+/** 超时哨兵：`Promise.race` 无法把「超时」与「抓取真的返回空目录」区分开，故用唯一对象标记。 */
+const MODELS_FETCH_TIMEOUT = Symbol('modelsFetchTimeout')
+
+/** 抓取时间上界的 promise：到点用哨兵 resolve（**不取消**那次真实抓取，见 modelsCatalog）。 */
+function fetchDeadline(ms: number): Promise<typeof MODELS_FETCH_TIMEOUT> {
+  return new Promise((resolve) => {
+    const timer: ReturnType<typeof setTimeout> = setTimeout(() => resolve(MODELS_FETCH_TIMEOUT), ms)
+    // 本仓是长驻进程：这个定时器只是「上界」，绝不能把事件循环吊住。Node 的 Timeout 有
+    // unref，浏览器/DOM 类型下 setTimeout 返回 number（没有 unref），故用可选调用。
+    timer.unref?.()
+  })
+}
+
+/** 发起一次真实抓取并登记为在飞（单飞）。返回登记进 `modelsCache.inflight` 的那个 promise。 */
+function startModelsFetch(llm: RouteServices['llm']): Promise<ProviderCatalogEntry[]> {
+  const fetch = fetchProviderCatalog(llm).then((providers) => {
+    // **迟到结果也写缓存**：本次抓取可能已因超时被调用方放弃，但抓回来的目录仍是新鲜读数，
+    // 后续请求直接命中即可（超时只是一次请求的返回语义，不是「这次抓取作废」）。
+    // 若超时窗口内又发起了新抓取，则后完成者覆盖先完成者 —— 两者都是真实读数，
+    // 不构成竞态缺陷（不存在「写进过期数据」的路径：写缓存同时会刷新 fetchedAt）。
+    modelsCache.providers = providers
+    modelsCache.fetchedAt = Date.now()
+    return providers
+  })
+  // 只清自己那一份在飞标记：超时路径会先清空 inflight，下一个请求可能已经建了新的抓取，
+  // 这里若无条件置 null 会把后来者一并清掉（单飞失效 → 并发重复扇出）。
+  let inflight: Promise<ProviderCatalogEntry[]>
+  inflight = fetch.finally(() => {
+    if (modelsCache.inflight === inflight) modelsCache.inflight = null
+  })
+  modelsCache.inflight = inflight
+  return inflight
+}
+
+/**
+ * 取 provider/模型目录，带 TTL 缓存与单飞。
+ *
+ * 取舍（为什么必须缓存）：`listModels` 是逐个 provider 打到 adapter 的调用，可能
+ * 触达网络；而 `/models` 与其它读端点一样是**无鉴权 GET**（本仓「读端点开放、
+ * 写操作鉴权」的设计，见 handleAny 注释）。TTL 缓存把这条开放端点的扇出上界锁死
+ * 成**每 60s 至多一次**完整抓取 —— 这就是对「无鉴权读端点会放大到 adapter」的
+ * 缓解手段；单飞再保证并发请求共享同一个在飞 promise，不会因并发而乘上扇出。
+ *
+ * `cached` 的语义：本次响应**直接取自**已完成的 TTL 缓存（没有参与任何抓取）。
+ * 与别人共享在飞抓取的并发请求同样是 `false` —— 它们确实不是从缓存拿到的。
+ *
+ * 时间上界（为什么必须有）：单飞把「一个 adapter 卡住」从「一次慢响应」放大成「端点对外
+ * 不可用」—— `inflight` 一旦被一个**永不 settle** 的 `listModels` 钉住，之后每个 `/models`
+ * 请求都 await 同一个 pending promise（对外表现为「宿主 llm 服务未提供 provider 目录」，
+ * 连报错都没有）。故单次抓取套 `Promise.race` 上界 `MODELS_FETCH_TIMEOUT_MS`：
+ * 超时只改**本次请求**的返回（空目录 + `cached:false`），不写缓存、不动 `fetchedAt`，
+ * 并清掉 `inflight` 让下一个请求能重新发起抓取；迟到的真实结果照常写缓存。
+ *
+ * @param llm - 经 ctx.inject 捕获的 llm 服务引用（缺失时降级为空目录，不抛）。
+ * @param timeoutMs - 抓取时间上界（ms），**仅供自测注入**（默认 `MODELS_FETCH_TIMEOUT_MS`；
+ * 生产调用点不传，避免把一个「测试用的口子」变成第二个配置面）。
+ */
+export async function modelsCatalog(
+  llm: RouteServices['llm'],
+  timeoutMs: number = MODELS_FETCH_TIMEOUT_MS,
+): Promise<ModelsCatalog> {
+  const now = Date.now()
+  // 显式空判（不是真值判断）：`[]` 也是**已完成的抓取**（llm 缺失/全部 provider 失败），
+  // 用真值判断会让它被当成「没缓存」而每个请求重新扇出。
+  if (modelsCache.providers !== null && modelsCacheFresh(modelsCache.fetchedAt, now, MODELS_TTL_MS)) {
+    return { providers: modelsCache.providers, cached: true, fetchedAt: modelsCache.fetchedAt }
+  }
+  // 局部变量留引用：await 期间 finally / 超时路径都会把 modelsCache.inflight 置回 null。
+  const inflight = modelsCache.inflight ?? startModelsFetch(llm)
+  const raced = await Promise.race([inflight, fetchDeadline(timeoutMs)])
+  if (raced === MODELS_FETCH_TIMEOUT) {
+    // 超时：本次按「空目录」返回（前端已有空态/降级文案，无需改动），**不写缓存、不动
+    // fetchedAt**，并清掉在飞标记 —— 否则一次卡顿就把 60s 窗口钉成空目录，等于把
+    // 「无超时」换成「缓存了坏结果」。清理同样是身份守卫：若期间已有新抓取接手，别清它。
+    if (modelsCache.inflight === inflight) modelsCache.inflight = null
+    return { providers: [], cached: false, fetchedAt: modelsCache.fetchedAt }
+  }
+  return { providers: raced, cached: false, fetchedAt: modelsCache.fetchedAt }
 }
 
 /* ── 路由 ──────────────────────────────────────────────────────────────── */
@@ -601,12 +1004,26 @@ export function makeRoutes(
     {
       kind: 'exact',
       path: `${API_PREFIX}/mcp/applyPending`,
-      handler: handle('POST', async () => {
+      handler: handle('POST', async (req) => {
         // P1 会话边界：「立即应用待生效变更」强制生效入口。把 next-session 模式积压的
         // 待办一次性 entry.update（=临时转 immediate），随后的请求会 miss（调用方提示费用）。
+        //
+        // 0.6.0 加固：本端点是 next-session「零缓存失效」承诺的**唯一逃生舱**，而 README
+        // 把它定义为「**用户点击**『立即应用待生效变更』按钮，作为"已知晓费用"的强制生效出口」
+        // ——「用户已知晓费用」这个前提原先在服务端**不存在**：端点只校验 method + 面板令牌，
+        // 于是模型/脚本一发裸 POST 就能单方面作废该承诺（2026-09-14 实测：模型经此端点把
+        // next-session 下的 obsidian 行在当前会话直接打开，README §92 描述的边界被绕过）。
+        // 现在要求请求体显式 `{ confirm: true }`（面板按钮的二次确认对话框才会发送），
+        // 缺了即 400 —— 把「已知晓费用」变成协议上必需的显式确认。
+        const parsed = JSON.parse((await readBody(req)) || '{}') as { confirm?: unknown }
+        if (parsed.confirm !== true) {
+          throw new Error(
+            'applyPending 需要显式确认：请求体须带 { "confirm": true }（该操作会让当前会话下一轮 100% miss 前缀缓存，费率约为 hit 的 5–12.5 倍）。这是「用户已知晓费用」的强制生效出口，不接受静默调用。',
+          )
+        }
         const applied = await applyPendingMcp(deps)
         invalidateMcp()
-        return { applied }
+        return { applied, confirmed: true }
       }, true),
     },
     {
@@ -676,8 +1093,14 @@ export function makeRoutes(
             const state = await readState()
             return {
               autoManage: catalogRuntime.autoManage,
+              // P3b：按模型分流的回显。autoManageMounted = 中间层**已实际挂载**
+              // （总开关关但覆盖表有 true 项时为 true，与 autoManage 不是一回事）。
+              autoManageByRoute: stateAutoManageByRoute(state),
+              autoManageMounted: catalogRuntime.autoManageMounted,
+              middleLayerHides: stateMiddleLayerHides(state),
               applyMode: stateApplyMode(state),
               configAutoManage: config.autoManage ?? null,
+              toolBudget: stateToolBudget(state) ?? null,
             }
           },
         },
@@ -686,22 +1109,99 @@ export function makeRoutes(
           run: async (req) => {
             const parsed = JSON.parse((await readBody(req)) || '{}') as {
               autoManage?: boolean
+              /** 单条覆盖项：key 为 provider 或 provider/model；value null=删除该项（继承总开关）。 */
+              routeOverride?: { key?: string; value?: boolean | null }
               applyMode?: ApplyMode
+              middleLayerHides?: 'disabled' | 'all'
+              toolBudget?: number | null
             }
             const state = await readState()
             state.config ??= {}
             if (typeof parsed.autoManage === 'boolean') {
               state.config.autoManage = parsed.autoManage
             }
+            if (parsed.routeOverride && typeof parsed.routeOverride.key === 'string' && parsed.routeOverride.key.length > 0) {
+              const table = (state.config.autoManageByRoute ??= {})
+              const value = parsed.routeOverride.value
+              // null / 非布尔 = 「继承总开关」，即从表里删掉这一项（而不是写 false）
+              if (typeof value === 'boolean') table[parsed.routeOverride.key] = value
+              else delete table[parsed.routeOverride.key]
+              // 空表即删：state.json 里不留空对象（空表 == 旧行为，见 state.ts 注释）
+              if (Object.keys(table).length === 0) delete state.config.autoManageByRoute
+            }
+            if (parsed.middleLayerHides === 'disabled' || parsed.middleLayerHides === 'all') {
+              state.config.middleLayerHides = parsed.middleLayerHides
+            }
             if (parsed.applyMode === 'immediate' || parsed.applyMode === 'next-session') {
               state.config.applyMode = parsed.applyMode
             }
+            // 工具预算：null = 清除（不提示）；只接受 >0 的有限数，其余忽略（保持原值）
+            if (parsed.toolBudget === null) {
+              delete state.config.toolBudget
+            } else if (typeof parsed.toolBudget === 'number' && Number.isFinite(parsed.toolBudget) && parsed.toolBudget > 0) {
+              state.config.toolBudget = Math.round(parsed.toolBudget)
+            }
             await writeState(state)
-            if (typeof parsed.autoManage === 'boolean') catalogRuntime.applyAutoManage(parsed.autoManage)
-            return { autoManage: catalogRuntime.autoManage, applyMode: stateApplyMode(state) }
+            // 只有中间层相关字段变化才重挂：applyAutoManage 会 dispose/register 控制工具，
+            // 触发 tools/change → 整段前缀缓存失效。改 applyMode / toolBudget 与中间层
+            // 无关，不能顺带让用户付一次 miss。
+            const middlewareTouched =
+              typeof parsed.autoManage === 'boolean' ||
+              parsed.routeOverride !== undefined ||
+              parsed.middleLayerHides !== undefined
+            if (middlewareTouched) {
+              // 总开关与覆盖表任一变化都要重算挂载（覆盖表出现 true 项时即便总开关关也要挂）
+              const master = typeof state.config.autoManage === 'boolean' ? state.config.autoManage : catalogRuntime.autoManage
+              catalogRuntime.applyAutoManage(master, stateAutoManageByRoute(state), stateMiddleLayerHides(state))
+            }
+            // 面板视图是 60s 缓存：不失效的话用户点了「设置」要等一轮轮询才看到变化
+            // （工具预算同理，与中间层无关但同批失效）。
+            invalidateMcp()
+            return {
+              autoManage: catalogRuntime.autoManage,
+              autoManageByRoute: stateAutoManageByRoute(state),
+              autoManageMounted: catalogRuntime.autoManageMounted,
+              middleLayerHides: stateMiddleLayerHides(state),
+              applyMode: stateApplyMode(state),
+              toolBudget: stateToolBudget(state) ?? null,
+            }
           },
         },
       ], true),
+    },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/models`,
+      handler: handle('GET', async (req) => {
+        // 按模型覆盖的**数据源补齐**：provider 目录 + 每个 provider 的模型目录。
+        // 此前覆盖卡只能列出「当前解析路由的键 ∪ 覆盖表现有键」，于是当面板会话与
+        // 用户实际在用的模型不一致时（当时 `/state` 不带 session → host 按 roots[0] 解析），
+        // 面板连为那个模型预置规则的入口都没有。目录让「任何 provider/模型」都可点。
+        // 会话口径已改善：0.6.0 起面板**可用时**带 `?session=`（本端点即消费它），此时
+        // `active` 就是该会话解析出的路由；不带该参数时行为与旧版一致。
+        // 读端点：不传 guarded（与 handleAny 的「读端点开放、写操作鉴权」一致）。
+        // 目录本身带 TTL 缓存 + 单飞（见 modelsCatalog）：无鉴权调用的扇出上界
+        // 锁死为 60s 一次，而不是每个请求一次；单次抓取另有 MODELS_FETCH_TIMEOUT_MS
+        // 上界，卡住的 adapter 不会把这条端点对所有人黏住。
+        const url = req.url ?? ''
+        const session = queryParam(url, 'session') ?? null
+        const catalog = await modelsCatalog(catalogRuntime.routeServices.llm)
+        // autoManage / autoManageByRoute / autoManageMounted 与 /config GET 逐字同源
+        // （same readState + 同一批 getter），面板两处读数不得漂移。
+        const state = await readState()
+        return {
+          providers: catalog.providers,
+          autoManage: catalogRuntime.autoManage,
+          autoManageByRoute: stateAutoManageByRoute(state),
+          autoManageMounted: catalogRuntime.autoManageMounted,
+          // active 走 model-route.ts 的 activeRouteView（与 /state 的 autoManageActive
+          // 同一份实现）：面板高亮的「当前路由」必须与生效依据同源。
+          active: activeRouteView(catalogRuntime.decisionFor(resolveAgent(ctx, session ?? undefined))),
+          session,
+          cached: catalog.cached,
+          fetchedAt: catalog.fetchedAt,
+        }
+      }),
     },
     {
       kind: 'exact',
@@ -715,6 +1215,32 @@ export function makeRoutes(
         const catalog: Record<string, { tools: number; fetchedAt: number; source: string }> = {}
         for (const [server, info] of Object.entries(catalogRuntime.catalog)) {
           catalog[server] = { tools: info.tools.length, fetchedAt: info.fetchedAt, source: info.source }
+        }
+        // P5（D5）：网关挂载面（无 secrets；lastCheck 仅计数 detail）。
+        let gateway: { mounted: string[]; lastCheck: { at: number; ok: boolean; detail: string } | null } | undefined
+        // 0.5.8：临时启用控制器的 aiOwned 集合（回收器唯一作用域）+ 回收器每轮判定输入。
+        let controller: { aiOwned: Array<{ server: string; refCount: number; lastUsed: number; idleMs: number }> } | undefined
+        // 0.6.3：按需能力表采集的阶段痕迹。
+        let inventory: unknown
+        try {
+          const { gatewayStateForDebug, controllerStatusForDebug, inventoryTraceForDebug } = await import('./index')
+          gateway = gatewayStateForDebug()
+          controller = controllerStatusForDebug()
+          // 0.6.3：能力表采集的逐阶段痕迹（采空时唯一的定位手段）
+          inventory = inventoryTraceForDebug()
+        } catch {
+          gateway = undefined
+          controller = undefined
+        }
+        let reaper: unknown
+        let counters: unknown
+        try {
+          const { reaperDiagnostics, controllerCounters } = await import('./mcpcall')
+          reaper = reaperDiagnostics()
+          counters = controllerCounters()
+        } catch {
+          reaper = undefined
+          counters = undefined
         }
         // HTTP 路径 scope 诊断（2026-08-27 filesystem「无工具」取证）：
         // 复现 collectMcp 的 scope 解析 + schemas 视图，确认 key 是否命中 standing 层链。
@@ -741,13 +1267,162 @@ export function makeRoutes(
         } catch (error) {
           scopeDiag.error = messageOf(error)
         }
-        return { diag: catalogRuntime.diag, catalog, scopeDiag }
+        return {
+          diag: catalogRuntime.diag,
+          catalog,
+          scopeDiag,
+          // 0.5.7：preset 行句柄来源的自证读数。`mountsSeen: 0` + `apiAvailable: true`
+          // = 宿主 livePresetMounts() 看不到挂载（模块身份错位或宿主未挂 preset）；
+          // `lastRowCount` 应为 preset 里的 MCP 行数（本机 10）。
+          standingDiag: standingDiag(),
+          ...(controller ? { controllerStatus: controller } : {}),
+          ...(inventory !== undefined ? { inventoryTrace: inventory } : {}),
+          ...(reaper !== undefined ? { reaper } : {}),
+          ...(counters !== undefined ? { counters } : {}),
+          ...(gateway ? { gateway } : {}),
+        }
       }),
+    },
+    {
+      // 0.6.0「更多配置」：读/写某个 MCP 行的**挂载配置**（cwd/command/args/env/url/headers…）。
+      //
+      // 动机：面板卡片只显示 serverName/transport/disabled，看不到 cwd 一类字段；而
+      // codegraph 这类按 cwd 认项目的 MCP 一旦缺 cwd 就表现为"行在跑却零工具"。
+      //
+      // 三段式（与 toggle 的架构一致，铁律不破）：
+      //   ① 立即生效：热改 live entry 的 config（实测干净：entry.update({config}) 不丢行）；
+      //   ② 意图落盘：写 state.json（运行期唯一安全的写面）；
+      //   ③ 启动物化：syncPresetFiles 在 apply 早期把意图写进预设行。
+      kind: 'exact',
+      path: `${API_PREFIX}/mcp/rowConfig`,
+      handler: handleAny([
+        {
+          method: 'GET',
+          run: async (req) => {
+            const q = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams
+            const server = (q.get('server') ?? '').trim()
+            if (!server) throw new Error('server is required')
+            const described = await describeRow(server)
+            // P1-1：GET 无令牌即回传 → 回传体脱敏（真值只在写侧与服务端内部流转）
+            return { ...maskDescribed(described), editableKeys: EDITABLE_CONFIG_KEYS }
+          },
+        },
+        {
+          method: 'POST',
+          run: async (req) => {
+            const body = JSON.parse((await readBody(req)) || '{}') as {
+              server?: string
+              set?: Record<string, unknown>
+              unset?: string[]
+              apply?: boolean
+            }
+            const server = String(body.server ?? '').trim()
+            if (!server) throw new Error('server is required')
+            const described = await describeRow(server)
+            if (described.entryFound !== true) throw new Error(`standing 行未找到：${server}`)
+            const badKeys = [...Object.keys(body.set ?? {}), ...(body.unset ?? [])].filter(
+              (k) => !(EDITABLE_CONFIG_KEYS as readonly string[]).includes(k),
+            )
+            if (badKeys.length > 0) throw new Error(`不允许的配置键：${badKeys.join(', ')}`)
+
+            // 合并成新的完整配置：live 现值 → 应用 set/unset
+            // （described 在此必须是**未脱敏的真值**，否则一次只改 cwd 的保存会把
+            //   env/headers 整体写成占位符 → 真 secrets 被抹掉）
+            const live = (described.config ?? {}) as Record<string, unknown>
+            let nextConfig: Record<string, unknown> = { ...live }
+            for (const key of body.unset ?? []) delete nextConfig[key]
+            for (const [key, value] of Object.entries(body.set ?? {})) nextConfig[key] = value
+            // F3b：回显里的占位符 = 「保留原值」（面板整表单回写时不许抹掉真 secrets）
+            nextConfig = unmaskEcho(nextConfig, live)
+            validateRowConfig(nextConfig)
+
+            // ② 意图落盘（运行期唯一安全的写面）
+            await writeRowConfigIntent(server, described, nextConfig)
+
+            // ① 立即生效（apply:false 可跳过，用于"只记意图、下次重启生效"）
+            const applied =
+              body.apply === false
+                ? { ok: false, error: 'skipped (apply:false)' }
+                : await applyRowConfigToLive(server, nextConfig)
+            invalidateMcp()
+            // P1-1：after 回显同样脱敏（能证明「写入生效」而不把 secrets 回吐给调用方）
+            return { ok: true, server, applied, after: maskDescribed(await describeRow(server)) }
+          },
+        },
+      ], true),
+    },
+    {
+      // 0.6.0 取证用（只读）：读某 server 行的**全量挂载配置**（含 cwd/command/args/env）。
+      //
+      // 面板卡片只显示 serverName/transport/disabled，看不到 cwd 一类字段；而
+      // codegraph 这类按 cwd 认项目的 MCP，配置错在哪正是靠这个端点定位的
+      // （症状：行"在跑"却零工具，因为没有 cwd → 子进程在会话工作区找不到索引）。
+      // 同时附带模块身份读数（模块私有 WeakMap 若错位会静默失联）。
+      kind: 'exact',
+      path: `${API_PREFIX}/debug/rowConfig`,
+      handler: handleAny([
+        {
+          method: 'GET',
+          run: async (req) => {
+            const q = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams
+            const server = (q.get('server') ?? '').trim()
+            if (!server) throw new Error('server is required')
+            return maskDescribed(await describeRow(server))
+          },
+        },
+        {
+          // 写入（取证用）：把 config 增删改到 standing 行上，观察是否干净重启。
+          // body: { server: string, set?: Record<string,unknown>, unset?: string[], update?: boolean }
+          // `update:false` 只回报将要写入的内容（dry-run），不碰运行时。
+          method: 'POST',
+          run: async (req) => {
+            const body = JSON.parse((await readBody(req)) || '{}') as {
+              server?: string
+              set?: Record<string, unknown>
+              unset?: string[]
+              update?: boolean
+            }
+            const server = String(body.server ?? '').trim()
+            if (!server) throw new Error('server is required')
+            const entry = findStandingEntryByServer(server)
+            if (!entry) throw new Error(`standing 行未找到：${server}`)
+            const before = await describeRow(server)
+            const live = (entry.options.config ?? {}) as Record<string, unknown>
+            let next: Record<string, unknown> = { ...live }
+            for (const key of body.unset ?? []) delete next[key]
+            for (const [key, value] of Object.entries(body.set ?? {})) next[key] = value
+            // F3b：同 /mcp/rowConfig —— 基底是 live 真值，占位符即「保留原值」
+            // （dry-run 的 willWrite 仍走 maskSecrets，不回吐真值：F3 已定边界不动）
+            next = unmaskEcho(next, live)
+            const allowed = ['serverName', 'transport', 'command', 'args', 'env', 'cwd', 'url', 'headers', 'toolCallTimeoutMs', 'failOnStartupError']
+            const rejected = Object.keys(next).filter((k) => !allowed.includes(k))
+            if (rejected.length > 0) throw new Error(`不允许的配置键：${rejected.join(', ')}`)
+            if (body.update === false) return { dryRun: true, before: maskDescribed(before), willWrite: maskSecrets(next) }
+            let updateError: string | null = null
+            try {
+              await entry.update({ config: next })
+            } catch (error) {
+              updateError = messageOf(error)
+            }
+            // 等一拍让 fiber 重建，再回报现场（同 entryId 是否还在 standing 树里、
+            // 是否仍在运行、配置是否已变）—— 这就是"能否热改配置"的判据。
+            await new Promise((resolve) => setTimeout(resolve, 1200))
+            return { updateError, before: maskDescribed(before), after: maskDescribed(await describeRow(server)) }
+          },
+        },
+      ], true),
     },
     {
       kind: 'exact',
       path: `${API_PREFIX}/debug/collect`,
       handler: handle('POST', async () => {
+        // P5（W3）：先挂载后快照（新工具进 catalog），串行；挂载失败不阻断快照。
+        try {
+          const { ensureOpenMountsForDebug } = await import('./index')
+          await ensureOpenMountsForDebug().catch(() => undefined)
+        } catch {
+          /* 挂载失败不阻断快照 */
+        }
         await triggerSnapshot()
         return { diag: catalogRuntime.diag }
       }, true),
@@ -769,6 +1444,62 @@ export function makeRoutes(
           disabledTools: [...disabledToolsOf(parsed.serverName)],
         }
       }, true),
+    },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/mcp/toolBulk`,
+      handler: handleAny([
+        {
+          method: 'POST',
+          run: async (req) => {
+            // 工具级批量禁用/启用：面板的「全部禁用 / 全部启用 / 按当前过滤」。
+            // toolNames **三态**（判定实现在 resolveToolBulkTargets，纯函数可直测）：
+            //   · 省略/缺字段 = 该 server 面板视图里的全部工具（live schemas，缺失时回退
+            //     catalog 快照 —— 与逐个开关看到的列表完全同源，不会漏项）；
+            //   · 显式数组 = 精确集合（[] 为合法空操作：不写盘、changed=0、仍 200）；
+            //   · 非数组，或非空却一条都不匹配 → 400（不静默降级为「全部」也不静默 no-op）。
+            // 命中数少于点名数时，未识别的名字由响应 ignoredToolNames 回传（目录漂移可见化）。
+            const parsed = JSON.parse((await readBody(req)) || '{}') as {
+              serverName?: string
+              disabled?: boolean
+              toolNames?: unknown
+              session?: string
+            }
+            if (typeof parsed.serverName !== 'string' || parsed.serverName.length === 0) throw new Error('serverName is required')
+            if (typeof parsed.disabled !== 'boolean') throw new Error('disabled (boolean) is required')
+            const serverName = parsed.serverName
+            const view = await cachedMcp(parsed.session)
+            const row = view.mcp.find((item) => item.serverName === serverName)
+            if (!row) throw new Error(`unknown MCP server: ${serverName}`)
+            const known = row.toolList ?? []
+            if (known.length === 0) {
+              // 目录不可得（server 从未启动且无 catalog 快照）：批量无从下手，明确报错，
+              // 而不是静默写 0 条让用户以为已生效。
+              throw new Error(`no tool catalog for ${serverName} (enable it once so its tools can be discovered)`)
+            }
+            const resolved = resolveToolBulkTargets(known.map((tool) => tool.name), parsed.toolNames)
+            if ('error' in resolved) throw new Error(resolved.error)
+            // E2：内核一次 state.json 读-改-写（绝不 N 次写盘）。
+            // 目标为空（显式 `[]`）= 合法空操作：连内核都不进，天然不写盘。
+            const changed = resolved.targets.length === 0
+              ? 0
+              : await setToolsDisabledBulk(serverName, resolved.targets, parsed.disabled)
+            invalidateMcp()
+            // E1：与 /mcp/toolToggle 同形（disabledTools 为全名数组），另给计数与翻转条数
+            const disabledTools = [...disabledToolsOf(serverName)]
+            return {
+              serverName,
+              disabled: parsed.disabled,
+              disabledTools,
+              disabledCount: disabledTools.length,
+              changed,
+              // WARN-1：客户端点名了但不在当前 known 里的名字（60s 缓存可能已过期）——
+              // 调用方据此察觉「以为动了 N 条，实际只动了交集」的偏差。
+              ignoredToolNames: resolved.ignored,
+            }
+          },
+        },
+      ], true),
     },
     {
       kind: 'exact',

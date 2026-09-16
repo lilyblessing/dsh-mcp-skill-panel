@@ -9,7 +9,7 @@
 
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.5.4-green.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.6.0-green.svg">
 </p>
 
 ---
@@ -29,7 +29,7 @@
 | 🟢 **MCP 实时启停** | 停用 → loader entry 卸载（断开连接 + 注销全部 `mcp__<server>__*` 工具），工具从模型目录**立即消失**、schema token 即时释放；启用 → 重新连接 + 恢复工具，**无需重启** |
 | 🧠 **Skill 启停** | 往 SKILL.md frontmatter 注入/移除 `disable-model-invocation: true`，模型 catalog 实时失效 |
 | 📊 **停用态回填** | 停用的 MCP 卡片仍显示「目录中有多少工具、约多少 token」（来自私有 catalog 的 last-good 快照），决策是否启用更有依据 |
-| 🤖 **AI 中间层（可选）** | `autoManage` 开启后：停用的 MCP 对模型隐藏，模型经 `mcp_search` / `mcp_call` 按需使用；用户打开的 MCP 保持模型可见；AI 临时启用不污染上下文 |
+| 🤖 **AI 中间层（可选）** | `autoManage` 开启后：停用的 MCP 对模型隐藏，模型经 `dsh_mcp_search` / `dsh_mcp_call` 按需使用；用户打开的 MCP 保持模型可见；AI 临时启用不污染上下文 |
 | 🔒 **用户启停不被模型干预** | 回收器只回收「AI 从停用态临时启用」的 server；用户手动打开的 server 永不被自动关闭 |
 | 💾 **重启保持** | 启停意图持久化（`~/.dsh/dsh-mcp-skill-panel/state.json`）并在启动早期物化进预设组合文件；catalog 快照（`catalog.json`）重启后仍可回填 |
 | ⚡ **响应快** | 开关点击即翻转（乐观更新 + 服务端确认），分域缓存 + 事件驱动失效（`tools/change` / `skills/change`），MCP 页不触发 skill 目录扫描 |
@@ -38,8 +38,25 @@
 | ⏱️ **生效时机选项** | 手动开关可选「立即生效」或「下次会话生效」，后者零缓存失效、零额外费用；AI 中间层按需调用始终不触发缓存 miss |
 | ➕ **快速迁移添加** | 面板粘贴其它 harness 的 `mcpServers` JSON（Claude Code / Codex 等）→ 转换预览 → 一键添加为全局（写入 profile patch）或项目（`.dsh/mcps/mcp.json`）；`type/transport` 自动推断、`${VAR}` 环境变量自动插值 |
 | 📁 **项目级 MCP** | 读取 `<工作空间>/.dsh/mcps/**/mcp.json`（根目录先读、子目录按 serverName 覆盖），**仅该项目工作空间的会话可见**（按会话 cwd 过滤）；文件改动热更新 |
-| 🛠️ **工具级禁用** | 在 server 级启停之上按工具精确控制：被禁工具从 `mcp_search` 检索结果过滤、`mcp_call` 直接拒绝；项目 MCP 按工作区作用域隔离（A 区禁用不影响 B 区） |
+| 🛠️ **工具级禁用** | 在 server 级启停之上按工具精确控制：被禁工具从 `dsh_mcp_search` 检索结果过滤、`dsh_mcp_call` 直接拒绝；项目 MCP 按工作区作用域隔离（A 区禁用不影响 B 区） |
+| 🧮 **工具级批量启停** | `POST /mcp/toolBulk` 一次读-改-写落整批（不写 N 次盘）：`toolNames` **三态** —— 省略=该 server 当前目录里的全部工具 / 数组=精确集合（`[]` 为空操作）/ 非数组、或非空却 0 命中=400（不静默降级成「全部」，也不静默 no-op）；响应含 `ignoredToolNames`，把「点名了但不在当前目录」的项回传，目录漂移可见化 |
+| 📈 **有效统计** | 工具数 / token 数同时给「目录总数」与「**工具级启用数**」：面板按与装配过滤同源的谓词（`isToolDisabled` + 会话工作区）复算，禁用 400 个工具后不再仍显示 450。**口径边界**：只扣「工具级禁用」，**不**覆盖 server 级隐藏（AI 临时启用 / `middleLayerHides='all'`）与 project-mcp 工作区过滤 |
+| 🎯 **工具预算** | `toolBudget` 设一条工具数红线（如 350），超线卡片变红；比较对象是**全部工具**（含 read/edit/bash/skill 等非 MCP 工具），数据源优先请求面真值 —— `toolsAllSource='request'`（会话上一次已落盘请求的装配后工具表），取不到时回退注册表 `'registry'`，且口径来源**在卡片上标注**（注册表口径是近似值，不得混同） |
+| 🧭 **AI 中间层按模型分流** | `autoManageByRoute`：按 `provider` 或 `provider/model` 分别开中间层；查表序 `provider/model` → `provider` → `autoManage` 总开关。覆盖项为真时即使总开关关也会挂载中间层（被覆盖的模型可用 `dsh_mcp_search` / `dsh_mcp_call`），其余模型维持直用形态 |
+| 🙈 **`middleLayerHides`** | 中间层隐藏范围，默认 `'disabled'`（只隐藏停用的 server）；`'all'` 时**连已启用的 server 也从模型装配面隐藏**，模型统一改经中间层取用 —— 只改「本次装配的可见性」，工具注册表与 `dsh_mcp_call` 执行通道不受影响 |
 | 🪄 **创建技能** | 面板填写名称/描述/指令即可创建技能（全局 `~/.dsh/skills` 或项目根 `.dsh/skills`），可上传 SKILL.md 自动解析 frontmatter 预填，创建后立即可见 |
+
+## 🧾 配置项
+
+面板可写的配置落在 `~/.dsh/dsh-mcp-skill-panel/state.json`（优先于 cordis `config`），可用 `GET/POST /config` 读写：
+
+| 配置项 | 取值 | 说明 |
+| --- | --- | --- |
+| `autoManage` | `false`（默认）/ `true` | AI 中间层总开关（形态 1 ↔ 形态 2） |
+| `applyMode` | `immediate`（默认）/ `next-session` | 手动开关的生效时机（见「生效时机」一节） |
+| `toolBudget` | 正整数 / 空 | 工具数红线：**全部工具**（含 read/edit/bash/skill 等非 MCP 工具）超过它即告警；空 = 不提示。数值只是可配置默认值，见「已知限制」 |
+| `autoManageByRoute` | `{ "<provider>": bool, "<provider>/<model>": bool }` | 中间层**按模型分流**；查表序 `provider/model` → `provider` → `autoManage` 总开关。经 `POST /config` 的 `routeOverride: { key, value }` 单条增删（`value: null` = 删除该键）；任一覆盖项为真即挂载中间层 |
+| `middleLayerHides` | `'disabled'`（默认）/ `'all'` | 中间层隐藏范围：`'disabled'` 只隐藏停用的 server；`'all'` 连已启用的 server 也从模型装配面隐藏 |
 
 ## 🏗️ 两种形态（面板上的「AI 中间层」开关）
 
@@ -58,7 +75,7 @@ stateDiagram-v2
     state 形态2中间层 {
         direction LR
         M2: 停用的 MCP 对模型隐藏
-        M2a: 模型经 mcp_search / mcp_call 按需调用
+        M2a: 模型经 dsh_mcp_search / dsh_mcp_call 按需调用
         M2b: 用户打开的 MCP 保持模型可见
         M2c: AI 临时启用不污染上下文
     }
@@ -75,11 +92,11 @@ flowchart TD
     C -- 成功 --> D{server 当前状态?}
     D -- 用户打开 disabled=false 且非 AI 启用 --> K
     D -- 用户停用 disabled=true --> F[过滤: 模型不可见]
-    D -- AI 临时启用 mcp_call 保活中 --> F
-    F --> G[需要时: mcp_search 检索 / mcp_call 按需调用]
+    D -- AI 临时启用 dsh_mcp_call 保活中 --> F
+    F --> G[需要时: dsh_mcp_search 检索 / dsh_mcp_call 按需调用]
 ```
 
-**工具级禁用（v0.5.3+，常开）**：除上述 server 级过滤外，被禁用的单个工具从装配结果剔除、`mcp_search` 检索结果过滤、`mcp_call` 直接拒绝并提示「请在 MCP 管理面板打开该工具后再调用」；禁用集合持久化在 `state.json`，重启保持。
+**工具级禁用（v0.5.3+，常开）**：除上述 server 级过滤外，被禁用的单个工具从装配结果剔除、`dsh_mcp_search` 检索结果过滤、`dsh_mcp_call` 直接拒绝并提示「请在 MCP 管理面板打开该工具后再调用」；禁用集合持久化在 `state.json`，重启保持。
 
 ## ⏱️ 生效时机：立即生效 vs 下次会话生效
 
@@ -97,7 +114,7 @@ flowchart TD
 
 ### AI 中间层按需调用：天然免缓存失效
 
-开启 AI 中间层（`autoManage`）后，模型经 `mcp_search` / `mcp_call` 按需调用已停用的 MCP——这种临时启用**不会造成缓存 miss**。原因：每回合的装配过滤（`system-prompt/assemble` Waterfall）让临时启用的 server 工具对模型保持不可见，前缀恒定，KV-Cache 持续命中。
+开启 AI 中间层（`autoManage`）后，模型经 `dsh_mcp_search` / `dsh_mcp_call` 按需调用已停用的 MCP——这种临时启用**不会造成缓存 miss**。原因：每回合的装配过滤（`system-prompt/assemble` Waterfall）让临时启用的 server 工具对模型保持不可见，前缀恒定，KV-Cache 持续命中。
 
 ### 默认值与生效边界
 
@@ -120,9 +137,13 @@ dsh plugin --profile web add "github:lilyblessing/dsh-mcp-skill-panel#main"
 
 产物已入库（`lib/`），git 源一行安装，无需构建授权。安装后**重启 `dsh web`**（bundle 层在启动时合成，热更新无效），设置页即出现「MCP 与技能管理面板」入口。
 
+> 🎯 适配 DSH `0.1.5-rc2`；更早版本的 DSH 请先升级 DSH，再安装/更新本插件。
+
 > 📦 已发布到 **npm**：`dsh-mcp-skill-panel`（[npm 页面](https://www.npmjs.com/package/dsh-mcp-skill-panel)）。npm 版为预构建产物，安装可跳过 `allowBuilds` 构建授权，也可直接以包名安装；git 源方式始终可用。
 >
-> ⬆️ **升级**：git 源用户请在 DSH profile 目录执行 `pnpm update dsh-mcp-skill-panel`（`pnpm add` 对相同 spec 不会重解析 git 分支）；npm 用户 `pnpm add dsh-mcp-skill-panel@latest`（当前 latest = **0.5.4**）即可。
+> ⬆️ **升级**：git 源用户请在 DSH profile 目录执行 `pnpm update dsh-mcp-skill-panel`（`pnpm add` 对相同 spec 不会重解析 git 分支）；npm 用户 `pnpm add dsh-mcp-skill-panel@latest` 即可（版本以 `npm view dsh-mcp-skill-panel version` 为准）。npm 发版**可能滞后于仓库**（0.5.4 / 0.5.5 曾发布后撤下），最新代码以**仓库**（git 源）为准。
+>
+> 🔁 **更新插件后必须重启 DSH**（与安装同理，bundle 层只在启动时合成）：只 `pnpm update` 而不重启时，浏览器已加载新客户端、宿主进程仍是旧代码（没有 `/models` 路由 → 404），覆盖卡会显示「端点未注册（更新插件后需重启 DSH）」的降级提示。**这是预期状态**，重启即恢复，不必排查网络或面板令牌。
 
 ## 🚀 使用
 
@@ -144,14 +165,18 @@ dsh plugin --profile web add "github:lilyblessing/dsh-mcp-skill-panel#main"
 | GET | `/state?session=<id>&part=<mcp\|skills\|all>` | 清单快照；`part` 分域拉取，缺省 all |
 | POST | `/mcp/toggle` | `{ entryId, disabled }` 启停单个 MCP |
 | POST | `/mcp/toggleBatch` | `[{ entryId, disabled }]` 批量启停（400ms 合并，单次失效） |
-| POST | `/mcp/applyPending` | 立即应用待生效队列（next-session 意图强制生效） |
+| POST | `/mcp/applyPending` | 立即应用待生效队列（next-session 意图强制生效）；**需 body `{ confirm: true }`**，缺了即 400（该操作会让当前会话下一轮 100% miss 前缀缓存，故要求显式确认） |
+| GET\|POST | `/mcp/rowConfig` | body `{ server, set?, unset?, apply? }` 读/写某 MCP 行的挂载配置（`command`/`args`/`env`/`cwd`/`url`/`headers`…）；GET **开放但 env/headers 脱敏回显**，POST **需 `x-panel-token`**；写侧占位符即「保留原值」 |
+| GET\|POST | `/debug/rowConfig` | GET 只读取某 server 行的全量挂载配置 + 模块身份读数（运维排障用；env/headers 脱敏回显）；POST 为取证用写入（body `{ server, set?, unset?, update? }`，`update:false` 即 dry-run 只回报 `willWrite`，不碰运行时） |
 | POST | `/mcp/toolToggle` | `{ serverName, toolName, disabled }` 工具级禁用（全名 `mcp__<server>__<tool>`） |
+| POST | `/mcp/toolBulk` | `{ serverName, disabled, toolNames?, session? }` 工具级**批量**启停。`toolNames` **三态**：省略/缺字段 = 该 server 当前目录里的全部工具；数组 = 精确集合（`[]` 为合法空操作，200 + `changed:0`）；**非数组**、或非空却**一条都不匹配** → 400（不静默降级为「全部」）。目录不可得（从未启动且无快照）同样 400。响应 `{ serverName, disabled, disabledTools, disabledCount, changed, ignoredToolNames }`：`ignoredToolNames` = 点名了但不在当前目录视图里的项（60s 缓存可能已过期，据此察觉「以为动了 N 条、实际只动交集」） |
 | POST | `/mcp/preview` | `{ json }` 快速迁移预览：粘贴 mcpServers JSON → 解析 + YAML patch 转换（返回 warnings） |
 | POST | `/mcp/add` | `{ json, target: global\|project, workspace? }` 添加 MCP（全局写入 profile patch / 项目写入 `.dsh/mcps/mcp.json`） |
 | POST | `/skill/toggle` | `{ name, disabled }` |
 | POST | `/skill/add` | `{ name, description, body, target: global\|project, workspace? }` 创建技能 |
-| GET | `/config` | 读取 AI 中间层开关与生效时机 |
-| POST | `/config` | `{ autoManage?, applyMode? }` 切换中间层 / 生效时机（持久化到 state.json） |
+| GET | `/config` | 读取中间层与面板配置：`autoManage` / `applyMode` / `autoManageByRoute`（按模型覆盖表）/ `autoManageMounted`（中间层当前是否挂载）/ `middleLayerHides` / `toolBudget` |
+| GET | `/models` | provider/模型目录（数据源 = 宿主 llm 服务）+ `active` 路由投影：`providers`（`{ provider, name, models[] }`，按 provider 字典序）/ `autoManage` / `autoManageByRoute` / `autoManageMounted` / `active`（`on` + `source` 四取值 `'model'`\|`'provider'`\|`'master'`\|`'no-route'` + `provider`/`model`）/ `session` / `cached`（本次直接取自 TTL 缓存）/ `fetchedAt`。`listModels` 会逐个 provider 打到 adapter（可能触达网络），故 **60s TTL + 单飞**（`MODELS_TTL_MS = 60_000`；并发请求共享同一在飞抓取）把这条**无鉴权读端点**的扇出上界锁死为 60s 一次；三条降级路径都不抛（`llm` 缺失 / `listProviders()` 抛错 → `providers: []`；单个 `listModels()` 抛错 → 只该 provider `models: []`） |
+| POST | `/config` | `{ autoManage?, applyMode?, toolBudget?, middleLayerHides?, routeOverride? }` 写配置并持久化到 state.json。`toolBudget`：`null`=清除，只接受 >0 的有限数；`middleLayerHides`：`'disabled'`\|`'all'`；`routeOverride`：`{ key: '<provider>' \| '<provider>/<model>', value: boolean \| null }` 单条增删按模型覆盖（`null`=删除该键）。仅 `autoManage` / `middleLayerHides` / `routeOverride` 触发中间层重挂（`tools/change` → 该轮前缀缓存 miss） |
 | GET | `/debug` | catalog 采集诊断 + scope 解析现场（scopeDiag），运维排障用 |
 | POST | `/debug/collect` | 手动触发一次 catalog 采集 |
 | GET | `/token` | 取本进程随机令牌（面板 POST 前自动获取并携带 `x-panel-token` 头） |
@@ -168,7 +193,7 @@ flowchart LR
         C[catalog 采集<br/>tools/change 增量 + last-good 持久化]
         L[loader 启停<br/>resolve + update disabled]
         F[装配过滤<br/>system-prompt/assemble]
-        T[mcp_search / mcp_call<br/>保活启用 + 空闲回收]
+        T[dsh_mcp_search / dsh_mcp_call<br/>保活启用 + 空闲回收]
         R --> L
         C --> R
         F --> C
@@ -185,16 +210,16 @@ flowchart LR
 
 **MCP 持久化为何分两步**：预设树（`PresetTree`）的 `write()` 是显式 no-op，且 `dsh-agent-presets` 用 `{mtimeMs, size}` stamp 检测预设文件变化 —— **运行期写该文件会触发 standing 重挂而旧实例不清理**（serverName 全冲突、会话创建失败，0.1.0 实测事故）。因此 toggle 只写插件状态文件，插件 `apply`（启动早期、standing 未挂载）时再把意图物化到预设文件。
 
-**中间层调用链**（`mcp_call` 对停用 server）：
+**中间层调用链**（`dsh_mcp_call` 对停用 server）：
 
 ```mermaid
 sequenceDiagram
     participant M as 模型
-    participant P as 插件（mcp_call）
+    participant P as 插件（dsh_mcp_call）
     participant L as loader
     participant S as MCP server
 
-    M->>P: mcp_call(server, tool, args)
+    M->>P: dsh_mcp_call(server, tool, args)
     P->>L: entry.update({disabled:false})（记录 AI owner）
     L->>S: spawn / 重连
     P->>P: 等注册（轮询 tools.get + tools/change 加速）
@@ -204,7 +229,9 @@ sequenceDiagram
     Note over P: 引用计数 -1；空闲 30s 后回收（仅回收 AI 启用的）
 ```
 
-> **tool 参数契约（0.5.1+）**：`mcp_call` 的 `tool` 应传该 server 上的**裸名**（如 `understand_image`）；误传 `mcp_search` 返回的注册全名（`mcp__<server>__<tool>`）或双重前缀会自动归一化，其他 server 的注册全名立即快速失败并提示。
+> **tool 参数契约（0.5.1+）**：`dsh_mcp_call` 的 `tool` 应传该 server 上的**裸名**（如 `understand_image`）；误传 `dsh_mcp_search` 返回的注册全名（`mcp__<server>__<tool>`）或双重前缀会自动归一化，其他 server 的注册全名立即快速失败并提示。
+
+> **控制工具名（0.6.0 起）**：两个控制工具为 **`dsh_mcp_search`** / **`dsh_mcp_call`**（旧名 `mcp_search` / `mcp_call` 已弃用 —— 上游网关把 `mcp_` 前缀当 MCP 工具解析并返回 400）。本页变更日志条目与 `decisions/`、`docs/*patch-notes*.md` 等历史留档中的旧名是当时的记录，未改写。
 
 **catalog 采集**：`tools/change` 事件（root 监听，150ms 去抖）对 enabled server 增量快照；scope 解析经 `agentPresets.standingKeyFor()` 兜底并**进程级共享缓存**（v0.5.3，HTTP 面板路径与快照路径复用同一 key）；空快照不覆盖磁盘 last-good；`catalog.json` 原子写回（tmp + rename，0600）。
 
@@ -218,9 +245,11 @@ sequenceDiagram
 | 持久化 | 停用后重启 dsh | 该服务器仍处于停用状态 |
 | Skill 启停 | 点技能开关 | 卡片立即翻转且不回跳；模型目录同步移除/恢复 |
 | 外部变化 | 会话 A 停用某 MCP，会话 B 打开面板 | 无需点刷新即为最新状态 |
-| AI 中间层 | 面板开 autoManage | 停用 server 对模型隐藏、`mcp_search`/`mcp_call` 可用；用户打开的 server 带「模型可见」徽标 |
-| 回收保护 | 模型 mcp_call 后空闲 30s | AI 临时启用的 server 自动停用；用户手动启用的不被回收 |
-| 工具级禁用 | 展开 server 工具列表关掉一个工具 | `mcp_search` 不再返回该工具；`mcp_call` 拒绝并提示；重启后保持 |
+| AI 中间层 | 面板开 autoManage | 停用 server 对模型隐藏、`dsh_mcp_search`/`dsh_mcp_call` 可用；用户打开的 server 带「模型可见」徽标 |
+| 回收保护 | 模型 dsh_mcp_call 后空闲 30s | AI 临时启用的 server 自动停用；用户手动启用的不被回收 |
+| 工具级禁用 | 展开 server 工具列表关掉一个工具 | `dsh_mcp_search` 不再返回该工具；`dsh_mcp_call` 拒绝并提示；重启后保持 |
+| 更多配置 | 点某行「更多配置…」改 `cwd` 等字段 | 热应用即时生效（子进程重启）；**重启 dsh 后**该字段出现在预设行 `config:` 块，且 live 从文件读回该值 |
+| 未注册告警 | 让一个启用行的子进程起不来（如 codegraph 缺索引） | 卡片徽标显示「未注册工具 / Not registered」，`tools` 显示 0 而非目录快照值，悬停有说明 |
 | 添加 MCP | 粘贴 mcpServers JSON → 预览 → 添加 | 全局写入 profile patch / 项目写入 `.dsh/mcps/mcp.json`，面板即时出现新行 |
 | 创建技能 | 技能页「创建技能」 | 落盘 `~/.dsh/skills` 或项目 `.dsh/skills`，技能列表即时出现 |
 
@@ -231,10 +260,16 @@ sequenceDiagram
 - 工具数/token 为估算值（`JSON.stringify(parameters).length / 4`），与模型注入面真实值近似。
 - 停用后工具立即消失，但**当前回合的请求缓存**（如有）可能仍引用旧 schema；下一请求自然刷新。
 - **持久化时滞**：启停实时生效；跨重启保持依赖下次启动的物化 —— 插件在「已有会话运行」期间被热更新时，本次进程不物化，下一次重启生效。
-- **手动编辑预设组合文件的 mcp 行**（如手动移除 `disabled: true`）会令该行退出插件的持久化管理（下次启动尊重你的改动，不再覆盖）。
-- **工具级禁用边界**：禁用拦截作用于模型可见性（装配过滤）、`mcp_search` 检索与中间层 `mcp_call`；对已注册工具的直接原生调用（绕过中间层）不做运行时拦截。
+- **手动编辑预设组合文件的 mcp 行**（如手动移除 `disabled: true`）会令该行退出插件的**启停持久化管理**（下次启动尊重你的改动，不再写 `disabled`）；但**配置意图（「更多配置」改的字段）仍会继续物化**，两者是正交字段。
+- **未注册 ≠ 未启用**：`status=failed / tools=0 / unregistered=true` 表示该行**已启用且在跑**，但子进程一个工具都没注册（多为配置问题：缺项目索引、端点不可达、可执行文件不存在）。卡片下方列出的工具来自目录快照，只是"可被 `dsh_mcp_search` 检索"，不代表当前可用。
+- **工具级禁用边界**：禁用拦截作用于模型可见性（装配过滤）、`dsh_mcp_search` 检索与中间层 `dsh_mcp_call`；对已注册工具的直接原生调用（绕过中间层）不做运行时拦截。
+- **有效统计是「工具级启用数」，不等于「实际进入上下文」**：它只扣「工具级禁用」（谓词与装配过滤同源）。**口径边界**：不扣 server 级隐藏（`dsh_mcp_call` 保活中的 AI 临时启用 server、`middleLayerHides='all'` 下的全部 server），也不扣 project-mcp 的工作区过滤 —— 它回答的是「该 server 有多少工具处于启用态」，不是「模型这一回合实际看到多少」。
+- **工具预算的上限数字只是可配置默认值/示例**：`toolBudget` 与面板输入框占位符里的数字（如 Grok 350）是**示例值/默认提示**，不是对任何 provider 的真实断言或硬约束（各家上限随模型与账号变化，请按实测填）。预算比较用的「全部工具数」是**请求面口径优先**：`toolsAllSource='request'`（会话上一次已落盘请求的装配后工具表，有一轮延迟）；取不到时回退注册表口径 `'registry'` 并在卡片上标注来源，后者不扣 server 级隐藏与项目工作区过滤，是近似值。
+- **控制工具的 `arguments` 必须是 JSON 对象**：`dsh_mcp_call` 的 `arguments` 声明为对象类型，**字符串形态会被参数校验前置拒绝**（报 `invalid arguments: "arguments" must be an object`）。这是有意的收紧（0.6.0 起）—— 旧版会把 JSON 字符串透明解析，现在按工具描述要求的对象形态传入即可。
 - 运行期写 SKILL.md 安全（skill-filesystem 的 watcher 本就预期文件被改）；运行期写预设组合文件会触发 dsh-agent-presets 的 stamp 重挂事故，插件刻意不做。
-- 能力摘要表（`mcp_search` 空查询）只覆盖有 catalog 快照或配置了 `serverSummary` 的 server；从未成功启动过的 server（如 codegraph）不会列出。
+- 能力摘要表（`dsh_mcp_search` 空查询）只覆盖有 catalog 快照或配置了 `serverSummary` 的 server；从未成功启动过的 server（如 codegraph）不会列出。**口径提示**：`middleLayerHides='all'` 时该表按「经中间层取用」表述，不再宣称 server「对模型可见」—— 可见与否以装配结果为准（此时连已启用的 server 也从模型面隐藏）。
+- **按模型覆盖的数据源（v0.6.0 补齐）**：面板**会**拉 provider/模型目录（`GET /models`，**60s TTL + 单飞**）—— 「无鉴权读端点不该把每次请求都放大到 adapter」仍是这条缓存的理由，但不再是「不拉目录」的理由。覆盖卡的行集合 = **可折叠的目录**（provider 行 + 模型行）∪ 其它已存在的键（运行期 ∪ 持久化（`autoManageByRoutePersisted`）；未被目录吃掉的键落在「其它键」区），因此**可以为任意 provider/模型预置规则，不必先切到它**；目录拉取失败时降级为「只列键」的旧行为，键照旧全部可见、可删（挂载失败后运行期表被清空的键，按「已保存，未生效」标注）。目录只影响**可点范围**，不影响 gate 语义（查表序 `provider/model` → `provider` → `autoManage` 与生效判定原样）。**会话口径（0.6.0 会话透传）**：面板**可用时**把当前会话一并带上（`/state`、`/models` 带 `?session=`；`/skill/toggle`、`/mcp/toolBulk` 带 body 的 `session`），host 就按该会话解析 —— 高亮、`toolsAll*` 计数、preset/cwd 等**随会话的读数**跟随你正在用的那个会话（**解析成功时**：卡片以 host 回显的 `sessionId` 为准，措辞据此在「跟随当前会话」/「面板绑定会话」之间切换）。注意 per-server 的 tools/tokens 聚合走**进程级** standing scope，不随会话。两个写端点用的是该会话的**作用域**：`/skill/toggle` 据此决定改哪个技能域（同名技能在不同会话下可能落到不同文件），`/mcp/toolBulk` 据此把工具名解析成实际目标。**取不到会话时**（宿主未提供该能力）请求与旧版**逐字节相同**，host 仍按 `roots[0]` 解析（见下条）。
+- 面板是**进程级全局**设置区块：**可用时**它会带上当前会话（0.6.0 会话透传，见上条），高亮与随会话的读数（`toolsAll*` 计数、preset/cwd）跟随你正在用的会话（**解析成功时**，以 host 回显的 `sessionId` 为准）；**取不到会话时**才回退旧行为 —— `/state` 不带 `session`，host 侧按 `roots[0]` 解析归属会话。两种情形下卡片都会把 host 回显的 `sessionId`（没有则 `—`）显示出来供核对。
 - **控制端点鉴权**：写操作由进程级随机令牌（`x-panel-token`）保护，仅面板同源客户端自动携带；GET 只读开放。宿主 webServer 本身无鉴权层，若将监听地址改为 `0.0.0.0` 对外暴露，建议同时依赖外层网络隔离。
 
 ## 🛠️ 开发
@@ -245,9 +280,10 @@ sequenceDiagram
 npm install --legacy-peer-deps --ignore-scripts   # 一次即可（旧流程的 npm run setup / junction 不再必需）
 npm run typecheck  # tsc 类型检查（@deepseek-ai devDeps 提供 Context 服务类型增补）
 npm run build      # tsdown（node external 全部 @deepseek-ai/*）→ 最后 tsc 生成 lib/types（顺序不可换）
-npm run verify     # 产物验证（无 TOOL_RUNTIME_SCHEDULER 内联、client 包装完整、lib/types 齐全）
-node scripts/selftest-mcp.mjs  # catalog / convert / preset 纯逻辑单测（含 computeStatus 等回归）
-node scripts/selftest-pending.mjs  # P1 会话边界应用链单测
+npm run verify     # 产物验证（无 TOOL_RUNTIME_SCHEDULER 内联、client 包装完整、lib/types 齐全、row-display 产物存在性 + 零 import 闸门）
+npm run selftest:rowconfig  # preset 文本 / rowConfig 纯逻辑单测
+npm run selftest:mcp        # catalog / convert / preset 纯逻辑单测（含 computeStatus 等回归）
+npm run selftest:pending    # P1 会话边界应用链单测
 ```
 
 > **lib/ 产物由 GitHub Actions 自动重建**（`.github/workflows/build.yml`）：提交源码后推送，CI 跑 typecheck→build→verify→selftest，在 main 分支把新 `lib/` 以 `[skip ci]` 提交回写；本地记得 pull 收产物。
@@ -257,6 +293,58 @@ node 半区 tsdown 必须 `external: [/^@deepseek-ai\//]`：内联 dsh-tools 会
 `build.mjs` 的顺序必须是「tsdown → tsc dts」：tsdown 的 `clean` 会清掉 `lib/`，若先 tsc 生成、后 tsdown，`lib/types` 会被连带删除（0.4.7 修复，verify 有护栏）。
 
 ## 📋 变更日志
+
+### v0.6.0（2026-09-16）— 首个公开发布
+
+> 本节条目折叠自发布前的内部开发线（该开发线从未对外发布，发布时统一按 v0.6.0 计），因此条目内保留了当时的迭代顺序与提交号。
+
+#### 安全加固：`/mcp/applyPending` 的显式确认 + AI 临时启用可辨识
+
+- 🔒 **逃生舱加闸门**：`POST /mcp/applyPending`（README §92–96 定义的那个「**用户点击**『立即应用待生效变更』按钮、已知晓费用」的强制生效出口）原先只校验 method + 面板令牌，**「用户已知晓费用」这个前提在服务端并不存在** —— 任何能发 HTTP 的调用方（包括模型自己）一发裸 POST 就能单方面作废 next-session 的「零缓存失效」承诺。实测（2026-09-14）：模型经此端点把 next-session 下的 obsidian 行在当前会话直接打开，README §92 描述的两条生效边界（新会话首次请求前 / DSH 重启）被绕过。
+  现在要求请求体显式 `{ "confirm": true }`，缺了即 400 并附费用说明（「该操作会让当前会话下一轮 100% miss 前缀缓存，费率约为 hit 的 5–12.5 倍」）。
+- 🔒 **面板按钮加二次确认**：`views.tsx` 的「立即应用待生效变更」原先单击即发 POST（只有事后提示），现改为先弹确认对话框（写明缓存代价），确认后才带 `confirm: true` 发请求。
+- ✨ **AI 临时启用可辨识**：`McpRow` 新增 `aiOwned`（= autoManage 且 `controller.isAiEnabled(server)`），卡片在「用户打开」之外显示独立徽标 **「AI 临时启用 / AI (temp)」** + 悬停说明。此前两者外观完全相同（都只是 `modelVisible=true`），模型误用面板 API 打开某行时与用户自己打开的行**分不清**，是上面那次误操作不易被发现的原因。
+
+##### ✅ 验证清单（补充项）
+
+| 检查项 | 操作 | 预期 |
+| --- | --- | --- |
+| 逃生舱确认 | 裸 `POST /mcp/applyPending`（无 body） | 400，错误文案含「需要显式确认」 |
+| 逃生舱确认（正向） | 面板点「立即应用待生效变更」→ 确认对话框 | 弹费用说明；确认后生效并返回 `confirmed: true` |
+| AI 临时启用徽标 | 调 `dsh_mcp_call` 唤醒一个已关闭的 server | 该行出现「AI 临时启用」徽标，~15–30s 后随回收消失 |
+
+#### 诚实上报未注册行 + 配置物化误判修复
+
+- 🐛 **假绿缺陷修复**：行「启用 + 在跑 + live 注册工具数 = 0」时，面板此前回落显示目录快照工具数，把故障现场渲染成健康 —— 实测 codegraph 显示 `running=true / tools=4`，而 Host 注册表 `mcp__* = 0`、`mcp_call` 两次 60s 超时（真因：工作区缺 `.codegraph` 索引，子进程空转）。现在 `unregistered=true` + `tools=0` + `status=failed`，卡片徽标显示「未注册工具 / Not registered」并附悬停说明；目录快照只回落到工具列表（工具级禁用 UI 仍可用），**停用行照旧回落快照**（保留「可被 mcp_search 检索」语义）。
+- 🐛 **配置意图物化被外部改动误判吞掉**（配置意图的持久化路径此前实际不可用）：`rowDisabledState` 对**没有 `disabled` 键**的行返回 `null`，而状态文件里的 `lastApplied` 记的是 live `entry.disabled = false` → `null !== false` → 启动物化判成「文件被外部改过」→ **整行跳过，配置永不落地且零提示**（实测：preset 文件 mtime 不变即为铁证）。修复：① 外部改动分支不再跳过，改为「对齐 `lastApplied` → 继续走配置物化」（启停与配置正交，该分支不写 `disabled`，用户对启停的改动仍被尊重）；② `writeRowConfigIntent` 的 `lastApplied` 改读盘取文件事实，不再沿用面板快照。
+- 🔧 **`row-display` 拆为零宿主依赖模块**：`computeStatus` / `rowDisplay` 原埋在 `collect.ts`，selftest 只能经 `index.js` 触达（连带加载 `@deepseek-ai/*`，repo 侧不完整 → 测不到）。现独立产物 `lib/row-display.js`（零 import），selftest 直接加载；`verify` 增加产物存在性 + 零 import 闸门。
+- 🔧 **部署基准修正**：`scripts/deploy-link.mjs` 的 `hostScope` 原为 `profiles/node_modules/@deepseek-ai`（pnpm 扁平层），该层在一次 junction 事故后**170/240 项断链**（含 `dsh-agent-presets`/`dsh-tools`/`dsh-scope`）→ 指向它的部署目录**冷启动全部 MODULE_NOT_FOUND**（运行中的进程因模块已入内存而不暴露）。改为 `profiles/web/node_modules/@deepseek-ai`（同源 0.1.5-rc.2，241 项全通）。另：脚本提示从 `Remove-Item -Recurse` 改为**移动语义**（junction 事故约束）。
+
+#### 「更多配置」：行挂载配置可在面板编辑
+
+- ✨ 每个 MCP 行新增「更多配置…」按钮 → `RowConfigModal`；可编辑字段白名单 9 项：`transport` / `command` / `args` / `env` / `cwd` / `url` / `headers` / `toolCallTimeoutMs` / `failOnStartupError`。典型用途：codegraph 这类**按 cwd 认项目**的 server（缺 cwd → 子进程在会话工作区找不到索引 → 拒绝注册工具）。
+- ✨ **三段式生效**：① `entry.update({config})` 热应用（standing 行实测 1.2s 干净生效、不丢行）；② 意图写 `state.json`（运行期唯一安全写面）；③ 启动早期 `syncPresetFiles` 物化进预设行 `config:` 块（`apply:false` 可只记意图、下次重启生效）。
+- 🔌 新端点：`GET|POST /api/mcp-skill-panel/mcp/rowConfig`（body `{server, set?, unset?, apply?}`）、只读 `GET /debug/rowConfig`（全量挂载配置 + 模块身份读数）。
+- 🔧 `preset-text.ts` 独立产物 + `scripts/selftest-rowconfig.mjs`（15 项；曾当场抓出两个真 bug：`\s{N}` 缩进误匹配导致重复插键、新块插入位置把行间空行顶到 `config:` 上方）。
+
+#### preset 行句柄 + 临时拉起闭环 + 已安装能力表
+
+- ✨ **preset 行句柄通路**（`627e627`）：dsh 0.1.2-rc.1 起 preset 行挂 standing 组合、不在 `ctx.loader.entries()`/`resolve()` 里。经 `livePresetMounts()` / `standingMountFor(agentCtx)` 拿 `PresetTree` 句柄，恢复 rc.8 原设计 —— 全关 + 模型经 `mcp_search`/`mcp_call` 按需临时拉起、用完 30s 回收。实测：`mcp_search` 命中已关的 calcmcp → `mcp_call(symbolic_tool)` 成功 → 面板转 running 但 `modelVisible=false` → 35s 后自动关回。
+- ✨ 能力表（catalog）采集改走 `snapshotEnabled` 并覆盖 preset 行（`7672450` / `c0855f9`）；关前补采加等待上限与前置守卫（`1db832f` / `2161bba`）；prune 的 alive 集合纳入 standing 行（0.6.0）—— 关掉的 server 仍可被 `mcp_search` 检索。
+- ✨ `mcp_search` 分层检索（`18576e4`，防上下文膨胀 + 给出该调哪个工具的指引）；摘要分支 `count` 改用工具总数（`b8b87f9`）。
+- 🔧 `existingRowIds` 覆盖 standing 行，防 `mcp/add` 写重复行；`applyStateResidue` 遍历纳入 standing 行（否则对 preset 行恒 0 应用，`desired` 永远悬着）；新增 `/debug → standingDiag` 自证面。
+
+#### 按模型覆盖：补齐 provider/模型目录数据源
+
+- 🧭 **`GET /models` 目录端点**（读端点，**无鉴权**，与其它读端点一致）：数据源是宿主 llm 服务（`ctx.inject` 捕获的 `routeServices.llm`）的 `listProviders()` / `listModels(provider)`；**60s TTL + 单飞**（`MODELS_TTL_MS = 60_000`）把这条开放端点的扇出上界锁死为 60s 一次（`listModels` 会逐个 provider 打到 adapter，可能触达网络）；结果按 provider 字典序。三条降级路径都**不抛**：`llm` 缺失 / `listProviders()` 抛错 → `providers: []`；单个 `listModels()` 抛错 → 只该 provider `models: []`。
+- 🖱️ **覆盖卡改可折叠的 provider/模型目录**：provider 行与模型行都能设置三态覆盖（键 = `provider` / `provider/model`），因此**任意 provider/模型都可预置规则，不必先切到它**；目录拉取失败 → 降级为「只列键」的旧行为；未被目录吃掉的键落在「其它键」区，运行期 ∪ 持久化的覆盖键仍然全部可见、可删。
+- 🔗 **`active` 与 `/state` 的 `autoManageActive` 同源**：两处都走 `src/model-route.ts` 的 `activeRouteView`（`{ on, source, provider, model }`，`source` 取值 `'model'` / `'provider'` / `'master'` / `'no-route'`）—— 面板高亮与 gate 生效依据不会再各写一份。
+- ⚠️ **诚实边界**：面板是**进程级** settings.section，**可用时**透传当前会话（0.6.0）→ 高亮与读数跟随你正在用的会话；**取不到会话时**回退：`/state` 不带 `session`，host 侧按 `roots[0]` 解析（卡片始终显示解析出的 `sessionId` 供核对）。
+
+#### 会话透传：面板跟随当前会话（可用时）
+
+- 🔗 **带上当前会话**：面板此前所有请求都不带会话，host 只能按 `roots[0]` 解析 —— 多会话并存时卡片显示的是启动期那个会话的数据，而不是你正在用的那个。现在从宿主 `settings.section` 槽位的标准 props（`useSessions`）取「当前会话」，随 `/state`、`/models`（`?session=`）与 `/skill/toggle`、`/mcp/toolBulk`（body 的 `session`）一起发给 host。host 侧**一直支持**这两个参数，本次**没有新增任何端点、没有改动 gate 语义**。
+- 🛡️ **取不到就完全回退**：宿主未提供该能力（或当前无会话）时，四个请求与旧版本**逐字节相同**，host 仍按 `roots[0]` 解析 —— 向后兼容、可独立回退。卡片措辞随情形切换（「跟随当前会话」/「面板绑定会话」），两种情形都把解析出的 `sessionId` 显示出来供核对。
 
 ### v0.5.5（2026-09-08）— rc.1 空面板修复（standing 组合兜底）
 

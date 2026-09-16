@@ -1,7 +1,7 @@
 {
   "name": "dsh-mcp-skill-panel",
-  "version": "0.5.5",
-  "description": "MCP 与技能管理面板：设置页展示 MCP 服务器与 Skill 目录，随时启停释放上下文占用；可选 AI 中间层（mcp_search/mcp_call）按需使用 MCP。",
+  "version": "0.6.0",
+  "description": "MCP 与技能管理面板：设置页展示 MCP 服务器与 Skill 目录，随时启停释放上下文占用；可选 AI 中间层（dsh_mcp_search/dsh_mcp_call）按需使用 MCP。",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -38,12 +38,16 @@
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
     "build": "node scripts/build.mjs",
     "verify": "node scripts/verify.mjs",
-    "prepublishOnly": "npm run build && npm run verify"
+    "selftest:rowconfig": "node scripts/selftest-rowconfig.mjs",
+    "selftest:mcp": "node scripts/selftest-mcp.mjs",
+    "selftest:pending": "node scripts/selftest-pending.mjs",
+    "prepublishOnly": "npm run build && npm run verify && npm run selftest:rowconfig && npm run selftest:mcp && npm run selftest:pending"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/schemastery": "^3.18.1",
-    "@deepseek-ai/dsh-scope": "^0.1.2-rc.1"
+    "@deepseek-ai/dsh-scope": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-agent-presets": ">=0.1.2-rc.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
@@ -64,7 +68,14 @@
     "@deepseek-ai/dsh-host-webserver": "0.1.2-rc.1",
     "@deepseek-ai/dsh-session": "0.1.2-rc.1",
     "@deepseek-ai/dsh-timeout": "0.1.2-rc.1",
-    "@deepseek-ai/dsh-util-values": "0.1.2-rc.1"
+    "@deepseek-ai/dsh-util-values": "0.1.2-rc.1",
+    "@deepseek-ai/cordis-plugin-include": "1.0.7",
+    "@deepseek-ai/dsh-atomic-write": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-home-paths": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-invariants": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-session-projection": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-settings": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-typert-protocol": "0.1.2-rc.1"
   },
   "engines": {
     "node": ">=22.19"

@@ -60,6 +60,55 @@ export default defineConfig([
     },
   },
   {
+    // 预设文本工具（纯逻辑）单独产物，供 scripts/selftest-rowconfig.mjs 自测。
+    // 必须独立入口：index.js 会连带加载 @deepseek-ai/* 宿主包，repo 里没有那些依赖。
+    entry: ['src/preset-text.ts'],
+    format: ['esm'],
+    outDir: 'lib',
+    target: 'node22',
+    platform: 'node',
+    external: [/^@deepseek-ai\//, /^node:/],
+    dts: false,
+    clean: false,
+    sourcemap: false,
+    outputOptions: {
+      entryFileNames: 'preset-text.js',
+    },
+  },
+  {
+    // 行级读数判定（纯逻辑）单独产物，供 scripts/selftest-mcp.mjs 自测。
+    // 0.6.0 拆出：此前埋在 collect.ts 里，selftest 只能经 index.js 触达，
+    // 而 index.js 连带加载 @deepseek-ai/*（repo 侧不完整）→ 这两条判据测不到。
+    entry: ['src/row-display.ts'],
+    format: ['esm'],
+    outDir: 'lib',
+    target: 'node22',
+    platform: 'node',
+    external: [/^@deepseek-ai\//, /^node:/],
+    dts: false,
+    clean: false,
+    sourcemap: false,
+    outputOptions: {
+      entryFileNames: 'row-display.js',
+    },
+  },
+  {
+    // 面板会话作用域（纯逻辑）单独产物，供 scripts/selftest-mcp.mjs 自测：
+    // 面板把「当前会话」透传给 host 的拼接逻辑（取不到会话时必须与不透传逐字节相同）。
+    entry: ['src/session-scope.ts'],
+    format: ['esm'],
+    outDir: 'lib',
+    target: 'node22',
+    platform: 'node',
+    external: [/^@deepseek-ai\//, /^node:/],
+    dts: false,
+    clean: false,
+    sourcemap: false,
+    outputOptions: {
+      entryFileNames: 'session-scope.js',
+    },
+  },
+  {
     entry: ['src/client/index.ts'],
     // cjs：ModuleLoader factory 提供 require/module/exports，import 必须转成 require 调用
     format: ['cjs'],
