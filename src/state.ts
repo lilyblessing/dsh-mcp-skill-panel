@@ -13,15 +13,25 @@ const LEGACY_STATE_DIR = join(homedir(), '.dsh', 'dsh-runtime-inventory')
 const STATE_DIR = join(homedir(), '.dsh', 'dsh-mcp-skill-panel')
 const STATE_FILE = join(STATE_DIR, 'state.json')
 
-/** 每个预设文件（key=文件绝对路径）→ 每个 mcp 行 → 意图与上次物化状态。 */
+/**
+ * 0.1.7：key = **预设声明行的 Loader 行 id**（如 `preset-standard-mcp`）→ 每行 → 意图与
+ * 上次物化状态。不再是预设组合文件路径 —— 声明式预设没有独立文件（registry
+ * README.zh.md:46-48）；旧文件的键（路径形态）找不到对应声明行，由
+ * preset.syncPresetFiles / pending.applyStateResidue 自然跳过（死键，不需手工清理）。
+ */
 export interface McpRowState {
   /** toggle 时用户意图：是否停用 */
   desired: boolean
-  /** toggle 时该行在文件中的实际状态（true/false/null=无 disabled 键） */
+  /**
+   * 上次物化后的启停值（0.1.7 语义）。旧版是「该行在预设文件中的实际状态
+   * （true/false/null=无 disabled 键）」；预设没有文件后不再有外部修改比对，
+   * 本字段退化为物化账（供残留判定与回显）。
+   */
   lastApplied: boolean | null
   /**
    * 0.6.0：面板"更多配置"改过的挂载配置意图（键值形态，见 preset.EDITABLE_CONFIG_KEYS）。
-   * 运行期只写这里（安全）；由 syncPresetFiles 在启动早期物化进预设行的 `config:` 块。
+   * 运行期只写这里（安全）；由 syncPresetFiles 在启动早期经 configEditor 物化进
+   * 预设声明行的 `config`。
    * `appliedYaml` 记录**上次已物化**的值（YAML 文本形态），相等即无需重写 ——
    * 既幂等又能在配置变更后自动重写。
    */

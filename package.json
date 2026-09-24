@@ -1,6 +1,6 @@
 {
   "name": "dsh-mcp-skill-panel",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "MCP 与技能管理面板：设置页展示 MCP 服务器与 Skill 目录，随时启停释放上下文占用；可选 AI 中间层（dsh_mcp_search/dsh_mcp_call）按需使用 MCP。",
   "type": "module",
   "main": "./lib/index.js",
@@ -47,7 +47,7 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/schemastery": "^3.18.1",
     "@deepseek-ai/dsh-scope": "^0.1.2-rc.1",
-    "@deepseek-ai/dsh-agent-presets": ">=0.1.2-rc.1"
+    "@deepseek-ai/dsh-agent-preset-registry": ">=0.1.7-rc.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
@@ -64,7 +64,7 @@
     "@deepseek-ai/dsh-agent": "0.1.2-rc.1",
     "@deepseek-ai/dsh-llm": "0.1.2-rc.1",
     "@deepseek-ai/dsh-system-prompt": "0.1.2-rc.1",
-    "@deepseek-ai/dsh-agent-presets": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-agent-preset-registry": "0.1.7-rc.1",
     "@deepseek-ai/dsh-host-webserver": "0.1.2-rc.1",
     "@deepseek-ai/dsh-session": "0.1.2-rc.1",
     "@deepseek-ai/dsh-timeout": "0.1.2-rc.1",

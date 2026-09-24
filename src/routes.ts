@@ -8,12 +8,12 @@ import { randomBytes } from 'node:crypto'
 import { StringDecoder } from 'node:string_decoder'
 import type { Context } from '@deepseek-ai/cordis'
 import { mkdir, readFile, writeFile, rename, access } from 'node:fs/promises'
-import { basename, dirname, join, parse as parsePath } from 'node:path'
+import { dirname, join, parse as parsePath } from 'node:path'
 import { homedir } from 'node:os'
 import { readState, writeState, stateApplyMode, stateAutoManageByRoute, stateMiddleLayerHides, stateToolBudget, type ApplyMode } from './state'
-import { setSkillFlag, rowDisabledState, isValidSkillName, buildSkillMd, EDITABLE_CONFIG_KEYS } from './preset'
+import { setSkillFlag, isValidSkillName, buildSkillMd, EDITABLE_CONFIG_KEYS } from './preset'
 import { pendingMcp, applyPendingMcp } from './pending'
-import { findPresetRowByEntryId, findPresetRowByServerName } from './preset-mcp'
+import { findPresetRowByEntryId, findPresetRowByServerName, presetDeclarationRowIdForRow } from './preset-mcp'
 import { gatewayServerOfEntryId } from './gateway'
 
 /**
@@ -28,7 +28,7 @@ async function findPresetRowByServerNameLike(ctx: Context, serverName: string) {
     if (!presetId) return undefined
     const row = await findPresetRowByServerName(ctx, presetId, serverName)
     if (!row) return undefined
-    return { presetId, row, presetPath: row.file }
+    return { presetId, row, presetRowId: row.presetRowId }
   } catch {
     return undefined
   }
@@ -192,8 +192,9 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
     entry = undefined
   }
   // 0.5.7：preset 行不在 loader 可达域，但 standing 树里有真句柄 —— 兜底取回后
-  // 走下面正常的 live 分支（entry.update / 意图持久化都以 entry.parent.tree.filename
-  // 为准），于是面板开关对 preset 行**当场生效**，不再是恒 pending 的空意图。
+  // 走下面正常的 live 分支（entry.update）当场生效，不再是恒 pending 的空意图。
+  // 0.1.7：意图持久化键不再是 `entry.parent.tree` 上的文件名（EntryTree 无该字段），
+  // 改按「所属预设声明行 id + 行 id」两级键（见下方 presetDeclarationRowIdForRow）。
   if (!entry) entry = findStandingEntryById(entryId)
   // rc.1 standing 组合兜底：preset 行不在 loader.entries/resolve 里（resolve 抛
   // "cannot resolve entry"）。行以 source:'preset' 进面板，开关走 state.json
@@ -207,24 +208,21 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
       (gwServer ? await findPresetRowByServerNameLike(ctx, gwServer).catch(() => undefined) : undefined) ??
       (await findPresetRowByEntryId(ctx, entryId).catch(() => undefined))
     if (found) {
-      const state = await readState()
-      state.mcp ??= {}
-      state.mcp[found.presetPath] ??= {}
-      // lastApplied 与 live 路径一致取文件实际状态（preset.ts:rowDisabledState），
-      // 读不到文件才回落 inventory 值（防 standing/文件漂移误判外部修改）。
-      let fileState: boolean | null = found.row.disabled
-      try {
-        const { rowDisabledState } = await import('./preset')
-        fileState = rowDisabledState(await readFile(found.presetPath, 'utf8'), found.row.rowId)
-      } catch {
-        fileState = found.row.disabled
+      // 0.1.7：预设没有文件（registry README.zh.md:46-48），lastApplied 以 inventory/live
+      // 的 enabled 反推（= 同一事实源，不再有文件可读、也没有「外部改文件」可检测）。
+      // 声明行反查不到（''）时只记内存队列与 state 之外的意图：不写 state（写 '' 键=脏数据）。
+      const declRowId = found.presetRowId
+      if (declRowId.length > 0) {
+        const state = await readState()
+        state.mcp ??= {}
+        state.mcp[declRowId] ??= {}
+        state.mcp[declRowId][found.row.rowId] = { desired: disabled, lastApplied: found.row.disabled }
+        await writeState(state)
       }
-      state.mcp[found.presetPath][found.row.rowId] = { desired: disabled, lastApplied: fileState }
-      await writeState(state)
       // 内存队列同样记录（pending 徽标 + 下次边界 applyPendingMcp 尝试 entry.update，
       // 行仍不可 resolve 时保留队列，见 pending.ts:50-53 行失效语义——此处反向：
       // 找不到才保留意图；若将来行回到 loader，边界可正常应用）。
-      pendingMcp.set(entryId, { entryId, file: found.presetPath, rowId: found.row.rowId, disabled })
+      pendingMcp.set(entryId, { entryId, file: declRowId.length > 0 ? declRowId : null, rowId: found.row.rowId, disabled })
       if (!disabled && deps.controller) {
         deps.controller.markUserEnabled(found.row.serverName)
       }
@@ -235,8 +233,8 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
         disabled,
         desired: disabled,
         running: found.row.running,
-        persisted: true,
-        file: found.presetPath,
+        persisted: declRowId.length > 0,
+        file: declRowId.length > 0 ? declRowId : null,
         applied: false,
         pending: true,
         // 网关行面板口径与 collect 一致（NIT-4）：collect 标 'gateway'，此处回 'gateway'。
@@ -286,23 +284,19 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
   // syncPresetFiles 物化预设。immediate（默认）保持原行为：下轮即生效（会 miss）。
   const deferred = mode === 'next-session'
   if (deferred) {
-    pendingMcp.set(entryId, { entryId, file: (entry.parent?.tree as { filename?: string } | undefined)?.filename ?? null, rowId, disabled })
+    // 0.1.7：意图键 = 所属预设声明行的 Loader 行 id（不再取 tree 上的文件名）。
+    const declRowId = presetDeclarationRowIdForRow(ctx, rowId)
+    pendingMcp.set(entryId, { entryId, file: declRowId ?? null, rowId, disabled })
     // 0.6.0：意图必须**同时落盘**。原实现只进内存队列，于是"记了意图但没开新会话就重启"
     // 的用户设置会静默丢失（applyStateResidue 的 desired 兜底因此也永远无输入）。
-    // 与 preset 兜底分支（本文件 :184-185）语义对齐：desired=用户意图，lastApplied=文件现值。
-    const presetFile = (entry.parent?.tree as { filename?: string } | undefined)?.filename
-    if (typeof presetFile === 'string' && presetFile.length > 0) {
+    // 与 preset 兜底分支（本文件 :204-245）语义对齐：desired=用户意图，
+    // lastApplied=该行 live 现值（0.1.7 无文件可读，live 即唯一事实源）。
+    if (declRowId !== undefined) {
       try {
         const st = await readState()
         st.mcp ??= {}
-        st.mcp[presetFile] ??= {}
-        let fileState: boolean | null = null
-        try {
-          fileState = rowDisabledState(await readFile(presetFile, 'utf8'), rowId)
-        } catch {
-          fileState = null
-        }
-        st.mcp[presetFile][rowId] = { desired: disabled, lastApplied: fileState }
+        st.mcp[declRowId] ??= {}
+        st.mcp[declRowId][rowId] = { desired: disabled, lastApplied: entry.disabled === true }
         await writeState(st)
       } catch (error) {
         ctx.logger.warn?.(`mcp-skill-panel: persist pending intent for "${entryId}" failed: ${messageOf(error)}`)
@@ -340,24 +334,19 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
       deps.controller.markUserEnabled(serverNameOf(entry))
     }
   }
-  // 持久化：v0.1.1 起运行期绝不写预设文件（触发 dsh-agent-presets stamp 重挂事故）。
-  // 只把意图写入插件状态文件，由下次启动的 syncPresetFiles() 物化到预设文件。
-  const tree = entry.parent?.tree as { filename?: string } | undefined
-  const file = tree?.filename
-  let fileState: boolean | null = null
-  if (typeof file === 'string' && file.length > 0) {
-    try {
-      fileState = rowDisabledState(await readFile(file, 'utf8'), rowId)
-    } catch {
-      fileState = null
-    }
-  }
+  // 持久化：0.1.7 起运行期一律**不**直接写 profile patch（不碰预设声明行文件）；
+  // 只把意图写入插件状态文件，由下次启动的 syncPresetFiles() 走 configEditor 物化
+  //（config-editor 自带文件锁 + 原子写 + reconcileProfilePatches 热重载，
+  // 官方 settings 即此法）。键 = 所属预设声明行的 Loader 行 id + 行 id（两级）。
+  // 反查不到声明行（行不属于任何预设声明，如项目行/网关行）→ 不落盘，persisted=false。
+  const declRowId = presetDeclarationRowIdForRow(ctx, rowId)
   let persisted = false
-  if (typeof file === 'string' && file.length > 0) {
+  if (declRowId !== undefined) {
     const state = await readState()
     state.mcp ??= {}
-    state.mcp[file] ??= {}
-    state.mcp[file][rowId] = { desired: disabled, lastApplied: fileState }
+    state.mcp[declRowId] ??= {}
+    // lastApplied = 该行 live 现值（0.1.7 无文件可读；不再有「外部改文件」可检测）
+    state.mcp[declRowId][rowId] = { desired: disabled, lastApplied: entry.disabled === true }
     await writeState(state)
     persisted = true
   }
@@ -368,7 +357,7 @@ async function toggleMcp(deps: Deps, entryId: string, disabled: boolean, applyMo
     disabled,
     running: entry.fiber !== undefined,
     persisted,
-    file: file ?? null,
+    file: declRowId ?? null,
     applied: !deferred,
     pending: deferred,
   }
@@ -453,34 +442,30 @@ function validateRowConfig(config: Record<string, unknown>): void {
 
 /**
  * 0.6.0：把配置意图写进 state.json（运行期唯一安全的写面）。
- * 结构：state.mcp[预设文件][行 id].config —— 启动早期由 syncPresetFiles 物化。
+ * 结构：state.mcp[预设声明行 id][行 id].config —— 启动早期由 syncPresetFiles 物化。
+ * 0.1.7：第二级键仍是行 id，第一级由「预设文件路径」改为「预设声明行的 Loader 行 id」。
  */
 async function writeRowConfigIntent(
   server: string,
   described: Record<string, unknown>,
   config: Record<string, unknown>,
 ): Promise<{ file: string; rowId: string; config: Record<string, unknown> }> {
-  const file = typeof described.file === 'string' ? described.file : null
+  const file = typeof described.presetRowId === 'string' ? described.presetRowId : null
   const rowId = typeof described.rowId === 'string' ? described.rowId : null
-  if (!file || !rowId) throw new Error(`无法定位该行的预设文件/行 id（server=${server}）`)
+  if (!file || !rowId) throw new Error(`无法定位该行的预设声明行/行 id（server=${server}）`)
   const state = await readState()
   state.mcp ??= {}
   state.mcp[file] ??= {}
   const prev = state.mcp[file][rowId]
-  // lastApplied 必须取**当前文件事实**，不能沿用面板快照（entry.disabled）。
-  // 2026-09-14 实测事故：codegraph 行没有 `disabled` 键 ⇒ rowDisabledState 返回 null，
-  // 而 entry.disabled 是 false；若把 false 记成 lastApplied，启动物化时 null !== false
-  // 被判成「文件被外部改过」→ 配置意图永不物化，且用户零提示。
-  let fileState: boolean | null = prev?.lastApplied ?? null
-  try {
-    fileState = rowDisabledState(await readFile(file, 'utf8'), rowId)
-  } catch {
-    /* 读盘失败：保留原值，启动物化会自行对齐 */
-  }
+  // lastApplied 语义（0.1.7）：不再是「文件现值」（预设没有文件），退化为「上次物化后的
+  // 启停值」—— 启动物化不再做外部修改比对（无文件可比），此字段仅供残留判定/回显。
+  // 历史教训保留（2026-09-14 codegraph 事故）：不要用**推断值**冒充事实值当比对基准；
+  // 当年「无 disabled 键 ⇒ null」与 live `false` 不等被误判成外部改动，配置意图永不物化。
+  const lastApplied: boolean | null = prev?.lastApplied ?? null
   state.mcp[file][rowId] = {
     // 启停意图沿用现值；配置意图记录本次完整配置（不含 configAppliedYaml → 触发物化）
     desired: prev?.desired ?? false,
-    lastApplied: fileState,
+    lastApplied,
     config,
   }
   await writeState(state)
@@ -505,7 +490,7 @@ async function applyRowConfigToLive(
 }
 
 /** 0.6.0：描述某个 standing 行的**全量挂载配置**与运行态（只读；/debug/rowConfig 与配置编辑共用）。 */
-async function describeRow(server: string): Promise<Record<string, unknown>> {
+async function describeRow(ctx: Context, server: string): Promise<Record<string, unknown>> {
   const entry = findStandingEntryByServer(server)
   const out: Record<string, unknown> = {
     server,
@@ -523,17 +508,12 @@ async function describeRow(server: string): Promise<Record<string, unknown>> {
   out.running = entry.fiber !== undefined
   out.config = safe
   out.configKeys = Object.keys(cfg)
-  // 预设文件里的声明（与 live 对比，判断是否有 drift）
-  const tree = entry.parent?.tree as { filename?: string } | undefined
-  out.file = tree?.filename ?? null
-  if (typeof out.file === 'string' && out.file.length > 0) {
-    try {
-      const text = await readFile(out.file, 'utf8')
-      out.fileHasCwd = /^\s*cwd:\s*/m.test(text) ? 'file-has-cwd-line' : 'no-cwd-in-file'
-    } catch (error) {
-      out.fileError = messageOf(error)
-    }
-  }
+  // 0.1.7：预设没有独立文件，取消「与文件里的声明对比」的 drift 读数
+  //（旧字段 out.file / fileHasCwd / fileError 依赖预设组合文件路径，已无物化对象）。
+  // 声明行的定位改走 state.json 的同款键（预设声明行 id + 行 id 两级）。
+  out.presetRowId = String(entry.options.id ?? '').length > 0
+    ? (presetDeclarationRowIdForRow(ctx, String(entry.options.id ?? '')) ?? null)
+    : null
   return out
 }
 
@@ -609,16 +589,17 @@ function maskDescribed(described: Record<string, unknown>): Record<string, unkno
 
 /**
  * 定位 profile 的用户 patch 层（<profile>/cordis.patch.yml）。
- * 根树 backing 文件是 <profile>/cordis.yml（每次启动重置为 []），
- * patch 与其同目录；从任一 root 树 entry 的 tree.filename 反推。
+ *
+ * 0.1.7：路径由 `ctx.profileContext.patchPath` 直接提供（config-editor 亦以它为写入面，
+ * 见 config-editor 的 documentPath）。旧口径「从任一 root 树 entry 的持久化文件名反推
+ * cordis.yml 同目录」依赖 EntryTree 上的文件名属性，该属性在 0.1.7 不再是树的可依赖面，
+ * 故删除，改为对本机尚未实证的 profileContext 做**显式存在性检查 + 明确报错**
+ *（未验证项见 W0 报告 §6 U4：web profile 下恒为 <profile>/cordis.patch.yml 待实测）。
  */
 function profilePatchPath(ctx: Context): string {
-  for (const entry of ctx.loader.entries()) {
-    const tree = entry.parent?.tree as { filename?: string } | undefined
-    const file = tree?.filename
-    if (typeof file === 'string' && basename(file) === 'cordis.yml') return join(dirname(file), 'cordis.patch.yml')
-  }
-  throw new Error('无法定位 profile 补丁文件 cordis.patch.yml（未找到 cordis.yml 根树；请确认 profile 已正常挂载后重试）')
+  const patchPath = (ctx as unknown as { profileContext?: { patchPath?: unknown } }).profileContext?.patchPath
+  if (typeof patchPath === 'string' && patchPath.length > 0) return patchPath
+  throw new Error('无法定位 profile 补丁文件 cordis.patch.yml（ctx.profileContext.patchPath 不可用；请确认 profile 已正常挂载后重试）')
 }
 
 /** 已存在检查：loader 存活行、standing 行或 patch 文本里已有同 id。 */
@@ -1302,7 +1283,7 @@ export function makeRoutes(
             const q = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams
             const server = (q.get('server') ?? '').trim()
             if (!server) throw new Error('server is required')
-            const described = await describeRow(server)
+            const described = await describeRow(ctx, server)
             // P1-1：GET 无令牌即回传 → 回传体脱敏（真值只在写侧与服务端内部流转）
             return { ...maskDescribed(described), editableKeys: EDITABLE_CONFIG_KEYS }
           },
@@ -1318,7 +1299,7 @@ export function makeRoutes(
             }
             const server = String(body.server ?? '').trim()
             if (!server) throw new Error('server is required')
-            const described = await describeRow(server)
+            const described = await describeRow(ctx, server)
             if (described.entryFound !== true) throw new Error(`standing 行未找到：${server}`)
             const badKeys = [...Object.keys(body.set ?? {}), ...(body.unset ?? [])].filter(
               (k) => !(EDITABLE_CONFIG_KEYS as readonly string[]).includes(k),
@@ -1346,7 +1327,7 @@ export function makeRoutes(
                 : await applyRowConfigToLive(server, nextConfig)
             invalidateMcp()
             // P1-1：after 回显同样脱敏（能证明「写入生效」而不把 secrets 回吐给调用方）
-            return { ok: true, server, applied, after: maskDescribed(await describeRow(server)) }
+            return { ok: true, server, applied, after: maskDescribed(await describeRow(ctx, server)) }
           },
         },
       ], true),
@@ -1367,7 +1348,7 @@ export function makeRoutes(
             const q = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams
             const server = (q.get('server') ?? '').trim()
             if (!server) throw new Error('server is required')
-            return maskDescribed(await describeRow(server))
+            return maskDescribed(await describeRow(ctx, server))
           },
         },
         {
@@ -1386,7 +1367,7 @@ export function makeRoutes(
             if (!server) throw new Error('server is required')
             const entry = findStandingEntryByServer(server)
             if (!entry) throw new Error(`standing 行未找到：${server}`)
-            const before = await describeRow(server)
+            const before = await describeRow(ctx, server)
             const live = (entry.options.config ?? {}) as Record<string, unknown>
             let next: Record<string, unknown> = { ...live }
             for (const key of body.unset ?? []) delete next[key]
@@ -1407,7 +1388,7 @@ export function makeRoutes(
             // 等一拍让 fiber 重建，再回报现场（同 entryId 是否还在 standing 树里、
             // 是否仍在运行、配置是否已变）—— 这就是"能否热改配置"的判据。
             await new Promise((resolve) => setTimeout(resolve, 1200))
-            return { updateError, before: maskDescribed(before), after: maskDescribed(await describeRow(server)) }
+            return { updateError, before: maskDescribed(before), after: maskDescribed(await describeRow(ctx, server)) }
           },
         },
       ], true),

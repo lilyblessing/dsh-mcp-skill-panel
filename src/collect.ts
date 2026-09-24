@@ -17,7 +17,7 @@ import type { CatalogRuntime } from './index'
 import { messageOf } from './util'
 import { readState, stateAutoManageByRoute, stateToolBudget } from './state'
 import { pendingMcp } from './pending'
-import { listPresetMcpRows } from './preset-mcp'
+import { listPresetMcpRows, presetDeclarationRowIdForRow } from './preset-mcp'
 import { gatewayServerOfEntryId } from './gateway'
 import { computeStatus, modelVisibleScope, rowDisplay } from './row-display'
 import { activeRouteView } from './model-route'
@@ -142,15 +142,40 @@ export function resolveAgent(ctx: Context, sessionId: string | undefined) {
  * 进程级共享的 scope key（standing 层）。
  *
  * 关键坑（2026-08-27 实测）：HTTP 请求路径（routes 的 httpCtx）下既解析不到
- * agent（roots/list 空或非目标）也拿不到 agentPresets.standingKeyFor()（该服务
- * 视图受限）→ scope key 恒 undefined → schemas 落入空视图，面板聚合全 0
- * （filesystem 等「无工具」）。而 apply 早期 ctx 下 standingKeyFor() 可解析
+ * agent（roots/list 空或非目标）也拿不到 standing 层的 scope key（该服务视图受限）
+ * → scope key 恒 undefined → schemas 落入空视图，面板聚合全 0
+ * （filesystem 等「无工具」）。而 apply 早期 ctx 下该 key 可解析
  * （快照路径一直正常，lastMcpTools=17）。
  * 解法：scope key 在 apply 早期解析一次并缓存（进程级单例），所有路径复用。
+ *
+ * 0.1.7（2026-09-24）：旧的「取 key」服务方法已删除，等价物是
+ * `agentPresets.acquireScope()` —— 它返回 `{ key, [Symbol.asyncDispose] }`，即
+ * **租约**：释放会归还 generation.users，老代际被 collect() dispose 后 key 指向
+ * 已卸载的 scope（故必须持有到插件卸载，见 disposeCollectScope）。
+ * 默认取 default preset，与旧语义一致；default 不可用时抛 `agent-preset/invalid`，
+ * 由本函数 catch 后走空视图降级。
  */
 let sharedScopeKey: object | undefined
 /** scope key 解析来源（NIT-1：scopeDiag 现场取证用）：'agent' | 'standing' | null。 */
 let sharedScopeKeySource: 'agent' | 'standing' | null = null
+/** standing scope 的租约（0.1.7 acquireScope 返回；插件卸载时归还）。 */
+let scopeLease: { key?: object; dispose: () => Promise<void> } | undefined
+
+/**
+ * `Symbol.asyncDispose`（tsconfig `lib: ["ES2022","DOM"]` 未含 esnext.disposable，
+ * 故按 symbol 取，不引全局 AsyncDisposable 类型）。
+ */
+const ASYNC_DISPOSE: symbol = (Symbol as unknown as Record<string, symbol>).asyncDispose
+
+/** 归还 standing scope 租约并清缓存（apply 里经 ctx.effect 挂到插件卸载；可重入）。 */
+export function disposeCollectScope(): void {
+  const lease = scopeLease
+  scopeLease = undefined
+  sharedScopeKey = undefined
+  sharedScopeKeySource = null
+  if (!lease) return
+  void lease.dispose().catch(() => undefined)
+}
 
 export async function resolveCollectScopeKey(ctx: Context, sessionId: string | undefined): Promise<object | undefined> {
   if (sharedScopeKey !== undefined) return sharedScopeKey
@@ -168,14 +193,24 @@ export async function resolveCollectScopeKey(ctx: Context, sessionId: string | u
     /* fall through */
   }
   try {
-    const key = await ctx.agentPresets.standingKeyFor()
+    const svc = ctx.agentPresets as unknown as {
+      acquireScope?: () => Promise<unknown>
+    }
+    if (typeof svc.acquireScope !== 'function') return sharedScopeKey
+    const lease = (await svc.acquireScope()) as { key?: object } | undefined
+    const key = lease?.key
     if (key !== undefined) {
-      sharedScopeKey = key as object
+      const dispose = (lease as Record<symbol, unknown>)[ASYNC_DISPOSE]
+      scopeLease = {
+        key,
+        dispose: typeof dispose === 'function' ? (dispose as () => Promise<void>) : async () => {},
+      }
+      sharedScopeKey = key
       sharedScopeKeySource = 'standing'
-      return key as object
+      return key
     }
   } catch {
-    /* ignore */
+    /* default preset 不可用（agent-preset/invalid）→ 空视图降级，不抛 */
   }
   return sharedScopeKey
 }
@@ -412,11 +447,13 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
       const liveTools = agg?.tools ?? 0
       const running = entry.fiber !== undefined
       const disabled = entry.disabled
-      // P1 会话边界：该行在预设文件下的 desired 意图与待生效判定（desired !== live disabled）。
-      const tree = entry.parent?.tree as { filename?: string } | undefined
-      const rowFile = tree?.filename
+      // P1 会话边界：该行在预设组合下的 desired 意图与待生效判定（desired !== live disabled）。
+      // 0.1.7：EntryTree 不再暴露持久化文件名（该字段是根树 Include 的属性，preset 行
+      // 在 PresetTree 上），改按「所属预设声明行 id + 行 id」两级键反查。声明行反查不到
+      // （行不在任何预设声明里）→ undefined，与 0.1.5 下该行无 state 键时的读数一致。
+      const declRowId = presetDeclarationRowIdForRow(ctx, String(entry.options.id ?? ''))
       const rowDesired =
-        typeof rowFile === 'string' && rowFile.length > 0 ? state?.mcp?.[rowFile]?.[entry.options.id]?.desired : undefined
+        declRowId === undefined ? undefined : state?.mcp?.[declRowId]?.[String(entry.options.id ?? '')]?.desired
       // 面板联动（P3）：停用/未挂载时优先显示 catalog 目录值（工具数与 token 估算），
       // 让用户看到「该 MCP 有哪些工具可用」而不只是 0
       const catalogInfo = deps.catalogRuntime.catalog[serverName]
@@ -478,13 +515,13 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
   // rc.1 standing 组合兜底（空面板修复A，2026-09-08）：preset 行挂 standing 组合，
   // 不在 ctx.loader.entries() 里时 mcp[] 为空。此时以当前会话 preset 的 standing
   // 快照行补行：开关走 state.json desired 意图（pending 徽标），pending.ts:state.json
-  // 残留补齐负责下次启动/会话边界物化（syncPresetFiles 写 preset 文件）。
+  // 残留补齐负责下次启动/会话边界对齐。
   // P5 网关（2026-09-10 现网需求）：loader 有网关行时 preset 关态行消失——用户要求
   // 所有安装的 MCP 都在面板列出（开+关均可见可开关）。补行改为始终执行，loader 已有
   // 同 serverName 的行（网关 gw- 行/官方行/项目行）优先，preset 快照只补缺席的 server。
   // 关态行 toggle 走原 preset 意图分支（routes.ts），不动；开意图物化（syncPresetFiles
-  // 写 preset 文件）后下轮 ensureOpenMounts 挂载（最终一致，非即时）。去重键=serverName
-  //（loader 行与 preset 快照同名并存时只留 loader 行）。
+  // 经 configEditor 写 profile patch，0.1.7 无预设文件）后下轮 ensureOpenMounts 挂载
+  //（最终一致，非即时）。去重键=serverName（loader 行与 preset 快照同名并存时只留 loader 行）。
   try {
     // 当前会话 preset：缺 sessionId 时 roots[0]/list[0]（与 resolveAgent 同规则）
     const presetId = agent ? (ctx.agentPresets.composedPreset(agent.ctx) ?? null) : null
@@ -498,7 +535,10 @@ async function collectMcp(deps: Deps, sessionId: string | undefined): Promise<Mc
           const projectWorkspace = projectServerOwner(pr.serverName)
           const agg = byServer.get(pr.serverName)
           const liveTools = agg?.tools ?? 0
-          const rowDesired = state?.mcp?.[pr.file]?.[pr.rowId]?.desired
+          // 0.1.7：state.mcp 的第一级键 = 预设声明行的 Loader 行 id（不再是预设文件路径）。
+          // 声明行反查不到（'' 降级）时无 desired → pending 由内存队列决定。
+          const rowDesired =
+            pr.presetRowId.length === 0 ? undefined : state?.mcp?.[pr.presetRowId]?.[pr.rowId]?.desired
           const pendingHit = pendingMcp.get(pr.entryId)
           // 从未操作过的预设行：无 pending、无 desired → pending=false（首屏不挂徽标）；
           // toggle 后（pendingHit 或 desired≠live）才挂 pending。

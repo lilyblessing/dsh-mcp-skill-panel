@@ -1,13 +1,17 @@
 /**
- * 预设组合文件的文本操作与启停意图物化。
+ * 预设组合的文本操作与启停意图物化。
  *
- * 运行期禁止写 agent.cordis.yml（dsh-agent-presets 的 {mtimeMs,size} stamp 检测会
- * 触发 standing 重挂事故），因此 toggle 只写 state.json，由 syncPresetFiles 在
- * 插件 apply（启动早期、standing 未挂载）时物化到预设文件 —— 此时写文件安全。
- * 本模块为纯文本操作，可被 selftest 覆盖。
+ * 0.1.7（2026-09-24）：预设改为**声明式**（一条 preset = 一条 declaration 行），
+ * 没有独立的 agent.cordis.yml 可写 —— 因此物化目标从「预设组合文件」改为
+ * **profile patch 的声明行 config**，且一律走官方写入面 `ctx.configEditor.edit`
+ *（自带文件锁 + 原子写 + reconcileProfilePatches 热重载，官方 settings 即此法）。
+ * 历史理由（已失效）：旧包用 `{mtimeMs,size}` stamp 检测预设文件变化，运行期写该
+ * 文件会触发 standing 重挂而旧实例不清理 → 当时的对策是「只在启动早期、无会话时写文件」。
+ * 现对策：**不直接写盘**，交给 configEditor（写盘 + 重挂由它按代际语义处理）。
+ * 本模块的其余部分仍是纯文本操作，可被 selftest 覆盖（setRowFlag / setRowConfigKeys /
+ * rowDisabledState 保留为纯函数与自测目标，0.1.7 起不再被 syncPresetFiles 调用）。
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { readFile, writeFile, rename } from 'node:fs/promises'
 import { readState, writeState, type McpRowState } from './state'
 
 const DISABLE_KEY = 'disable-model-invocation'
@@ -357,89 +361,103 @@ export function rowDisabledState(text: string, rowId: string): boolean | null {
   return /:\s*true\s*$/.test(flagLine)
 }
 
+/** profile patch 行的 config 编辑面（config-editor 服务的本插件所需子集）。 */
+interface ConfigEditorLike {
+  entries(): Array<{ options: { id?: unknown; name?: unknown; config?: unknown } }>
+  edit(entry: unknown, change: (current: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>): Promise<void>
+}
+
 /**
- * 启动早期物化：把状态文件里的 MCP 启停意图写入预设组合文件。
- * 只在「没有任何 agent 在跑」时执行 —— 有会话时写文件会触发
- * dsh-agent-presets 的 stamp 重挂（旧实例不 dispose → serverName 冲突事故）。
+ * 0.1.7 启动早期物化：把 state.json 的 MCP 启停/配置意图写进 **profile patch 的预设声明行**。
+ *
+ * 走官方写入面 `ctx.configEditor.edit`（config-editor：文件锁 + 原子写 +
+ * reconcileProfilePatches 热重载；官方 settings 即此法）。声明式预设没有独立文件，
+ * 故 state.mcp 的第一级键 = **预设声明行的 Loader 行 id**；找不到该声明行（含 0.1.5
+ * 遗留的「预设文件路径」键）→ 跳过该键（死键不迁移、不猜）。
+ *
+ * 幂等（0.1.7 新增）：目标 `disabled` 与目标 config 键都已一致时**不调用 edit** ——
+ * 每次 edit 都会触发该声明行的 reconcile/重挂，无谓的重挂正是要避免的事故形态
+ *（W0 报告 §5-2 P10 护栏）。非 profile 场合（无 configEditor 服务）不写盘，返回 0。
  */
 export async function syncPresetFiles(ctx: Context): Promise<number> {
-  if (ctx.agents.list().length > 0) return 0
+  const editor = ctx.get('configEditor') as ConfigEditorLike | undefined
+  if (editor === undefined) return 0
   const state = await readState()
   const mcp = state.mcp
   if (!mcp || Object.keys(mcp).length === 0) return 0
   let materialized = 0
-  for (const [file, rows] of Object.entries(mcp)) {
-    let text: string
-    try {
-      text = await readFile(file, 'utf8')
-    } catch {
+  for (const [presetRowId, rows] of Object.entries(mcp)) {
+    const entry = editor.entries().find((row) => String(row.options.id ?? '') === presetRowId)
+    if (entry === undefined) continue
+    const current = (entry.options.config ?? {}) as Record<string, unknown>
+    const plugins = Array.isArray(current.plugins) ? (current.plugins as Array<Record<string, unknown>>) : []
+    const nextPlugins = mergeRowIntents(plugins, rows)
+    if (nextPlugins === undefined) {
+      // 无变化（幂等闸）：只对齐 state 的物化记录，不发起 edit ——
+      // 每次 edit 都会触发该声明行的 reconcile/重挂，无谓重挂正是要避免的事故形态。
+      for (const [rowId, row] of Object.entries(rows)) {
+        if (row.desired === row.lastApplied) continue
+        mcp[presetRowId][rowId] = { ...row, lastApplied: row.desired }
+      }
       continue
     }
-    let changed = false
-    const next: Record<string, McpRowState> = {}
-    for (const [rowId, entry] of Object.entries(rows)) {
-      const cur = rowDisabledState(text, rowId)
-      let lastApplied: boolean | null = entry.lastApplied
-      if (cur !== entry.lastApplied) {
-        // 文件被外部（用户）修改过：**启停意图**上尊重现状，不写 disabled。
-        // 2026-08-27 修复：此前直接跳过（行不进入 next → 条目被永久删除）。
-        // 物化链路 setRowFlag 无法反转 disabled:false 时 lastApplied 与文件脱节，
-        // 会被误判外部修改而把用户设置从 state.json 抹掉（obsidian 事故）。
-        // 改为保留条目：lastApplied 对齐现实（cur），desired 保留（面板仍显示
-        // 意图徽标，可重新 toggle 接管）；desired 与现状一致时自动恢复管理闭环。
-        //
-        // 0.6.0 修复（2026-09-14 实测事故）：**配置意图必须继续物化**。
-        // 原实现在此处 `continue` 把整行跳过 → 「更多配置」改的 cwd 永远进不了
-        // 预设文件且毫无提示。触发场景：codegraph 行无 `disabled` 键 ⇒
-        // rowDisabledState 返回 null，而 state 里记的 lastApplied 来自 live
-        // entry.disabled = false ⇒ null !== false ⇒ 每次启动都判成「外部改动」。
-        // 启停与配置是两个正交字段：对齐 lastApplied 后继续走配置物化是安全的
-        //（本分支不写 `disabled`，用户对启停的改动仍被尊重）。
-        lastApplied = cur
-        ctx.logger.info?.(
-          `mcp-skill-panel: preset row ${rowId} externally modified (disabled ${String(entry.lastApplied)} → ${String(cur)}); keeping desired=${String(entry.desired)}, still materializing config`,
-        )
-      } else {
-        const curBool = cur === true
-        if (curBool !== entry.desired) {
-          try {
-            text = setRowFlag(text, rowId, 'disabled', entry.desired)
-            changed = true
-            materialized += 1
-          } catch {
-            // 行已不存在（用户删除）：放弃管理
-            continue
-          }
-        }
-        lastApplied = entry.desired
+    await editor.edit(entry, (cur) => {
+      const curPlugins = Array.isArray(cur.plugins) ? (cur.plugins as Array<Record<string, unknown>>) : []
+      return { ...cur, plugins: mergeRowIntents(curPlugins, rows) ?? curPlugins }
+    })
+    materialized += 1
+    // 物化记录：lastApplied = 本次写进 profile patch 的启停值；configAppliedYaml = 本次
+    // 写入的配置意图文本（供下次启动判断「是否已物化」）。
+    for (const [rowId, row] of Object.entries(rows)) {
+      mcp[presetRowId][rowId] = {
+        desired: row.desired,
+        lastApplied: row.desired,
+        config: row.config,
+        ...(row.config && Object.keys(row.config).length > 0 ? { configAppliedYaml: configKeysToYamlText(row.config) } : {}),
       }
-      // 0.6.0：配置意图物化（仅当与上次物化结果不同才写，幂等且可自愈）
-      let configAppliedYaml = entry.configAppliedYaml
-      if (entry.config && Object.keys(entry.config).length > 0) {
-        const yamlText = configKeysToYamlText(entry.config)
-        if (yamlText !== entry.configAppliedYaml) {
-          try {
-            text = setRowConfigKeys(text, rowId, configSetToYaml(entry.config))
-            changed = true
-            materialized += 1
-            configAppliedYaml = yamlText
-          } catch {
-            // 行已不存在 / 结构异常：保留意图，下次启动重试
-          }
-        }
-      }
-      // lastApplied 记录物化后的文件状态（= desired），而非物化前 curBool：
-      // 否则下次启动 cur(文件=desired) !== lastApplied(旧值) 被误判为「外部修改」而放弃管理，
-      // 导致 desired 残留 + 面板徽标悬挂（P1 重启链路闭环）。外部改动分支则对齐 cur。
-      next[rowId] = { desired: entry.desired, lastApplied, config: entry.config, configAppliedYaml }
     }
-    if (changed) {
-      const tmp = `${file}.tmp`
-      await writeFile(tmp, text, 'utf8')
-      await rename(tmp, file)
-    }
-    mcp[file] = next
   }
   await writeState(state)
   return materialized
+}
+
+/**
+ * 把 state 里的行意图合并进声明行的 plugins 数组；**无变化返回 undefined**（幂等闸）。
+ *
+ * - `desired === true` → 该行写 `disabled: true`；`desired === false` → 删除 `disabled` 键
+ *   （与旧 setRowFlag 的「value=false 即移除标记」同语义）。
+ * - `config` 键（「更多配置」意图）：先按 state 里的 `configAppliedYaml` 判定是否已物化，
+ *   未物化则整键合并进该行 `config`；0.1.7 不再有文本写入，`!!js` 表达式由 config-editor
+ *   自己的 `__jsExpr` → `!!js` 标签回写处理。
+ */
+function mergeRowIntents(
+  plugins: Array<Record<string, unknown>>,
+  rows: Record<string, McpRowState>,
+): Array<Record<string, unknown>> | undefined {
+  let changed = false
+  const next = plugins.map((plugin) => {
+    const rowId = String(plugin.id ?? '')
+    const want = rows[rowId]
+    if (want === undefined) return plugin
+    let row = plugin
+    if (want.desired === true) {
+      if (plugin.disabled !== true) {
+        row = { ...row, disabled: true }
+        changed = true
+      }
+    } else if ('disabled' in row) {
+      row = { ...row }
+      delete row.disabled
+      changed = true
+    }
+    if (want.config && Object.keys(want.config).length > 0 && configKeysToYamlText(want.config) !== want.configAppliedYaml) {
+      const base = row.config !== null && typeof row.config === 'object' && !Array.isArray(row.config)
+        ? (row.config as Record<string, unknown>)
+        : {}
+      row = { ...row, config: { ...base, ...want.config } }
+      changed = true
+    }
+    return row
+  })
+  return changed ? next : undefined
 }

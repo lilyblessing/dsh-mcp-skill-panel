@@ -4,24 +4,25 @@
  * next-session 模式下 toggle 不立即 entry.update（避免中途改 tools 前缀 → 缓存 miss），
  * 只写 state.json.desired 并进入本模块的 pendingMcp 内存队列；在边界统一应用：
  * - 实时：新会话 `agent/session-start`（首次请求前）调用 applyPendingMcp
- * - 兜底：DSH 重启后由 syncPresetFiles() 从 state.json 物化到预设组合（既有路径）
+ * - 兜底：DSH 重启后由 syncPresetFiles() 从 state.json 物化到 profile patch（既有路径）
  * - 强制：面板「立即应用待生效变更」端点同样调用 applyPendingMcp
  *
  * immediate 模式不经过本队列（toggleMcp 直接 entry.update）。
  */
-import { readFile } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
 import { isMcpEntry, serverNameOf } from './mcp-entry'
 import type { McpCallController } from './mcpcall'
-import { rowDisabledState } from './preset'
-import { findStandingEntryById, standingMcpEntries } from './standing-rows'
-import { readState, writeState, type StateFile } from './state'
+import { isPresetDeclarationRow } from './preset-mcp'
+import { findStandingEntryById } from './standing-rows'
+import { readState, type StateFile } from './state'
 import { messageOf } from './util'
 
 /** 单个待生效项（key = entryId）。 */
 export interface PendingMcpEntry {
   entryId: string
+  /** 0.1.7：目标持久化键 = 预设**声明行的 Loader 行 id**（不再是预设文件路径）；
+   * 反查不到所属声明行时为 null（只记内存意图，不落盘）。 */
   file: string | null
   rowId: string
   disabled: boolean
@@ -80,62 +81,39 @@ export async function applyPendingMcp(deps: PendingDeps): Promise<number> {
     }
   }
   // ② state.json 残留兜底：重启/热重载后内存队列为空，但 desired 与 live 仍可能不一致
-  //   （syncPresetFiles 因「有 agent 在跑」跳过物化等）。把 desired 应用到 live；
-  //   预设文件被外部改过（cur !== lastApplied）的行尊重现状、放弃管理并清除残留
-  //   （与 syncPresetFiles 同语义，防止「Apply pending now」点击后遗留无效徽标）。
-  //   运行期仍不写预设文件（事故 5.1 铁律）：重启后由 syncPresetFiles 物化闭环。
+  //   （syncPresetFiles 的物化未覆盖该行等）。把 desired 应用到 live。
+  //   0.1.7：不再有「预设文件被外部改过」这一分支 —— 预设没有独立文件，live 行即唯一
+  //   事实源（desired === live 即视为无残留）。运行期仍不直接写 profile patch
+  //   （持久化一律走 syncPresetFiles → configEditor，带文件锁 + reconcile）。
   applied += await applyStateResidue(deps, await readState().catch(() => undefined))
   return applied
 }
 
 /**
  * state.json 残留补齐（见 applyPendingMcp ②）。只改 live（entry.update），
- * 不动 preset 文件与 lastApplied（lastApplied 语义 = 文件上次状态，供物化判定）。
+ * 不动 state.json 与 lastApplied（lastApplied 语义 = 上次物化后的启停值，供物化判定）。
  */
 async function applyStateResidue(deps: PendingDeps, state: StateFile | undefined): Promise<number> {
   const { ctx } = deps
   const mcp = state?.mcp
   if (!mcp || Object.keys(mcp).length === 0) return 0
   let applied = 0
-  let residueCleared = false
-  // 按 file 分组：同一文件只读盘一次
-  const byFile = new Map<string, { entry: Entry; rowState: NonNullable<NonNullable<StateFile['mcp']>[string]>[string] }[]>()
-  // 0.5.7 修：原先只遍历 ctx.loader.entries()，preset 行不在其中 → 本函数对 preset 行
-  // **恒为 0 应用**，state.json 的 desired 永远悬着（实测 desired=false 而 disabled=false
-  // 并存）。改为「loader 行 ∪ standing 行」，行句柄一律来自 standing 树。
-  for (const entry of [...ctx.loader.entries(), ...standingMcpEntries()]) {
-    if (!isMcpEntry(entry)) continue
-    if (pendingMcp.has(entry.id)) continue
-    const tree = entry.parent?.tree as { filename?: string } | undefined
-    const file = tree?.filename
-    if (typeof file !== 'string' || file.length === 0) continue
-    const rowState = mcp[file]?.[entry.options.id]
-    if (!rowState || typeof rowState.desired !== 'boolean') continue
-    if (rowState.desired === entry.disabled) continue
-    let bucket = byFile.get(file)
-    if (!bucket) { bucket = []; byFile.set(file, bucket) }
-    bucket.push({ entry, rowState })
-  }
-  for (const [file, entries] of byFile) {
-    let text: string
-    try {
-      text = await readFile(file, 'utf8')
-    } catch {
-      // 文件已不存在：该文件下全部 entry 跳过（不动 state）
-      continue
-    }
-    let fileCleared = false
-    for (const { entry, rowState } of entries) {
-      const cur = rowDisabledState(text, entry.options.id)
-      if (cur !== rowState.lastApplied) {
-        // 预设文件被外部/其他途径改过：尊重现状（不动 live）。
-        // 2026-08-27 修复：此前直接删除残留条目 → 物化链路误判时用户设置永久丢失；
-        // 改为保留 desired、lastApplied 对齐现实，面板仍显示意图，可重新接管。
-        rowState.lastApplied = cur
-        fileCleared = true
-        ctx.logger.info?.(`mcp-skill-panel: state-residue ${entry.id}: preset file externally modified, aligning lastApplied`)
-        continue
-      }
+  // 0.1.7 键语义：state.mcp 第一级 = **预设声明行的 Loader 行 id**，第二级 = 行 id。
+  // 旧版第一级是预设组合文件绝对路径 —— 那些键在本版找不到声明行，一律按死键忽略
+  //（不猜、不迁移，见 README 变更日志 v0.7.0 的键语义说明）。
+  // 旧实现按「文件」分组并在应用前比对文件现值；0.1.7 没有可读的预设文件，故不再有
+  // 「外部改文件」判定 —— live 行即唯一事实源（desired 与 live 一致即无残留）。
+  for (const [presetRowId, rows] of Object.entries(mcp)) {
+    if (!isPresetDeclarationRow(ctx, presetRowId)) continue
+    for (const [rowId, rowState] of Object.entries(rows ?? {})) {
+      if (!rowState || typeof rowState.desired !== 'boolean') continue
+      const entry = resolveRowEntry(ctx, rowId)
+      if (!entry || !isMcpEntry(entry)) continue
+      // 内存队列（本进程刚记的意图）优先，避免同一次边界里被残留分支重复处理。
+      const liveId = String(entry.id)
+      const liveRowId = String(entry.options.id ?? '')
+      if (pendingMcp.has(liveId) || (liveRowId.length > 0 && pendingMcp.has(liveRowId))) continue
+      if (rowState.desired === entry.disabled) continue
       try {
         await entry.update({ disabled: rowState.desired })
         if (!rowState.desired && deps.controller) {
@@ -147,10 +125,22 @@ async function applyStateResidue(deps: PendingDeps, state: StateFile | undefined
         ctx.logger.warn?.(`mcp-skill-panel: state-residue apply "${entry.id}" failed: ${messageOf(error)}`)
       }
     }
-    if (fileCleared) residueCleared = true
   }
-  if (residueCleared) await writeState(state ?? {}).catch(() => undefined)
   return applied
+}
+
+/**
+ * 行 id → live 行句柄：loader 优先，preset 行回落 standing 树（0.5.7 起 preset 行不在
+ * loader 可达域）。0.1.7 的 standing 行 id 是绝对的，故 findStandingEntryById 两种形态都收。
+ */
+function resolveRowEntry(ctx: Context, rowId: string): Entry | undefined {
+  try {
+    const entry = ctx.loader.resolve(rowId) as Entry | undefined
+    if (entry) return entry
+  } catch {
+    /* preset 行必然抛 "cannot resolve entry" → 走 standing 兜底 */
+  }
+  return findStandingEntryById(rowId)
 }
 
 /** 当前待生效项数量（面板/诊断用）。 */

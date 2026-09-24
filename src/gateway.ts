@@ -12,7 +12,8 @@
  *
  * 红线：
  * - 绝不手动 dispose standing/own（靠 fiber unwind；#1079 旧代指针教训）；
- * - 绝不在运行时写预设文件（事故 5.1 铁律；意图链 routes/pending/preset 不动）；
+ * - 绝不在运行时直接写 profile patch（0.1.7：预设无独立文件；意图链
+ *   routes/pending/preset 不动，物化一律走 configEditor）；
  * - secrets 不回面板（BLOCK-2；config 只在 host 侧流转）。
  */
 import type { Context } from '@deepseek-ai/cordis'
@@ -139,7 +140,7 @@ export interface GatewayDeps {
    * WARN-3（复审，2026-09-10）：自测读不到真 state.json（进程缓存）且 fake
    * compositionInventory 空行，必须可注入才能覆盖拆分支。
    */
-  listRows?: (ctx: Context, presetId: string) => Promise<{ rows: GatewayPresetRow[]; presetPath: string }>
+  listRows?: (ctx: Context, presetId: string) => Promise<{ rows: GatewayPresetRow[]; presetRowId: string }>
   readIntents?: () => Promise<Record<string, { desired?: boolean; lastApplied?: boolean | null }>>
 }
 
@@ -147,7 +148,8 @@ export interface GatewayDeps {
 export interface GatewayPresetRow {
   serverName: string
   rowId: string
-  file: string
+  /** 0.1.7：所属预设声明行的 Loader 行 id（= state.mcp 第一级键；'' = 反查不到）。 */
+  presetRowId: string
   disabled: boolean
   config?: import('./preset-mcp').PresetMcpClientConfig
 }
@@ -211,21 +213,22 @@ export async function ensureOpenMounts(deps: GatewayDeps, presetId?: string): Pr
       deps.readIntents ??
       (async () => {
         const stateFile = await readState().catch(() => undefined)
-        return (presetPathRef.current ? stateFile?.mcp?.[presetPathRef.current] : undefined) ?? {}
+        // 0.1.7：意图键 = 预设声明行的 Loader 行 id（不再是预设文件路径）
+        return (presetRowIdRef.current ? stateFile?.mcp?.[presetRowIdRef.current] : undefined) ?? {}
       })
     let rows: GatewayPresetRow[] = []
-    const presetPathRef: { current: string } = { current: '' }
+    const presetRowIdRef: { current: string } = { current: '' }
     try {
       const listed = await listRows(ctx, pid)
       rows = listed.rows
-      presetPathRef.current = listed.presetPath
+      presetRowIdRef.current = listed.presetRowId
     } catch (error) {
       state.lastCheck = { at: Date.now(), ok: false, detail: `listPreset failed: ${messageOf(error)}` }
       return out
     }
     // 关意图即拆：state.json desired=true 的已挂载行先 remove（只拆网关自己拉起的 mounts，
     // 官方行/项目行不在 mounts 账里，不碰）。意图来源与 toggle 网关分支同键
-    //（state.mcp[presetPath][rowId].desired，见 routes.ts:184）。
+    //（state.mcp[预设声明行 id][rowId].desired，见 routes.ts 的 preset 意图分支）。
     // BLOCK-1（复审，2026-09-10）：intents 必须外提——挂载循环对 desired=true 的行
     // 直接跳过（计 skipped），否则拆后同轮立即重建，关净效果为零。
     let intents: Record<string, { desired?: boolean; lastApplied?: boolean | null }> = {}

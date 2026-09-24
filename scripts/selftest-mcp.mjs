@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /* ── 宿主闭包回填（P0-3）─────────────────────────────────────────────────────
- * lib/index.js → @deepseek-ai/dsh-agent-presets 的 **peerDependencies** 里有三个
+ * lib/index.js → @deepseek-ai/dsh-agent-preset-registry 的 **peerDependencies** 里有三个
  * 本仓 devDependencies 未列、npm 安装也不会装的真实包：
  *   @deepseek-ai/dsh-home-paths / @deepseek-ai/cordis-plugin-include / @deepseek-ai/dsh-atomic-write
  * 缺它们时 import lib/index.js 直接 ERR_MODULE_NOT_FOUND → 全部断言零执行（本次修复的故障现场）。
@@ -823,13 +823,13 @@ check('parsePresetMcpText：引号值去引号 + transport 缺席为 null', () =
   assert.equal(parsed.get('mcp-notransport').transport, null)
 })
 
-// ── 0.5.6 预设直通：findPresetRowByServerName 薄封装（compositionInventory+resolve+read） ──
+// ── 0.5.6 预设直通（0.1.7 读数源改 readDocument）：findPresetRowByServerName 薄封装 ──
 await checkAsync('findPresetRowByServerName：按 serverName 定位 standing 行（含 mcp-anki 例外回落）', async () => {
   const rows = [
-    { entryId: 'include:agent-presets:mcp-filesystem', moduleName: '@deepseek-ai/dsh-mcp-client', enabled: true, fiberState: 2 },
-    { entryId: 'include:agent-presets:mcp-exa', moduleName: '@deepseek-ai/dsh-mcp-client', enabled: false },
-    { entryId: 'include:agent-presets:mcp-anki', moduleName: '@deepseek-ai/dsh-mcp-client', enabled: false },
-    { entryId: 'include:agent-presets:persona', moduleName: '@deepseek-ai/dsh-persona', enabled: true },
+    { entryId: 'mcp-filesystem', moduleName: '@deepseek-ai/dsh-mcp-client', enabled: true, fiberState: 2 },
+    { entryId: 'mcp-exa', moduleName: '@deepseek-ai/dsh-mcp-client', enabled: false },
+    { entryId: 'mcp-anki', moduleName: '@deepseek-ai/dsh-mcp-client', enabled: false },
+    { entryId: 'persona', moduleName: '@deepseek-ai/dsh-persona', enabled: true },
   ]
   const text = [
     '- id: mcp-filesystem',
@@ -851,11 +851,13 @@ await checkAsync('findPresetRowByServerName：按 serverName 定位 standing 行
     '- id: persona',
     "  name: '@deepseek-ai/dsh-persona'",
   ].join('\n')
+  // 0.1.7：声明行的 Loader 行 id 由 ctx.loader.entries() 里 config.id 相同者反查
+  const declRow = { options: { id: 'preset-standard-mcp', name: '@deepseek-ai/dsh-agent-preset', config: { id: 'standard-mcp', plugins: [] } } }
   const ctx = {
+    loader: { entries: () => [declRow] },
     agentPresets: {
       compositionInventory: async () => [{ id: 'standard-mcp', rows }],
-      resolve: async () => ({ path: '/preset/agent.cordis.yml' }),
-      read: async () => text,
+      readDocument: async () => ({ agentPreset: 'standard-mcp', content: text }),
     },
   }
   const fs = await index.findPresetRowByServerName(ctx, 'standard-mcp', 'filesystem')
@@ -865,7 +867,7 @@ await checkAsync('findPresetRowByServerName：按 serverName 定位 standing 行
   assert.equal(fs.disabled, false)
   assert.equal(fs.running, true)
   assert.equal(fs.toolCallTimeoutMs, 60000)
-  assert.equal(fs.file, '/preset/agent.cordis.yml')
+  assert.equal(fs.presetRowId, 'preset-standard-mcp')
   const exa = await index.findPresetRowByServerName(ctx, 'standard-mcp', 'exa')
   assert.ok(exa)
   assert.equal(exa.disabled, true)
@@ -1221,8 +1223,8 @@ await checkAsync('ensureOpenMounts：关意图即拆+同轮不重建（WARN-3/BL
     remove: async (entryId) => { removed.push(entryId); return undefined },
   }
   const rows = [
-    { serverName: 'exa', rowId: 'mcp-exa', file: '/p/agent.cordis.yml', disabled: false, config: { serverName: 'exa', transport: 'stdio', command: 'x' } },
-    { serverName: 'chrome', rowId: 'mcp-chrome', file: '/p/agent.cordis.yml', disabled: false, config: { serverName: 'chrome', transport: 'stdio', command: 'x' } },
+    { serverName: 'exa', rowId: 'mcp-exa', presetRowId: 'preset-standard-mcp', disabled: false, config: { serverName: 'exa', transport: 'stdio', command: 'x' } },
+    { serverName: 'chrome', rowId: 'mcp-chrome', presetRowId: 'preset-standard-mcp', disabled: false, config: { serverName: 'chrome', transport: 'stdio', command: 'x' } },
   ]
   const fakeCtx = { loader: fakeLoader, logger: {}, agents: { roots: () => [], list: () => [] }, agentPresets: { composedPreset: () => 'p' } }
   const { ensureOpenMounts: ensure, createGatewayState: mkState } = index
@@ -1234,7 +1236,7 @@ await checkAsync('ensureOpenMounts：关意图即拆+同轮不重建（WARN-3/BL
       ctx: fakeCtx,
       control: {},
       state,
-      listRows: async () => ({ rows, presetPath: '/p/agent.cordis.yml' }),
+      listRows: async () => ({ rows, presetRowId: 'preset-standard-mcp' }),
       readIntents: async () => ({ 'mcp-exa': { desired: true, lastApplied: false } }),
     },
     'p',

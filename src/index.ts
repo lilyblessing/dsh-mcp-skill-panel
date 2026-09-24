@@ -18,13 +18,20 @@
  * - skill 文件经 skills.get(name, {scope, cwd}).path 定位；改 frontmatter 由
  *   dsh-skill-filesystem 的 chokidar watcher 实时失效
  *
- * MCP 持久化（v0.1.1 修复，2026-08-15）：
- * 运行期禁止写 agent.cordis.yml —— dsh-agent-presets 的 ensureStanding 用
- * {mtimeMs, size} stamp 检测预设文件变化，变化时删除 standing 记录并重挂，
- * 但旧 standing 的 fiber/scope 不 dispose → 旧 mcp-client 实例的 serverName
- * 仍占用 → 新挂载全部 "already in use" → 会话创建/resume 失败（实测事故）。
- * 持久化改为：toggle 只写插件自己的状态文件（~/.dsh/dsh-mcp-skill-panel/state.json），
- * 插件 apply 时（启动早期、standing 未挂载）再物化到预设文件 —— 此时写文件安全。
+ * 0.1.7 修正（2026-09-24）：**preset 行不再出现在 `ctx.loader.entries()`**——
+ * 声明式预设的行挂在注册表私有的内存 Loader 树（PresetTree）上，只能经
+ * `livePresetMounts()` / `standingMountFor()` 拿句柄（见 standing-rows.ts），
+ * 且 `entry.id` 是绝对 id、组合清单给的是相对 id（两形态都按 id 匹配）。
+ *
+ * MCP 持久化（0.1.7 起，2026-09-24）：
+ * 运行期**不直接写 profile patch**（也不再有预设组合文件可写）—— 声明式预设的
+ * 启停/配置意图一律经官方写入面 `ctx.configEditor.edit` 物化（config-editor 自带
+ * 文件锁 + 原子写 + reconcileProfilePatches 热重载，官方 settings 即此法）。
+ * 历史理由（已失效，仅存档）：旧包用 `{mtimeMs,size}` stamp 检测预设文件变化，变化时
+ * 删除 standing 记录并重挂，但旧 standing 的 fiber/scope 不 dispose → 旧 mcp-client
+ * 实例的 serverName 仍占用 → 新挂载全部 "already in use" → 会话创建/resume 失败。
+ * 持久化链路：toggle 只写插件状态文件（~/.dsh/dsh-mcp-skill-panel/state.json），
+ * 下次启动 apply 早期由 syncPresetFiles() 经 configEditor 物化到 profile patch。
  */
 import Schema from '@deepseek-ai/schemastery'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
@@ -49,7 +56,7 @@ export { MCP_SEARCH_TOOL, MCP_CALL_TOOL, CONTROL_TOOL_NAMES } from './mcpcall'
 // 空查能力摘要表的口径文案（selftest 回归护栏：G3 —— hideAll 下不得宣称「对模型可见」）
 export { buildSummaryHeader } from './mcpcall'
 import type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
-import { createDomainCaches, getSchemasView, resolveCollectScopeKey, type DomainCaches } from './collect'
+import { createDomainCaches, getSchemasView, resolveCollectScopeKey, disposeCollectScope, type DomainCaches } from './collect'
 import { findPresetRowByServerName, type PresetMcpRow } from './preset-mcp'
 import { makeRoutes, setRowConfigApplyHook } from './routes'
 import { readState, writeState, setStateAiOwner, clearStateAiOwner, stateAutoManageByRoute, stateMiddleLayerHides } from './state'
@@ -320,9 +327,10 @@ async function persistCatalog(next: () => Context, runtime: CatalogRuntime): Pro
 /**
  * 解析 scope 并取 schema 视图（preset 层共享，任一 standing 即可）。
  *
- * 关键坑（v0.4.1 + 2026-08-27）：HTTP/apply ctx 下 agents/standingKeyFor 视图
+ * 关键坑（v0.4.1 + 2026-08-27）：HTTP/apply ctx 下 agents 与 standing 层服务的视图
  * 受限（roots/list 空或服务不可解析）。统一走 collect.resolveCollectScopeKey 的
- * 进程级缓存：apply 早期预热一次，快照与面板路径共用同一 standing scope key。
+ * 进程级缓存：apply 早期预热一次，快照与面板路径共用同一 standing scope key
+ *（0.1.7 该 key 是 acquireScope 的**租约**，卸载时由 ctx.effect 归还，见下）。
  */
 async function resolveScopeSchemas(
   ctx: Context,
@@ -579,21 +587,25 @@ export function apply(ctx: Context, config: Config = {}): void {
     ctx.logger.warn(`mcp-skill-panel: 重建项目 MCP owner 映射失败: ${messageOf(error)}`)
   })
 
-  // 启动早期物化 MCP 启停意图（仅当无会话在跑时；有会话则下次重启再物化）。
-  // 不阻塞 apply；失败只记日志，不拖累插件挂载。
+  // 启动早期物化 MCP 启停/配置意图（0.1.7：走 configEditor.edit 写 profile patch 的
+  // 预设声明行；非 profile 场合无 configEditor 时返回 0）。不阻塞 apply；失败只记日志。
   // 0.6.0：同一管线也物化「更多配置」改过的挂载配置（见 preset.syncPresetFiles 的 config 段）。
   void syncPresetFiles(ctx).then(
     (count) => {
-      if (count > 0) ctx.logger.info(`runtime-inventory: materialized ${count} MCP row state(s) into preset composition`)
+      if (count > 0) ctx.logger.info(`runtime-inventory: materialized ${count} MCP row state(s) into profile patch`)
     },
     (error: unknown) => {
       ctx.logger.warn(`runtime-inventory: preset sync skipped: ${messageOf(error)}`)
     },
   )
 
+  // 0.1.7：standing scope 的 acquireScope 租约随插件卸载归还
+  //（租约不归还 → generation.users 不归零 → 老代际不被 collect() dispose → 泄漏）。
+  ctx.effect(() => () => disposeCollectScope(), 'mcp-skill-panel: preset scope lease')
+
   // 0.6.0「更多配置」的热应用钩子：路由层不碰 loader，经此改 live entry 的 config。
   // 实测依据（2026-09-13）：entry.update({ config }) 在 standing 行上干净生效、不丢行、1.2s。
-  // 与写预设文件是两件事——意图落盘 + 启动物化才是持久化路径（铁律不破）。
+  // 与持久化是两件事——意图落盘（state.json）+ 启动经 configEditor 物化才是持久化路径。
   setRowConfigApplyHook(async (server, nextConfig) => {
     const entry = findStandingEntryByServer(server)
     if (!entry) return { ok: false, error: `standing 行未找到：${server}` }

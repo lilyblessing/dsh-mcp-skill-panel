@@ -1,12 +1,13 @@
 /**
- * preset 行句柄来源（0.5.7）—— 模型侧可见性 / 面板开关 / mcp_call 唤醒的公共咽喉。
+ * preset 行句柄来源（0.5.7；0.1.7 契约改造 2026-09-24）—— 模型侧可见性 / 面板开关 /
+ * mcp_call 唤醒的公共咽喉。
  *
  * 背景与断点（2026-09-13 实测取证，详见 README 变更日志 v0.6.0 的
  * 「preset 行句柄 + 临时拉起闭环 + 已安装能力表」一节）：
  * dsh 0.1.2-rc.1 起 preset 行挂在 standing 组合，**不在 `ctx.loader.entries()`
  * 也不在 `ctx.loader.resolve()` 可达域**（resolve 恒抛 "cannot resolve entry"）。
  * 0.5.5/0.5.6 因此把所有 preset 行逻辑降级成「快照读取 + 意图排队」：
- * `listPresetMcpRows` 走 `agentPresets.compositionInventory()` 与 preset 文件文本，
+ * `listPresetMcpRows` 走 `agentPresets.compositionInventory()` 与预设文本，
  * 只读得到 `enabled`/`fiberState` 快照，**拿不到 Entry 句柄**。后果是三处通路
  * 同时断裂（同一根因）：
  *   1. `buildVisibility` 遍历 `ctx.loader.entries()` → 表为空 → filter.ts 的
@@ -16,21 +17,21 @@
  *   3. `mcp_call` 的 `resolveEntry` miss → 走 `presetRow.disabled` 分支直接 throw
  *      「当前已停用…请先在面板打开」 → **关着的 MCP 叫不醒**（无法临时拉起）。
  *
- * 解法：dsh 0.1.5-rc.2 公开了 standing 组合的 EntryTree 读取口：
+ * 解法：0.1.5-rc.2 起公开了 standing 组合的 EntryTree 读取口；
+ * 0.1.7 由 `@deepseek-ai/dsh-agent-preset-registry` 提供**同一对**函数
+ * （该包 src/index.ts 的 re-export，实现在 mount.ts）：
  *   `standingMountFor(agentCtx) -> { presetId, fiber, tree: EntryTree, key }`
  *   `livePresetMounts(within?)   -> PresetMount[]`（模块级注册表，无需 agent）
- * `PresetTree extends Include`（agent-presets lib/index.js:634-643），即一棵带
- * `resolve()` / `entries()` 的真 EntryTree；行 id 形如
- * `include:agent-presets:mcp-filesystem`，行的 `disabled` 与 inventory 的
- * `enabled === false` 一一对应（实测 10/10 一致），故 rc.8 时代的
- * `entry.update({ disabled })` 语义**原样复活**。
+ * `PresetTree extends EntryTree`（registry mount.ts），即一棵带
+ * `resolve()` / `entries()` 的真 EntryTree。
  *
- * ⚠️ 模块身份（本文件成立的前提）：`mounted` 是 dsh-agent-presets 的**模块私有**
- * WeakMap，`livePresetMounts()` 只有当本插件的 `@deepseek-ai/dsh-agent-presets`
- * 与宿主组合解析到**同一份实例**时才看得到挂载。实测：宿主侧走 `NODE_PATH` 的
- * `node_modules/.pnpm/node_modules` 影子树 → 0.1.5-rc.2
- * (`...@deepseek-ai+dsh-agent-pres_fc9bf98ae5865ea9f109f84a7d78519a`)；面板从
- * 自身 node_modules 向上走解析到同一份（探针 presets.url 实证）。
+ * ⚠️ 0.1.7 行 id 形态变了：standing 树里 `entry.id` 是**绝对** id
+ * （`<owner entry id>:<rowId>`），而 `agentPresets.compositionInventory()` 给的是
+ * **相对** id（registry 的 mountedCompositionRows 会剥掉 owner 前缀）。
+ * 两者不再相等，故本模块的按 id 查找**两种形态都接受**（见 findStandingEntryById）。
+ *
+ * ⚠️ 模块身份（本文件成立的前提）：`mounts` 是 registry 包的**模块私有** Set，
+ * `livePresetMounts()` 只有当本插件的该包与宿主组合解析到**同一份实例**时才看得到挂载。
  * **若升级 DSH 后 `presetMounts()` 恒返回 []，第一嫌疑就是这份实例错位**——
  * 由 `/debug` 的 `standingDiag` 直接可见，不要靠猜。
  *
@@ -39,7 +40,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Entry } from '@deepseek-ai/cordis-plugin-loader'
-import * as agentPresets from '@deepseek-ai/dsh-agent-presets'
+import * as agentPresets from '@deepseek-ai/dsh-agent-preset-registry'
 import { isMcpEntry, serverNameOf } from './mcp-entry'
 
 /** standing 组合的挂载描述（只取本插件用到的字段）。 */
@@ -55,8 +56,9 @@ export interface StandingTree {
 }
 
 /**
- * dsh-agent-presets 的读取面。全部可选：宿主版本落后（< 0.1.5-rc.2）时这些函数
- * 不存在，面板整体降级为 0.5.6 行为（可见性不过滤、开关只记意图），不崩。
+ * `@deepseek-ai/dsh-agent-preset-registry` 的读取面。全部可选：宿主版本落后
+ * （不含这两个模块级导出）时它们不存在，面板整体降级为 0.5.6 行为
+ * （可见性不过滤、开关只记意图），不崩。
  */
 const api = agentPresets as unknown as {
   livePresetMounts?: (within?: unknown) => StandingMount[]
@@ -78,7 +80,7 @@ let diag: {
  */
 export function presetMounts(): StandingMount[] {
   if (typeof api.livePresetMounts !== 'function') {
-    diag = { ...diag, apiAvailable: false, apiError: 'livePresetMounts not exported by host dsh-agent-presets' }
+    diag = { ...diag, apiAvailable: false, apiError: 'livePresetMounts not exported by host dsh-agent-preset-registry' }
     return []
   }
   try {
@@ -122,11 +124,19 @@ export function findStandingEntryByServer(serverName: string, agentCtx?: Context
   return undefined
 }
 
-/** 在 standing 树里按长 entryId 找行（toggleMcp 直传 entryId 时用）。 */
+/**
+ * 在 standing 树里按行 id 找行（toggleMcp 直传 entryId 时用）。
+ *
+ * 0.1.7 两种 id 形态都接受：`entry.id` 是绝对 id（`<owner entry id>:<rowId>`），
+ * 而 `compositionInventory()` / 面板 / state.json 给的是**相对** id（如
+ * `mcp-filesystem`，见 registry mountedCompositionRows 剥前缀处）。形态变更后
+ * 句柄不再失联，也兼容 state.json 里的历史长 id。
+ */
 export function findStandingEntryById(entryId: string): Entry | undefined {
+  if (entryId.length === 0) return undefined
   for (const mount of presetMounts()) {
     for (const entry of safeEntries(mount.tree)) {
-      if (String(entry.id) === entryId) return entry
+      if (String(entry.id) === entryId || String(entry.options.id) === entryId) return entry
     }
   }
   return undefined

@@ -1,11 +1,12 @@
 /**
- * 模块身份闸门（0.5.7）：证明本插件与宿主组合解析到**同一份** @deepseek-ai/dsh-agent-presets。
+ * 模块身份闸门（0.5.7；0.1.7 换包 2026-09-24）：证明本插件与宿主组合解析到
+ * **同一份** @deepseek-ai/dsh-agent-preset-registry。
  *
- * 为什么必须单独验：dsh-agent-presets 用**模块私有 WeakMap** 记录 standing 挂载
- * （lib/index.js:622 `const mounted = new WeakMap()` / :639 `mounted.set(config, …)`），
- * `livePresetMounts()` / `standingMountFor()` 只能看到**本实例**登记的挂载。若本插件
- * 解析到另一份副本（多版本共存、被 bundle 内联、profile 双层 node_modules 错位），
- * preset 行句柄会静默失联 —— 表现为「可见性又不过滤了」且没有任何报错。
+ * 为什么必须单独验：该包用**模块私有 Set** 记录 standing 挂载
+ * （registry mount.ts `const mounts = new Set()`），`livePresetMounts()` /
+ * `standingMountFor()` 只能看到**本实例**登记的挂载。若本插件解析到另一份副本
+ *（多版本共存、被 bundle 内联、profile 双层 node_modules 错位），preset 行句柄会
+ * 静默失联 —— 表现为「可见性又不过滤了」且没有任何报错。
  *
  * 判据（两条都要过，**双侧都用 createRequire**，与 Node 原生解析同算法）：
  *   A. 被验插件基准 —— `PLUGIN_BASIS` 环境变量优先（默认 = 本包目录）。
@@ -19,10 +20,10 @@
  *
  * 已知环境事实（2026-09-13 实测，2026-09-15 修订）：
  *   装机 panel（`…\profiles\web\node_modules\dsh-mcp-skill-panel`）**无自带 node_modules**
- *   （纯 tarball 安装）→ 向上回退命中 `…\profiles\web\node_modules\@deepseek-ai\dsh-agent-presets`
+ *   （纯 tarball 安装）→ 向上回退命中 `…\profiles\web\node_modules\@deepseek-ai\<包名>`
  *   （web 侧真实目录，241 项全通）。
  *   ⚠️ 旧口径 `…\profiles\node_modules\@deepseek-ai`（pnpm 扁平层）在 junction 事故后**已断链**
- *   （240 项里 170 项 package.json 不可达，含 dsh-agent-presets/dsh-tools/dsh-scope），
+ *   （240 项里 170 项 package.json 不可达，含 dsh-scope 等），
  *   指向它的基准会得出与运行时无关的结论 —— 已废弃，勿再使用。
  *
  * 用法：
@@ -38,7 +39,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const SPEC = '@deepseek-ai/dsh-agent-presets'
+const SPEC = '@deepseek-ai/dsh-agent-preset-registry'
 /**
  * 缺省宿主基准（旧的 `…\profiles\node_modules\@deepseek-ai` 扁平层已断链，见文件头）。
  * 与 scripts/deploy-link.mjs 的 `DSH_HOST_SCOPE` 同口径，可用 DSH_MODULE_BASIS 覆盖。
@@ -127,7 +128,7 @@ try {
 }
 check(
   selfPath !== null,
-  'plugin basis resolves @deepseek-ai/dsh-agent-presets',
+  'plugin basis resolves @deepseek-ai/dsh-agent-preset-registry',
   selfPath ? `basis: ${pluginBasis}\n       v${versionAt(selfPath)}  ${selfPath}` : '',
 )
 
@@ -146,7 +147,7 @@ for (const basis of hostBases(pluginBasis)) {
 }
 check(
   hostPath !== null,
-  'host basis resolves @deepseek-ai/dsh-agent-presets',
+  'host basis resolves @deepseek-ai/dsh-agent-preset-registry',
   hostPath ? `basis: ${hostBasis}\n       v${versionAt(hostPath)}  ${hostPath}` : `tried: ${tried.join(' | ') || '(no candidate)'}`,
 )
 
@@ -167,7 +168,7 @@ if (selfPath) {
     const hasStanding = typeof mod.standingMountFor === 'function'
     check(hasLive && hasStanding, 'exports livePresetMounts + standingMountFor', `livePresetMounts=${hasLive} standingMountFor=${hasStanding}`)
   } catch (error) {
-    check(false, 'dynamic import of agent-presets failed', String(error?.message ?? error))
+    check(false, 'dynamic import of agent-preset-registry failed', String(error?.message ?? error))
   }
 }
 
