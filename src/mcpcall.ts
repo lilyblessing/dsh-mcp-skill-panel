@@ -244,11 +244,14 @@ export interface McpCallController {
     agent: Agent | undefined,
     signal: AbortSignal,
     explicitTimeoutMs?: number,
+    origin?: GatewayCallOpts['origin'],
   ): Promise<string>
   /**
    * 网关透传流程（P2，与 call() 同态共享引用计数）：成功返文本，失败 throw
    *（isError→Error cause 保原始 result；超时/abort 原样；禁用/停用/miss 均
    * throw）。供网关 own 层双工具复用；call() 原行为不动。
+   * `origin`（方案 A）：dsh_mcp_call 自身 exec 的 PTC 折叠豁免凭据，透传到
+   * 内层派发；不传 = 面板 UI 路径，行为与现状一致。
    */
   gateway(
     serverName: string,
@@ -257,6 +260,7 @@ export interface McpCallController {
     agent: Agent | undefined,
     signal: AbortSignal,
     explicitTimeoutMs?: number,
+    origin?: GatewayCallOpts['origin'],
   ): Promise<string>
   /** 启动空闲回收器；返回 disposer。 */
   startIdleReaper(): () => void
@@ -591,6 +595,7 @@ async function callViaPresetViews(
   agent: Agent | undefined,
   signal: AbortSignal,
   explicitTimeoutMs: number | undefined,
+  origin?: GatewayCallOpts['origin'],
 ): Promise<string> {
   const timeoutMs = explicitTimeoutMs ?? control.serverTimeoutMs(serverName)
   state.refCounts.set(serverName, (state.refCounts.get(serverName) ?? 0) + 1)
@@ -605,6 +610,15 @@ async function callViaPresetViews(
       arguments: args,
       agent,
       signal,
+      // PTC 折叠豁免（方案 A）：origin 存在时把本次派发标记为 nested 子派发
+      // （registry 折叠谓词 nested = parent !== void 0）。UI 路径无 origin →
+      // 不加任何字段。ToolView.execute 输入类型为 unknown，无需类型断言。
+      ...(origin
+        ? {
+            parent: origin.token,
+            ...(origin.rootCallId !== undefined ? { rootCallId: origin.rootCallId } : {}),
+          }
+        : {}),
     })) as { isError?: boolean; error?: unknown; content?: unknown } | undefined
     state.lastUsed.set(serverName, Date.now())
     if (result && result.isError) {
@@ -644,6 +658,13 @@ export interface GatewayCallOpts {
   signal: AbortSignal
   agent: Agent | undefined
   explicitTimeoutMs?: number
+  /**
+   * PTC 折叠豁免凭据（方案 A）：来自 dsh_mcp_call 自身执行的 exec
+   * （dsh-tools defineTool 把 registry 铸造的 exec 两参透传给工具 body，
+   * token/rootCallId 必在）。面板 UI 直调不传 → 派发点不加 parent/rootCallId，
+   * 执行输入与现状逐字节一致。registry 对 parent 只做 `!== void 0` 存在性检查。
+   */
+  origin?: { token: unknown; rootCallId?: unknown }
 }
 
 export async function gatewayCall(
@@ -694,6 +715,13 @@ export async function gatewayCall(
       arguments: normArgs,
       agent: opts.agent,
       signal: opts.signal,
+      // PTC 折叠豁免（方案 A）：随 opts.origin 透传；无 origin 不加字段。
+      ...(opts.origin
+        ? {
+            parent: opts.origin.token,
+            ...(opts.origin.rootCallId !== undefined ? { rootCallId: opts.origin.rootCallId } : {}),
+          }
+        : {}),
     })) as { isError?: boolean; error?: unknown; content?: unknown; structuredContent?: unknown } | undefined
     state.lastUsed.set(serverName, Date.now())
     if (result && result.isError) {
@@ -760,6 +788,13 @@ async function callViaLoaderEntry(
       arguments: normArgs,
       agent: opts.agent,
       signal: opts.signal,
+      // PTC 折叠豁免（方案 A）：随 opts.origin 透传；无 origin 不加字段。
+      ...(opts.origin
+        ? {
+            parent: opts.origin.token,
+            ...(opts.origin.rootCallId !== undefined ? { rootCallId: opts.origin.rootCallId } : {}),
+          }
+        : {}),
     })) as { isError?: boolean; error?: unknown; content?: unknown; structuredContent?: unknown } | undefined
     state.lastUsed.set(serverName, Date.now())
     if (result && result.isError) {
@@ -1044,8 +1079,9 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
       agent: Agent | undefined,
       signal: AbortSignal,
       explicitTimeoutMs?: number,
+      origin?: GatewayCallOpts['origin'],
     ): Promise<string> {
-      return gatewayCall(ctx, caches, state, serverName, toolName, args, { signal, agent, explicitTimeoutMs })
+      return gatewayCall(ctx, caches, state, serverName, toolName, args, { signal, agent, explicitTimeoutMs, origin })
     },
 
     async ensureEnabled(serverName): Promise<boolean> {
@@ -1070,7 +1106,7 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
       return collectInventory(ctx, caches, state, serverName, MCP_SEARCH_TOOL, waitMs)
     },
 
-    async call(serverName, toolName, args, agent, signal, explicitTimeoutMs) {
+    async call(serverName, toolName, args, agent, signal, explicitTimeoutMs, origin?: GatewayCallOpts['origin']) {
       const bareTool = normalizeToolName(serverName, toolName)
       const name = `mcp__${serverName}__${bareTool}`
       // 工具级禁用（面板指定关闭）：拒绝调用并给出明确提示（可经面板重新开启）。
@@ -1102,7 +1138,7 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
           }
           const presetTimeout = presetRow.toolCallTimeoutMs
           const hint = presetRow.running ? '' : '（提示：该行已启用但实例暂未运行，若持续超时请在面板确认后重试）'
-          const out = await callViaPresetViews(ctx, caches, state, serverName, bareTool, name, args, agent, signal, explicitTimeoutMs ?? presetTimeout)
+          const out = await callViaPresetViews(ctx, caches, state, serverName, bareTool, name, args, agent, signal, explicitTimeoutMs ?? presetTimeout, origin)
           return out.startsWith(`MCP ${serverName}.${bareTool} 调用异常`) && hint ? `${out}${hint}` : out
         }
         return `未知 MCP server：${serverName}（不在 loader 中）`
@@ -1135,6 +1171,13 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
           arguments: args,
           agent,
           signal,
+          // PTC 折叠豁免（方案 A）：随 origin 透传；无 origin 不加字段。
+          ...(origin
+            ? {
+                parent: origin.token,
+                ...(origin.rootCallId !== undefined ? { rootCallId: origin.rootCallId } : {}),
+              }
+            : {}),
         })) as { isError?: boolean; error?: unknown; content?: unknown } | undefined
         state.lastUsed.set(serverName, Date.now())
         if (result && result.isError) {
@@ -1295,7 +1338,7 @@ function registerMcpSearchTool(ctx: Context, control: McpControlCtx, controller:
           count: hits.length,
           limit: topK,
           hits,
-          hint: `命中即用 ${MCP_CALL_TOOL}（server + 裸工具名）调用；不够准就换关键词再搜，中文连写请用空格分词。`,
+          hint: `命中后在 run_code 程序内直调：await tools["mcp__${server}__<命中裸名>"]({...})；不确定名字就换关键词再搜（中文连写请用空格分词）。若该 server 尚未启用，请用户在面板打开，或经 ${MCP_CALL_TOOL} 临时拉起。`,
         })
       }
 
@@ -1420,9 +1463,39 @@ function registerMcpCallTool(ctx: Context, controller: McpCallController): () =>
       // 字符串形态**在进 execute 之前**就被参数校验拒绝（见上方 parameters 定义与 defineTool
       // 的 validate），所以「模型把 arguments 填成 JSON 字符串」这条路径已不可达。此处保留
       // normalizeArguments 只为**直调/内部路径**兜底（gatewayCall 等，历史调用方可能传串）。
+      // 方案 A（P5）：把 dsh_mcp_call 自身执行的 exec 凭据作为 origin 传下去 ——
+      // 内层派发带 parent=exec.token 后，registry 折叠谓词把本次调用判为 nested
+      // 子派发，PTC 模式下不再二次折叠。exec.token/rootCallId 由 dsh-tools 的
+      // ToolRunContext 类型保证存在（defineTool 两参透传）。
       return controller
-        .gateway(args.server, args.tool, normalizeArguments(args.arguments), exec.agent, exec.signal)
-        .catch((error: unknown) => `MCP 调用异常：${msgOf(error)}`)
+        .gateway(args.server, args.tool, normalizeArguments(args.arguments), exec.agent, exec.signal, undefined, {
+          token: exec.token,
+          rootCallId: exec.rootCallId ?? exec.callId,
+        })
+        .catch((error: unknown) => {
+          const text = msgOf(error)
+          // G2：PTC 折叠错误对 dsh_mcp_call 是反向引导（照做进 run_code 直调本工具
+          // 仍会二次折叠），改写为可执行指引。
+          //
+          // 判定收紧（2026-10-18 审查修正）：dsh-tools 抛折叠错误前会先过一遍
+          // `visible !== void 0`，故原始 message 恒以 `unknown tool "<name>":` 开头
+          // 且工具名恰为 dsh_mcp_call 自己。只认这个精确前缀，避免 MCP server 自带
+          // 报错文本里出现同样的英文短语时在 native 下被误改写。
+          const foldedSelf =
+            text.startsWith('unknown tool "') && text.includes(MCP_CALL_TOOL) && text.includes('is callable directly')
+          if (foldedSelf) {
+            // 裸名归一化后再拼 binding：模型可能误传注册全名，直接插值会拼出
+            // `mcp__<server>__mcp__<server>__<tool>` 双重前缀（2026-10-18 审查修正）。
+            let bare = args.tool
+            try {
+              bare = normalizeToolName(args.server, args.tool)
+            } catch {
+              // 跨 server 全名等 normalize 会 throw 的情形：保留原值，提示文案不因此中断。
+            }
+            return `MCP 调用异常：中间层包装 dsh_mcp_call 在 PTC 模式下不可直调。请在 run_code 程序内直调 binding：await tools["mcp__${args.server}__${bare}"]({...})；工具发现用 await tools.dsh_mcp_search({...})`
+          }
+          return `MCP 调用异常：${text}`
+        })
     },
   })
   return ctx.tools.register(definition)
