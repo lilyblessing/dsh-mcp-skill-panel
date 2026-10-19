@@ -30,10 +30,14 @@
  * **相对** id（registry 的 mountedCompositionRows 会剥掉 owner 前缀）。
  * 两者不再相等，故本模块的按 id 查找**两种形态都接受**（见 findStandingEntryById）。
  *
- * ⚠️ 模块身份（本文件成立的前提）：`mounts` 是 registry 包的**模块私有** Set，
+ * ⚠️ 模块身份（挂载来源，0.2.1-rc.2 起**改为实例级**）：
+ * 0.2.0-rc.2 及更早：`mounts` 是 registry 包的**模块私有** Set，
  * `livePresetMounts()` 只有当本插件的该包与宿主组合解析到**同一份实例**时才看得到挂载。
- * **若升级 DSH 后 `presetMounts()` 恒返回 []，第一嫌疑就是这份实例错位**——
- * 由 `/debug` 的 `standingDiag` 直接可见，不要靠猜。
+ * 0.2.1-rc.2 起：模块级导出 livePresetMounts/standingMountFor 被移除，挂载改挂在
+ * registry **实例**的 `generations` Map 上；插件入口经 `bindAgentPresetRegistry`
+ * 注入 `ctx.get('agentPresets')` 实例，本模块从 `generations` 读取（见 presetMounts）。
+ * **若升级 DSH 后 `presetMounts()` 恒返回 []，第一嫌疑就是实例未注入或错位**——
+ * 由 `/debug` 的 `standingDiag`（apiVia / apiError 字段）直接可见，不要靠猜。
  *
  * 边界：本模块只做「定位 + 句柄交付」，不改任何状态；写操作只发生在调用方
  * （routes 的 entry.update / mcpcall 的 ensureEnabled）。
@@ -56,47 +60,86 @@ export interface StandingTree {
 }
 
 /**
- * `@deepseek-ai/dsh-agent-preset-registry` 的读取面。全部可选：宿主版本落后
- * （不含这两个模块级导出）时它们不存在，面板整体降级为 0.5.6 行为
- * （可见性不过滤、开关只记意图），不崩。
+ * `@deepseek-ai/dsh-agent-preset-registry` 的读取面。全部可选：
+ * - 0.2.0-rc.2 及更早宿主：模块级导出 livePresetMounts/standingMountFor；
+ * - 0.2.1-rc.2 起：模块级导出被移除，走下方 registryInstance（实例级）。
+ * 两条路都不可用时面板降级为 0.5.6 行为（可见性不过滤、开关只记意图），不崩。
  */
 const api = agentPresets as unknown as {
   livePresetMounts?: (within?: unknown) => StandingMount[]
   standingMountFor?: (agentCtx: Context) => StandingMount | undefined
 }
 
+/** 0.2.1-rc.2 registry 实例读取面（TS private 字段按运行时实态 cast）。 */
+interface RegistryGeneration {
+  mount?: { presetId?: string; tree?: StandingTree; fiber?: unknown }
+  retired?: boolean
+}
+interface RegistryInstance {
+  generations?: Map<unknown, RegistryGeneration>
+  generationFor?: (ctx: unknown) => RegistryGeneration | undefined
+}
+let registryInstance: RegistryInstance | undefined
+/** 由插件入口（index.ts apply）注入宿主 registry 实例；0.2.0- 老宿主可不调。 */
+export function bindAgentPresetRegistry(instance: unknown): void {
+  registryInstance = instance !== null && typeof instance === 'object' ? (instance as RegistryInstance) : undefined
+}
+
 /** 诊断快照（/debug standingDiag 用；不参与任何逻辑判断）。 */
 let diag: {
   apiAvailable: boolean
   apiError: string | null
+  /** 本次 presetMounts 实际走通的读取路径。 */
+  apiVia: 'registryGenerations' | 'livePresetMounts' | 'none'
   mountsSeen: number
   lastPresetIds: string[]
   lastRowCount: number
-} = { apiAvailable: false, apiError: null, mountsSeen: 0, lastPresetIds: [], lastRowCount: 0 }
+} = { apiAvailable: false, apiError: null, apiVia: 'none', mountsSeen: 0, lastPresetIds: [], lastRowCount: 0 }
 
 /**
  * 全进程所有 preset 的 standing 挂载（**无 agent 参数**，装配同步路径也可用）。
+ * 三段式：0.2.1-rc.2 实例级 generations → 0.2.0- 模块级 livePresetMounts → 降级 []。
  * 过滤掉没有 tree / tree 无 entries() 的项（防御畸形挂载）。
  */
 export function presetMounts(): StandingMount[] {
-  if (typeof api.livePresetMounts !== 'function') {
-    diag = { ...diag, apiAvailable: false, apiError: 'livePresetMounts not exported by host dsh-agent-preset-registry' }
-    return []
-  }
-  try {
-    const raw = api.livePresetMounts()
-    const out: StandingMount[] = []
-    for (const m of Array.isArray(raw) ? raw : []) {
-      const tree = m?.tree
-      if (!tree || typeof tree.entries !== 'function') continue
-      out.push(m)
+  // 路径 1（0.2.1-rc.2）：实例级 registry.generations（运行时普通 Map）。
+  if (registryInstance?.generations instanceof Map) {
+    try {
+      const out: StandingMount[] = []
+      for (const gen of registryInstance.generations.values()) {
+        const tree = gen?.mount?.tree
+        if (!tree || typeof tree.entries !== 'function') continue
+        out.push({ presetId: gen?.mount?.presetId, tree })
+      }
+      // 空 = 宿主确实无挂载：直接返回，不要落到路径 2 混淆 apiVia 判定
+      //（livePresetMounts 在 0.2.1 宿主本就不存在，空回退只会拖慢）。
+      diag = { ...diag, apiAvailable: true, apiError: null, apiVia: 'registryGenerations', mountsSeen: out.length, lastPresetIds: out.map((m) => String(m.presetId ?? '')) }
+      return out
+    } catch (error) {
+      diag = { ...diag, apiAvailable: true, apiError: error instanceof Error ? error.message : String(error) }
+      // 枚举失败落回路径 2 再试一次（旧导出若在仍是可用来源）。
     }
-    diag = { ...diag, apiAvailable: true, apiError: null, mountsSeen: out.length, lastPresetIds: out.map((m) => String(m.presetId ?? '')) }
-    return out
-  } catch (error) {
-    diag = { ...diag, apiAvailable: true, apiError: error instanceof Error ? error.message : String(error) }
-    return []
   }
+  // 路径 2（0.2.0-rc.2 及更早）：模块级 livePresetMounts。
+  if (typeof api.livePresetMounts === 'function') {
+    try {
+      const raw = api.livePresetMounts()
+      const out: StandingMount[] = []
+      for (const m of Array.isArray(raw) ? raw : []) {
+        const tree = m?.tree
+        if (!tree || typeof tree.entries !== 'function') continue
+        out.push(m)
+      }
+      diag = { ...diag, apiAvailable: true, apiError: null, apiVia: 'livePresetMounts', mountsSeen: out.length, lastPresetIds: out.map((m) => String(m.presetId ?? '')) }
+      return out
+    } catch (error) {
+      diag = { ...diag, apiAvailable: true, apiError: error instanceof Error ? error.message : String(error) }
+      return []
+    }
+  }
+  // 路径 3：两条路都不可用 → 降级（可见性不过滤、开关只记意图），绝不 throw。
+  diag = { ...diag, apiAvailable: false, apiVia: 'none', apiError: 'no registry access: agentPresets service not bound and livePresetMounts not exported', mountsSeen: 0, lastPresetIds: [] }
+  return []
 }
 
 /**
@@ -114,6 +157,13 @@ export function findStandingEntryByServer(serverName: string, agentCtx?: Context
     } catch {
       /* agentCtx 未挂 preset（如子代理会话）→ 忽略 */
     }
+  }
+  if (mounts.length === 0 && agentCtx !== undefined && registryInstance && typeof registryInstance.generationFor === 'function') {
+    try {
+      const gen = registryInstance.generationFor(agentCtx)
+      const tree = gen?.mount?.tree
+      if (tree && typeof tree.entries === 'function') mounts.push({ presetId: gen?.mount?.presetId, tree })
+    } catch { /* 未 join preset 的 agentCtx → 忽略 */ }
   }
   for (const mount of mounts) {
     for (const entry of safeEntries(mount.tree)) {

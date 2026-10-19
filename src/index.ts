@@ -11,7 +11,7 @@
  * collect.ts / routes.ts，状态持久化见 state.ts / preset.ts，控制层见 mcpcall.ts。
  *
  * Phase A 实测结论（2026-08-15，动态探针验证）：
- * - ctx.loader.entries() 枚举全部行（含嵌套预设行，id 如 include:agent-presets:mcp-cheatengine）
+ * - ctx.loader.entries() 枚举全部行（含嵌套预设行，id 如 agent-preset-registry:mcp-cheatengine）
  * - loader.resolve() 需要完整嵌套 id；entry.update({disabled}) 实时 dispose/restart
  * - 预设树（PresetTree）write() 是 no-op → loader.update 不写盘
  * - tools.schemas(scope) 必须传 scopeOf(agent.ctx)（agent 对象/standingKey 会落回全局视图）
@@ -46,7 +46,7 @@ import { installMcpVisibilityFilter, type AssemblyGate } from './filter'
 import type { McpControlCtx, McpCallController } from './mcpcall'
 import { createMcpCallController, installMcpControlTools, inventoryTraceDiag } from './mcpcall'
 import { isMcpEntry, serverNameOf, mcpEntryConfig } from './mcp-entry'
-import { standingMcpEntries, findStandingEntryByServer, installedMcpRows } from './standing-rows'
+import { standingMcpEntries, findStandingEntryByServer, installedMcpRows, bindAgentPresetRegistry } from './standing-rows'
 import { createGatewayState, disposeGatewayState, disposeGatewayStateSync, ensureOpenMounts } from './gateway'
 
 export { normalizeToolName, normalizeArguments, msgOf, gatewayCall } from './mcpcall'
@@ -574,6 +574,20 @@ export function autoManageNeeded(master: boolean, byRoute: Readonly<Record<strin
 }
 
 export function apply(ctx: Context, config: Config = {}): void {
+  // 0.2.1-rc.2：把宿主 registry 实例交给 standing-rows（实例级 generations 读取）。
+  // 双保险——① apply 时立即注入（registry 已激活则当场拿到）：
+  try {
+    const reg = typeof ctx.get === 'function' ? ctx.get('agentPresets' as never) : undefined
+    bindAgentPresetRegistry(reg ?? (ctx as { agentPresets?: unknown }).agentPresets)
+  } catch { /* 老宿主无此服务 → standing-rows 自动走 livePresetMounts/降级 */ }
+  // ② 就绪回调兜底（registry 晚于面板激活、state!=2 时 ctx.get 可能拿不到；
+  // 仿宿主 ctx.inject(["settings"], child => ...) 模式，服务注册时自动补注入）：
+  try {
+    ctx.inject(['agentPresets'] as never, (child: Context) => {
+      try { bindAgentPresetRegistry(child.get('agentPresets' as never) ?? (child as { agentPresets?: unknown }).agentPresets) } catch { /* 忽略 */ }
+    })
+  } catch { /* 服务不存在 → 降级 */ }
+
   // 启动早期加载 MCP 工具级禁用集合（memory Map，装配过滤同步读）。
   // 注意：加载是异步的，首个装配回合前禁用表可能未就绪（毫秒级窗口）；
   // 失败必须留日志（否则用户以为已禁用、实际全放行）。
