@@ -12,7 +12,8 @@
  *
  * 红线：
  * - 绝不手动 dispose standing/own（靠 fiber unwind；#1079 旧代指针教训）；
- * - 绝不在运行时写预设文件（事故 5.1 铁律；意图链 routes/pending/preset 不动）；
+ * - 绝不在运行时直接写 profile patch（0.1.7：预设无独立文件；意图链
+ *   routes/pending/preset 不动，物化一律走 configEditor）；
  * - secrets 不回面板（BLOCK-2；config 只在 host 侧流转）。
  */
 import type { Context } from '@deepseek-ai/cordis';
@@ -89,7 +90,7 @@ export interface GatewayDeps {
      */
     listRows?: (ctx: Context, presetId: string) => Promise<{
         rows: GatewayPresetRow[];
-        presetPath: string;
+        presetRowId: string;
     }>;
     readIntents?: () => Promise<Record<string, {
         desired?: boolean;
@@ -100,7 +101,8 @@ export interface GatewayDeps {
 export interface GatewayPresetRow {
     serverName: string;
     rowId: string;
-    file: string;
+    /** 0.1.7：所属预设声明行的 Loader 行 id（= state.mcp 第一级键；'' = 反查不到）。 */
+    presetRowId: string;
     disabled: boolean;
     config?: import('./preset-mcp').PresetMcpClientConfig;
 }

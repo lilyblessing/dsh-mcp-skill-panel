@@ -11,20 +11,27 @@
  * collect.ts / routes.ts，状态持久化见 state.ts / preset.ts，控制层见 mcpcall.ts。
  *
  * Phase A 实测结论（2026-08-15，动态探针验证）：
- * - ctx.loader.entries() 枚举全部行（含嵌套预设行，id 如 include:agent-presets:mcp-cheatengine）
+ * - ctx.loader.entries() 枚举全部行（含嵌套预设行，id 如 agent-preset-registry:mcp-cheatengine）
  * - loader.resolve() 需要完整嵌套 id；entry.update({disabled}) 实时 dispose/restart
  * - 预设树（PresetTree）write() 是 no-op → loader.update 不写盘
  * - tools.schemas(scope) 必须传 scopeOf(agent.ctx)（agent 对象/standingKey 会落回全局视图）
  * - skill 文件经 skills.get(name, {scope, cwd}).path 定位；改 frontmatter 由
  *   dsh-skill-filesystem 的 chokidar watcher 实时失效
  *
- * MCP 持久化（v0.1.1 修复，2026-08-15）：
- * 运行期禁止写 agent.cordis.yml —— dsh-agent-presets 的 ensureStanding 用
- * {mtimeMs, size} stamp 检测预设文件变化，变化时删除 standing 记录并重挂，
- * 但旧 standing 的 fiber/scope 不 dispose → 旧 mcp-client 实例的 serverName
- * 仍占用 → 新挂载全部 "already in use" → 会话创建/resume 失败（实测事故）。
- * 持久化改为：toggle 只写插件自己的状态文件（~/.dsh/dsh-mcp-skill-panel/state.json），
- * 插件 apply 时（启动早期、standing 未挂载）再物化到预设文件 —— 此时写文件安全。
+ * 0.1.7 修正（2026-09-24）：**preset 行不再出现在 `ctx.loader.entries()`**——
+ * 声明式预设的行挂在注册表私有的内存 Loader 树（PresetTree）上，只能经
+ * `livePresetMounts()` / `standingMountFor()` 拿句柄（见 standing-rows.ts），
+ * 且 `entry.id` 是绝对 id、组合清单给的是相对 id（两形态都按 id 匹配）。
+ *
+ * MCP 持久化（0.1.7 起，2026-09-24）：
+ * 运行期**不直接写 profile patch**（也不再有预设组合文件可写）—— 声明式预设的
+ * 启停/配置意图一律经官方写入面 `ctx.configEditor.edit` 物化（config-editor 自带
+ * 文件锁 + 原子写 + reconcileProfilePatches 热重载，官方 settings 即此法）。
+ * 历史理由（已失效，仅存档）：旧包用 `{mtimeMs,size}` stamp 检测预设文件变化，变化时
+ * 删除 standing 记录并重挂，但旧 standing 的 fiber/scope 不 dispose → 旧 mcp-client
+ * 实例的 serverName 仍占用 → 新挂载全部 "already in use" → 会话创建/resume 失败。
+ * 持久化链路：toggle 只写插件状态文件（~/.dsh/dsh-mcp-skill-panel/state.json），
+ * 下次启动 apply 早期由 syncPresetFiles() 经 configEditor 物化到 profile patch。
  */
 import Schema from '@deepseek-ai/schemastery';
 import type { Context } from '@deepseek-ai/cordis';

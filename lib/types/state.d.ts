@@ -1,12 +1,22 @@
-/** 每个预设文件（key=文件绝对路径）→ 每个 mcp 行 → 意图与上次物化状态。 */
+/**
+ * 0.1.7：key = **预设声明行的 Loader 行 id**（如 `preset-standard-mcp`）→ 每行 → 意图与
+ * 上次物化状态。不再是预设组合文件路径 —— 声明式预设没有独立文件（registry
+ * README.zh.md:46-48）；旧文件的键（路径形态）找不到对应声明行，由
+ * preset.syncPresetFiles / pending.applyStateResidue 自然跳过（死键，不需手工清理）。
+ */
 export interface McpRowState {
     /** toggle 时用户意图：是否停用 */
     desired: boolean;
-    /** toggle 时该行在文件中的实际状态（true/false/null=无 disabled 键） */
+    /**
+     * 上次物化后的启停值（0.1.7 语义）。旧版是「该行在预设文件中的实际状态
+     * （true/false/null=无 disabled 键）」；预设没有文件后不再有外部修改比对，
+     * 本字段退化为物化账（供残留判定与回显）。
+     */
     lastApplied: boolean | null;
     /**
      * 0.6.0：面板"更多配置"改过的挂载配置意图（键值形态，见 preset.EDITABLE_CONFIG_KEYS）。
-     * 运行期只写这里（安全）；由 syncPresetFiles 在启动早期物化进预设行的 `config:` 块。
+     * 运行期只写这里（安全）；由 syncPresetFiles 在启动早期经 configEditor 物化进
+     * 预设声明行的 `config`。
      * `appliedYaml` 记录**上次已物化**的值（YAML 文本形态），相等即无需重写 ——
      * 既幂等又能在配置变更后自动重写。
      */
@@ -69,9 +79,10 @@ export declare function stateToolBudget(state: StateFile): number | undefined;
  */
 export declare function stateAutoManageByRoute(state: StateFile): Record<string, boolean>;
 /**
- * 中间层隐藏范围（缺省 'disabled' = 旧行为）。
- * 只有显式 'all' 才切换：非法值不得变成 all —— 那会让所有命中中间层的模型
- * 突然失去全部 MCP 直连工具（静默的大范围行为变化）。
+ * 中间层隐藏范围（缺省 'all' = 新默认，0.6.x 起翻转）。
+ * 未设置 → 'all'；显式 'all' → 'all'；显式 'disabled' 与非法值 → 'disabled'
+ * （保守回退）：非法值不得静默变 all —— 那会让所有命中中间层的模型突然失去
+ * 全部 MCP 直连工具（静默的大范围行为变化），宁可退回较窄的 disabled 档。
  */
 export declare function stateMiddleLayerHides(state: StateFile): 'disabled' | 'all';
 export declare function readState(): Promise<StateFile>;

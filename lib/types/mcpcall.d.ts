@@ -163,13 +163,15 @@ export interface McpCallController {
      */
     markUserEnabled(serverName: string): void;
     /** 完整调用流程，返回给模型的文本结果（不会 throw，错误也转文本）。 */
-    call(serverName: string, toolName: string, args: unknown, agent: Agent | undefined, signal: AbortSignal, explicitTimeoutMs?: number): Promise<string>;
+    call(serverName: string, toolName: string, args: unknown, agent: Agent | undefined, signal: AbortSignal, explicitTimeoutMs?: number, origin?: GatewayCallOpts['origin']): Promise<string>;
     /**
      * 网关透传流程（P2，与 call() 同态共享引用计数）：成功返文本，失败 throw
      *（isError→Error cause 保原始 result；超时/abort 原样；禁用/停用/miss 均
      * throw）。供网关 own 层双工具复用；call() 原行为不动。
+     * `origin`（方案 A）：dsh_mcp_call 自身 exec 的 PTC 折叠豁免凭据，透传到
+     * 内层派发；不传 = 面板 UI 路径，行为与现状一致。
      */
-    gateway(serverName: string, toolName: string, args: unknown, agent: Agent | undefined, signal: AbortSignal, explicitTimeoutMs?: number): Promise<string>;
+    gateway(serverName: string, toolName: string, args: unknown, agent: Agent | undefined, signal: AbortSignal, explicitTimeoutMs?: number, origin?: GatewayCallOpts['origin']): Promise<string>;
     /** 启动空闲回收器；返回 disposer。 */
     startIdleReaper(): () => void;
     /** 诊断视图：AI 启用的 server 及其引用计数。 */
@@ -228,6 +230,16 @@ export interface GatewayCallOpts {
     signal: AbortSignal;
     agent: Agent | undefined;
     explicitTimeoutMs?: number;
+    /**
+     * PTC 折叠豁免凭据（方案 A）：来自 dsh_mcp_call 自身执行的 exec
+     * （dsh-tools defineTool 把 registry 铸造的 exec 两参透传给工具 body，
+     * token/rootCallId 必在）。面板 UI 直调不传 → 派发点不加 parent/rootCallId，
+     * 执行输入与现状逐字节一致。registry 对 parent 只做 `!== void 0` 存在性检查。
+     */
+    origin?: {
+        token: unknown;
+        rootCallId?: unknown;
+    };
 }
 export declare function gatewayCall(ctx: Context, control: McpControlCtx, state: GatewayCallState, serverName: string, bareIn: string, args: unknown, opts: GatewayCallOpts): Promise<string>;
 /**

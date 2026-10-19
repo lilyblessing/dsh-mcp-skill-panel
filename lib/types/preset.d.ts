@@ -1,10 +1,15 @@
 /**
- * 预设组合文件的文本操作与启停意图物化。
+ * 预设组合的文本操作与启停意图物化。
  *
- * 运行期禁止写 agent.cordis.yml（dsh-agent-presets 的 {mtimeMs,size} stamp 检测会
- * 触发 standing 重挂事故），因此 toggle 只写 state.json，由 syncPresetFiles 在
- * 插件 apply（启动早期、standing 未挂载）时物化到预设文件 —— 此时写文件安全。
- * 本模块为纯文本操作，可被 selftest 覆盖。
+ * 0.1.7（2026-09-24）：预设改为**声明式**（一条 preset = 一条 declaration 行），
+ * 没有独立的 agent.cordis.yml 可写 —— 因此物化目标从「预设组合文件」改为
+ * **profile patch 的声明行 config**，且一律走官方写入面 `ctx.configEditor.edit`
+ *（自带文件锁 + 原子写 + reconcileProfilePatches 热重载，官方 settings 即此法）。
+ * 历史理由（已失效）：旧包用 `{mtimeMs,size}` stamp 检测预设文件变化，运行期写该
+ * 文件会触发 standing 重挂而旧实例不清理 → 当时的对策是「只在启动早期、无会话时写文件」。
+ * 现对策：**不直接写盘**，交给 configEditor（写盘 + 重挂由它按代际语义处理）。
+ * 本模块的其余部分仍是纯文本操作，可被 selftest 覆盖（setRowFlag / setRowConfigKeys /
+ * rowDisabledState 保留为纯函数与自测目标，0.1.7 起不再被 syncPresetFiles 调用）。
  */
 import type { Context } from '@deepseek-ai/cordis';
 /**
@@ -62,8 +67,15 @@ export declare function buildSkillMd(name: string, description: string, body: st
 /** 读取某行当前是否带 disabled: true（true/false/null=无标记）。 */
 export declare function rowDisabledState(text: string, rowId: string): boolean | null;
 /**
- * 启动早期物化：把状态文件里的 MCP 启停意图写入预设组合文件。
- * 只在「没有任何 agent 在跑」时执行 —— 有会话时写文件会触发
- * dsh-agent-presets 的 stamp 重挂（旧实例不 dispose → serverName 冲突事故）。
+ * 0.1.7 启动早期物化：把 state.json 的 MCP 启停/配置意图写进 **profile patch 的预设声明行**。
+ *
+ * 走官方写入面 `ctx.configEditor.edit`（config-editor：文件锁 + 原子写 +
+ * reconcileProfilePatches 热重载；官方 settings 即此法）。声明式预设没有独立文件，
+ * 故 state.mcp 的第一级键 = **预设声明行的 Loader 行 id**；找不到该声明行（含 0.1.5
+ * 遗留的「预设文件路径」键）→ 跳过该键（死键不迁移、不猜）。
+ *
+ * 幂等（0.1.7 新增）：目标 `disabled` 与目标 config 键都已一致时**不调用 edit** ——
+ * 每次 edit 都会触发该声明行的 reconcile/重挂，无谓的重挂正是要避免的事故形态
+ *（W0 报告 §5-2 P10 护栏）。非 profile 场合（无 configEditor 服务）不写盘，返回 0。
  */
 export declare function syncPresetFiles(ctx: Context): Promise<number>;
