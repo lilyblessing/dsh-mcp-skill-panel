@@ -58,6 +58,9 @@ function resolvePendingEntry(ctx: Context, entryId: string): Entry | undefined {
 export async function applyPendingMcp(deps: PendingDeps): Promise<number> {
   const { ctx } = deps
   let applied = 0
+  // 本次边界开始时的队列键快照：① 段应用成功后即从 pendingMcp 删除，
+  // 故 ② 段不能再拿「当前队列」判重（会恒为 false → 残留分支把同一行回滚一次）。
+  const queuedIds = new Set(pendingMcp.keys())
   // ① 内存队列（本进程内 next-session 记下的意图）
   for (const [entryId, pending] of [...pendingMcp.entries()]) {
     try {
@@ -85,15 +88,21 @@ export async function applyPendingMcp(deps: PendingDeps): Promise<number> {
   //   0.1.7：不再有「预设文件被外部改过」这一分支 —— 预设没有独立文件，live 行即唯一
   //   事实源（desired === live 即视为无残留）。运行期仍不直接写 profile patch
   //   （持久化一律走 syncPresetFiles → configEditor，带文件锁 + reconcile）。
-  applied += await applyStateResidue(deps, await readState().catch(() => undefined))
+  applied += await applyStateResidue(deps, await readState().catch(() => undefined), queuedIds)
   return applied
 }
 
 /**
  * state.json 残留补齐（见 applyPendingMcp ②）。只改 live（entry.update），
  * 不动 state.json 与 lastApplied（lastApplied 语义 = 上次物化后的启停值，供物化判定）。
+ * `queuedIds` = 本次边界开始时的内存队列键快照（① 段已消费并删除，故不能改用
+ * pendingMcp 现值判重），命中即跳过，避免同一行被「应用 + 回滚」两次。
  */
-async function applyStateResidue(deps: PendingDeps, state: StateFile | undefined): Promise<number> {
+async function applyStateResidue(
+  deps: PendingDeps,
+  state: StateFile | undefined,
+  queuedIds: ReadonlySet<string>,
+): Promise<number> {
   const { ctx } = deps
   const mcp = state?.mcp
   if (!mcp || Object.keys(mcp).length === 0) return 0
@@ -110,9 +119,10 @@ async function applyStateResidue(deps: PendingDeps, state: StateFile | undefined
       const entry = resolveRowEntry(ctx, rowId)
       if (!entry || !isMcpEntry(entry)) continue
       // 内存队列（本进程刚记的意图）优先，避免同一次边界里被残留分支重复处理。
+      // 用边界开始时的快照判定（① 段已把队列项删掉，用现值会漏判 → 先应用后回滚）。
       const liveId = String(entry.id)
       const liveRowId = String(entry.options.id ?? '')
-      if (pendingMcp.has(liveId) || (liveRowId.length > 0 && pendingMcp.has(liveRowId))) continue
+      if (queuedIds.has(liveId) || (liveRowId.length > 0 && queuedIds.has(liveRowId))) continue
       if (rowState.desired === entry.disabled) continue
       try {
         await entry.update({ disabled: rowState.desired })

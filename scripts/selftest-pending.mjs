@@ -94,13 +94,16 @@ mkdirSync(stateDir, { recursive: true })
 /** 预设声明行的 Loader 行 id（0.1.7 的 state.mcp 第一级键）。 */
 const DECL_ROW_ID = 'preset-standard-mcp'
 
-/** configEditor 假件：记录 edit 次数，并按 change 结果更新行 config（供幂等断言）。 */
-const makeEditor = (config) => {
+/** configEditor 假件：记录 edit 次数，并按 change 结果更新行 config（供幂等断言）。
+ *  declare=false 时 entries 为空 —— 0.1.7 的声明行反查面是 configEditor.entries()
+ *  （src/preset.ts 的 syncPresetFiles），假装 loader 没有声明行时必须同时摘掉这一侧，
+ *  否则「找不到声明行」的前提不成立。 */
+const makeEditor = (config, declare = true) => {
   const entry = { options: { id: DECL_ROW_ID, name: '@deepseek-ai/dsh-agent-preset', config } }
   const editor = {
     entry,
     edits: 0,
-    entries: () => [entry],
+    entries: () => (declare ? [entry] : []),
     async edit(target, change) {
       editor.edits += 1
       target.options.config = change(structuredClone(target.options.config ?? {}), {})
@@ -128,7 +131,7 @@ const makeHarness = async ({ rows, declare = true }) => {
     options: { id: DECL_ROW_ID, name: '@deepseek-ai/dsh-agent-preset', config: { id: 'standard-mcp', plugins: rows.map((r) => ({ id: r.id })) } },
   }
   const loaderEntries = declare ? [...entries, declRow] : [...entries]
-  const editor = makeEditor({ id: 'standard-mcp', order: 1, plugins: rows.map((r) => ({ id: r.id, name: '@deepseek-ai/dsh-mcp-client' })) })
+  const editor = makeEditor({ id: 'standard-mcp', order: 1, plugins: rows.map((r) => ({ id: r.id, name: '@deepseek-ai/dsh-mcp-client' })) }, declare)
   const ctx = {
     loader: { entries: () => loaderEntries, resolve: (id) => loaderEntries.find((e) => e.id === id) },
     agents: { list: () => [], roots: () => [] },
@@ -183,11 +186,20 @@ await checkAsync('启用方向的残留应用触发 markUserEnabled', async () =
 
 await checkAsync('内存队列应用与成功后清空；二次调用幂等无动作', async () => {
   const h = await makeHarness({ rows: [{ id: 'sqlite' }] })
+  // 场景隔离（0.1.7）：state.mcp 第一级键是**常量**声明行 id，上一场景的残留会泄漏进来
+  //（旧版键是预设文件路径，每个场景各一份，天然隔离）。这里显式声明本场景前提：
+  // 残留里的 desired 与队列意图**相反**（残留 false / 队列 disabled=true）——
+  // 这正是 FAIL-1 护栏的回归点：队列把 live 应用成 disabled=true 后，残留分支不得在
+  // 同一边界内再拿陈旧的 desired 覆盖同一行（否则 applied1=2 且该行被先应用后回滚）。
+  await writeState({ mcp: { [DECL_ROW_ID]: { sqlite: { desired: false, lastApplied: true } } } })
   pendingMcp.set('sqlite', { entryId: 'sqlite', file: DECL_ROW_ID, rowId: 'sqlite', disabled: true })
   const applied1 = await applyPendingMcp({ ctx: h.ctx, controller: h.controller })
   assert.equal(applied1, 1)
   assert.deepEqual(h.updates, [{ id: 'sqlite', disabled: true }])
   assert.equal(pendingMcp.size, 0, '成功后队列清空')
+  // 真实 toggle 会把 state.desired 同步写成与队列一致（routes.ts:299），上面那份相反值
+  // 只是为了触发护栏而刻意构造的。补上这一步，第二次调用才落在断言原文的前提「状态一致」上。
+  await writeState({ mcp: { [DECL_ROW_ID]: { sqlite: { desired: true, lastApplied: true } } } })
   const applied2 = await applyPendingMcp({ ctx: h.ctx, controller: h.controller })
   assert.equal(applied2, 0, '状态一致后二次调用无动作')
 })
