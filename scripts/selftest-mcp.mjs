@@ -1527,10 +1527,12 @@ await checkAsync('modelsCatalog：超时后迟到的真实抓取结果仍写缓�
 )
 
 // ── 中间层隐藏范围与覆盖表（P3b：state.ts 两个 getter）─────────────────
-check('stateMiddleLayerHides：缺省 disabled，只有显式 all 才切换', () => {
-  assert.equal(index.stateMiddleLayerHides({}), 'disabled')
-  assert.equal(index.stateMiddleLayerHides({ config: {} }), 'disabled')
+check('stateMiddleLayerHides：缺省 all（0.6.x 新默认），显式 disabled 与非法值回退 disabled', () => {
+  assert.equal(index.stateMiddleLayerHides({}), 'all')
+  assert.equal(index.stateMiddleLayerHides({ config: {} }), 'all')
   assert.equal(index.stateMiddleLayerHides({ config: { middleLayerHides: 'all' } }), 'all')
+  // 显式 disabled 仍是 disabled（'disabled' 档行为不变）
+  assert.equal(index.stateMiddleLayerHides({ config: { middleLayerHides: 'disabled' } }), 'disabled')
   // 非法值不得静默变成 all（会让所有模型突然失去全部 MCP 直连工具）
   assert.equal(index.stateMiddleLayerHides({ config: { middleLayerHides: 'nonsense' } }), 'disabled')
 })

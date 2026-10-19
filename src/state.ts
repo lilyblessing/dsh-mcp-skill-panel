@@ -111,12 +111,15 @@ export function stateAutoManageByRoute(state: StateFile): Record<string, boolean
 }
 
 /**
- * 中间层隐藏范围（缺省 'disabled' = 旧行为）。
- * 只有显式 'all' 才切换：非法值不得变成 all —— 那会让所有命中中间层的模型
- * 突然失去全部 MCP 直连工具（静默的大范围行为变化）。
+ * 中间层隐藏范围（缺省 'all' = 新默认，0.6.x 起翻转）。
+ * 未设置 → 'all'；显式 'all' → 'all'；显式 'disabled' 与非法值 → 'disabled'
+ * （保守回退）：非法值不得静默变 all —— 那会让所有命中中间层的模型突然失去
+ * 全部 MCP 直连工具（静默的大范围行为变化），宁可退回较窄的 disabled 档。
  */
 export function stateMiddleLayerHides(state: StateFile): 'disabled' | 'all' {
-  return state.config?.middleLayerHides === 'all' ? 'all' : 'disabled'
+  const raw = state.config?.middleLayerHides
+  if (raw === undefined) return 'all'
+  return raw === 'all' ? 'all' : 'disabled'
 }
 
 let stateCache: StateFile | null = null

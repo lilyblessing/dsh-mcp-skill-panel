@@ -627,7 +627,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // 初始值由下方 applyAutoManage 赋值（control/controller 构建后）
     autoManage: false,
     autoManageByRoute: {},
-    middleLayerHides: 'disabled',
+    middleLayerHides: 'all',
     autoManageMounted: false,
     applyAutoManage: () => {},
     // 初始值由下方 installRouteServices / decisionFor 赋值（服务 holder 建立后）
@@ -817,7 +817,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (!needed) return
     const disposers: Array<() => void> = []
     try {
-      disposers.push(installMcpVisibilityFilter(ctx, buildVisibility, gateFor))
+      disposers.push(installMcpVisibilityFilter(ctx, buildVisibility, gateFor, () => catalogRuntime.middleLayerHides))
       disposers.push(installMcpControlTools(ctx, control, controller))
       const offReaper = controller.startIdleReaper()
       disposers.push(() => offReaper())
@@ -849,11 +849,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     'mcp-skill-panel: autoManage teardown',
   )
   // 初始：config 默认 → state.json 的面板值覆盖（异步，立即生效）。
-  catalogRuntime.applyAutoManage(Boolean(config.autoManage), {}, 'disabled')
+  catalogRuntime.applyAutoManage(Boolean(config.autoManage), {}, 'all')
   // 去冗余重挂（保留分支原语义）：state.json 的 (总开关, 覆盖表, 隐藏范围) 与刚应用的
   // 三元组完全相同时不重挂 —— applyAutoManage 会 dispose/register 控制工具 → tools/change
   // → 全会话前缀 100% miss（评审 §3-I 红线）。PR 在此处是无条件重挂，移植时改回守卫。
-  let appliedKey = JSON.stringify([Boolean(config.autoManage), {}, 'disabled'])
+  let appliedKey = JSON.stringify([Boolean(config.autoManage), {}, 'all'])
   void readState().then((state) => {
     const master = typeof state.config?.autoManage === 'boolean' ? state.config.autoManage : Boolean(config.autoManage)
     const byRoute = stateAutoManageByRoute(state)
