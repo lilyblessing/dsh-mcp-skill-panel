@@ -88,7 +88,7 @@
 
 - 参数：`{ server, tool, arguments }`（server 用 catalog 里的 serverName）
 - 执行体：
-  1. 解析 loader entry（`include:agent-presets:mcp-<server>` 的完整 id 映射——从 loader entries 按 serverName 反查）
+  1. 解析 loader entry（0.2.0 的完整 id 形如 `agent-preset-registry:mcp-<server>`——前缀 = 拥有该 PresetTree 的 entry id，随部署而变；0.1.x 才是 `include:agent-presets:mcp-<server>`。从 loader entries 按 serverName 反查）
   2. **保活启用**：若 disabled → `update({disabled:false})`；引用计数 +1
   3. **等注册**：轮询 `tools.get('mcp__<server>__<tool>', scopeOf(exec.agent.ctx))`（间隔 50ms，超时 = server 的 toolCallTimeoutMs 或默认 60s）+ `tools/change` 事件加速
   4. **执行**：`ctx.tools.execute({callId: 'mcp-call-'+random, name, arguments, agent: exec.agent, signal})`——signal 用 AbortController 合并（超时 + 调用方取消）
