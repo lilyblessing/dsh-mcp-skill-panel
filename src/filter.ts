@@ -65,9 +65,11 @@
  * 1. `exec.parent !== void 0` —— 中间层内层派发（dsh-tools prepareExecution
  *    的 waterfall 在折叠后不到这里，带 parent 的 nested 会到，必须放行）；
  * 2. 非 `mcp__` 前缀 —— run_code / 原生工具一概不拦；
- * 3. 控制工具（CONTROL_TOOL_NAMES，来自 ./mcpcall，防前缀策略改动后误伤）；
- * 4. gate 未开 —— native 模型直连是正常用法，不因中间层策略打死别的模型；
- * 5. gate.on && !hideAll 且 server 可见 —— 用户显式启用，放行。
+ * 3. 官方 L1 loader（`mcp__<server>__load_tools`，0.2.3-alpha.1 起的按需加载
+ *    入口，见 {@link isL1LoaderTool}）—— 拦它 = 官方 L1 被面板掐死，全量放行；
+ * 4. 控制工具（CONTROL_TOOL_NAMES，来自 ./mcpcall，防前缀策略改动后误伤）；
+ * 5. gate 未开 —— native 模型直连是正常用法，不因中间层策略打死别的模型；
+ * 6. gate.on && !hideAll 且 server 可见 —— 用户显式启用，放行。
  *
  * 拦截 = gate.on 且（hideAll 或 server 不可见）；解析不出 server 的畸形名
  * 保守放行（与装配过滤同口径，不误伤）。判定与装配过滤**同源**：共用
@@ -88,6 +90,16 @@ import type { PreToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
 import { CONTROL_TOOL_NAMES } from './mcpcall'
 
 const MCP_TOOL_PREFIX = 'mcp__'
+
+/**
+ * 官方 L1 loader 工具判定（0.2.3-alpha.1 起）：`mcp__<server>__load_tools`。
+ * 宿主官方按需加载（toolLoading: on-demand）的入口工具，调用它只装载 schema、
+ * 不执行任何 MCP 工具本体。装配过滤与 T2 守卫对它**全量放行**（见两处调用点），
+ * 否则官方 L1 在中间层开启时会被面板彻底掐死。
+ */
+function isL1LoaderTool(name: string): boolean {
+  return name.startsWith(MCP_TOOL_PREFIX) && name.endsWith('__load_tools')
+}
 
 /** 从完整 tool name 解析 server 段（与 catalog.serverOfMcp 一致，保持本模块零依赖）。 */
 function serverOfMcp(name: string): string | null {
@@ -120,6 +132,9 @@ function shouldBlockDirectCall(
 ): boolean {
   // 非 mcp__ 前缀：run_code / 原生工具 / 控制工具（dsh_mcp_*）一概不拦
   if (!name.startsWith(MCP_TOOL_PREFIX)) return false
+  // 0.2.3 L1 loader 放行（mcp__<server>__load_tools）：官方按需加载机制的入口，
+  // 拦截它 = 官方 L1 在中间层开启时不可用。它不执行 MCP 工具本体，放行无直调风险。
+  if (isL1LoaderTool(name)) return false
   // 控制工具显式放行（前缀策略若变，这里兜底；G1 铁律：控制工具不得以 mcp_ 开头）
   if (CONTROL_TOOL_NAMES.has(name)) return false
   // gate 未开：native 模型直连是正常用法，不因中间层策略打死别的模型
@@ -145,6 +160,27 @@ interface SdkSchemaItem {
 
 /** T1 遮蔽的目标面：原方法签名（scope 透传，类型从简 —— devDep 0.1.2-rc.1 里 sdkSchemas 是 private）。 */
 type SdkSchemasFn = (scope?: unknown) => SdkSchemaItem[]
+
+/**
+ * C2（0.2.3 预适配）：T1 sdkSchemas 遮蔽的降级状态（/debug 只读曝光）。
+ * dsh ≥ 0.2.2 移除了 `ToolRuntime.sdkSchemas`，T1 遮蔽随之**未生效（inactive）**
+ * —— 不抛错、不崩，装配过滤（assembly.tools）与 T2 守卫照常工作，只是 PTC
+ * SDK 段失去按可见性遮蔽能力。该状态必须可观测（/debug `sdkMasking` 字段），
+ * 否则「hideAll 开了但 SDK 段没遮」无法定位。
+ */
+export interface SdkMaskingStatus {
+  /** true = T1 遮蔽已安装且生效；false = 降级/未安装。 */
+  active: boolean
+  /** 人读原因（inactive 时说明为何，active 时说明安装形态）。 */
+  reason: string
+}
+
+let sdkMaskingStatus: SdkMaskingStatus = { active: false, reason: '中间层未挂载（T1 未安装）' }
+
+/** /debug 读取 T1 遮蔽的当下状态（C2 降级可观测）。 */
+export function sdkMaskingStatusForDebug(): SdkMaskingStatus {
+  return { ...sdkMaskingStatus }
+}
 
 /** 从原型链解析出的原方法（遮蔽前调用面）。 */
 function resolveSdkSchemas(tools: object): SdkSchemasFn | undefined {
@@ -179,6 +215,10 @@ export function installMcpVisibilityFilter(
             // 控制工具：只投放给 gate 打开的模型
             if (CONTROL_TOOL_NAMES.has(name)) return gate.on
             if (!name.startsWith(MCP_TOOL_PREFIX)) return true
+            // 0.2.3 L1 loader（mcp__<server>__load_tools）保持可见：它是官方按需
+            // 加载的自面，被 hideAll/可见性过滤藏掉 = 官方 L1 对模型不可用
+            // （与 T2 守卫的放行口径一致，见 isL1LoaderTool）。
+            if (isL1LoaderTool(name)) return true
             // hideAll：命中中间层的模型一律不直连 MCP 工具
             if (gate.on && gate.hideAll) return false
             // 畸形工具名（解析不出 server）保守保留，不误伤
@@ -201,21 +241,28 @@ export function installMcpVisibilityFilter(
       if (!Object.prototype.hasOwnProperty.call(tools, SDK_SCHEMAS_SHADOW)) {
         const original = resolveSdkSchemas(tools)
         if (original !== undefined) {
+          // C2：遮蔽可安装 —— 置生效态（/debug sdkMasking.active=true）
+          sdkMaskingStatus = { active: true, reason: 'T1 遮蔽已安装（实例自有属性遮蔽原型 sdkSchemas）' }
           // install 时的自有属性描述符（正常为 undefined —— 原型方法；若有则是他人挂的，dispose 原样写回）
           const previous = Object.getOwnPropertyDescriptor(tools, 'sdkSchemas')
           const shadowed = (scope?: unknown): SdkSchemaItem[] => {
             const all = original.call(tools, scope)
             if (!Array.isArray(all)) return all
             // hideAll='all'：全局配置（与 agent 无关）直接生效 —— 剔除全部 mcp__*
-            // 条目，不做 scope→agent 反查（见文件头 T1）
+            // 条目，不做 scope→agent 反查（见文件头 T1）。官方 L1 loader 除外（同装配过滤口径）。
             if (hidesOf() === 'all') {
-              return all.filter((item) => !String(item?.name ?? '').startsWith(MCP_TOOL_PREFIX))
+              return all.filter((item) => {
+                const name = String(item?.name ?? '')
+                return isL1LoaderTool(name) || !name.startsWith(MCP_TOOL_PREFIX)
+              })
             }
             // 'disabled' 档：只按 server 可见性过滤（忽略 scope / gate 分流），见文件头 T1
             const visibility = buildVisibility()
             return all.filter((item) => {
               const name = String(item?.name ?? '')
               if (!name.startsWith(MCP_TOOL_PREFIX)) return true
+              // 官方 L1 loader 不按 server 可见性隐藏（同装配过滤口径）
+              if (isL1LoaderTool(name)) return true
               return !hiddenByServerVisibility(name, visibility)
             })
           }
@@ -235,9 +282,25 @@ export function installMcpVisibilityFilter(
             if (previous !== undefined) Object.defineProperty(tools, 'sdkSchemas', previous)
             else delete tools.sdkSchemas
             delete tools[SDK_SCHEMAS_SHADOW]
+            // C2：遮蔽随中间层卸载（restore 只在遮蔽安装成功时存在）
+            sdkMaskingStatus = { active: false, reason: 'T1 遮蔽已随中间层卸载（dispose）' }
+          }
+        } else {
+          // C2 降级：sdkSchemas 缺失（dsh ≥ 0.2.2 移除 ToolRuntime.sdkSchemas）。
+          // 显式走「未生效（inactive）」分支：不抛错、不崩，装配过滤与 T2 守卫
+          // 不受影响，仅 PTC SDK 段失去按可见性遮蔽能力 —— /debug sdkMasking 可观测。
+          sdkMaskingStatus = {
+            active: false,
+            reason: 'sdkSchemas missing（dsh ≥ 0.2.2 移除 ToolRuntime.sdkSchemas）：T1 遮蔽未生效，PTC SDK 段无法按可见性遮蔽；装配过滤与 T2 守卫不受影响',
           }
         }
+      } else {
+        // C2：遮蔽归首次 install 所有（幂等跳过），仍生效
+        sdkMaskingStatus = { active: true, reason: 'T1 遮蔽由首次 install 持有（幂等跳过重复安装）' }
       }
+    } else {
+      // C2：自测 harness 的 ctx 没有 tools 字段 → 遮蔽跳过（守卫监听照常注册）
+      sdkMaskingStatus = { active: false, reason: 'ctx.tools 不可用（自测 harness），T1 跳过' }
     }
 
     // ── T2：tools/pre-execute 直调守卫 ┊────────────────────────────────────

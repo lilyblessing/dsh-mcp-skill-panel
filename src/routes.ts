@@ -39,6 +39,7 @@ import { findStandingEntryById, standingDiag, standingMcpEntries, findStandingEn
 import { parseMcpServersJson, serversToPatchYaml, serversToRows, type McpServers, type McpRowConfig } from './mcp-convert'
 import { remountWorkspace, projectServerOwner, getActiveWorkspace } from './project-mcp'
 import { disabledToolsOf, setToolDisabled, setToolsDisabledBulk, resolveToolBulkTargets } from './tool-disable'
+import { sdkMaskingStatusForDebug } from './filter'
 import type { McpCallController } from './mcpcall'
 import type { CatalogRuntime, Config } from './index'
 import { activeRouteView, fetchProviderCatalog, modelsCacheFresh, type ProviderCatalogEntry, type RouteServices } from './model-route'
@@ -1248,10 +1249,24 @@ export function makeRoutes(
         } catch (error) {
           scopeDiag.error = messageOf(error)
         }
+        // C2（0.2.3 预适配）：T1 sdkSchemas 遮蔽的降级状态（inactive + 原因可观测）。
+        const sdkMasking = sdkMaskingStatusForDebug()
+        // L1（0.2.3 预适配）：宿主官方按需加载 loader 工具探测 —— 从当前能力表
+        // 扫 `mcp__<server>__load_tools`；非空即宿主已启用官方 L1（面板的装配
+        // 过滤与 T2 守卫对其全量放行，见 filter.ts isL1LoaderTool）。
+        const l1LoaderTools: string[] = []
+        for (const info of Object.values(catalogRuntime.catalog)) {
+          for (const tool of info.tools) {
+            const name = String(tool.name ?? '')
+            if (name.startsWith('mcp__') && name.endsWith('__load_tools')) l1LoaderTools.push(name)
+          }
+        }
         return {
           diag: catalogRuntime.diag,
           catalog,
           scopeDiag,
+          sdkMasking,
+          l1: { loaderTools: l1LoaderTools, loaderToolCount: l1LoaderTools.length },
           // 0.5.7：preset 行句柄来源的自证读数。`mountsSeen: 0` + `apiAvailable: true`
           // = 宿主 livePresetMounts() 看不到挂载（模块身份错位或宿主未挂 preset）；
           // `lastRowCount` 应为 preset 里的 MCP 行数（本机 10）。

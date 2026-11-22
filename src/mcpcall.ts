@@ -1467,6 +1467,7 @@ function registerMcpCallTool(ctx: Context, controller: McpCallController): () =>
       // 内层派发带 parent=exec.token 后，registry 折叠谓词把本次调用判为 nested
       // 子派发，PTC 模式下不再二次折叠。exec.token/rootCallId 由 dsh-tools 的
       // ToolRunContext 类型保证存在（defineTool 两参透传）。
+      // C1（0.2.3 预适配核对）：parent/rootCallId 透传契约在 0.2.3-alpha.1/2 未变，无需改。
       return controller
         .gateway(args.server, args.tool, normalizeArguments(args.arguments), exec.agent, exec.signal, undefined, {
           token: exec.token,
