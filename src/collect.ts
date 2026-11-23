@@ -14,7 +14,7 @@ import type { CatalogServer } from './catalog'
 import { serverOfMcp } from './catalog'
 import type { McpCallController } from './mcpcall'
 import type { CatalogRuntime } from './index'
-import { messageOf } from './util'
+import { agentRoots, messageOf } from './util'
 import { readState, stateAutoManageByRoute, stateToolBudget } from './state'
 import { pendingMcp } from './pending'
 import { listPresetMcpRows, presetDeclarationRowIdForRow } from './preset-mcp'
@@ -133,7 +133,7 @@ export function resolveAgent(ctx: Context, sessionId: string | undefined) {
     const byId = ctx.agents.get(sessionId as Parameters<typeof ctx.agents.get>[0])
     if (byId) return byId
   }
-  const roots = ctx.agents.roots()
+  const roots = agentRoots(ctx)
   if (roots.length > 0) return roots[0]
   return ctx.agents.list()[0]
 }

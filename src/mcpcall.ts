@@ -23,6 +23,8 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { Catalog, SearchHit } from './catalog'
 import { searchCatalog, listServer } from './catalog'
 import { isToolDisabled } from './tool-disable'
+import { dispatchInner } from './inner-exec'
+import { rootContext } from './util'
 import type { PresetMcpRow, PresetMcpClientConfig } from './preset-mcp'
 
 /** 空闲回收器扫描周期（ms）。 */
@@ -561,7 +563,7 @@ async function waitRegistered(
       }
       pollTimer = ctx.timeout(check, REGISTER_POLL_MS)
     }
-    offTools = ctx.root.on('tools/change', () => check())
+    offTools = rootContext(ctx).on('tools/change', () => check())
     // 上下文销毁 → 立即终局：此前无 dispose 监听时 Promise 永不 settle，会挂起 mcp_call。
     offDispose = ctx.effect(() => () => finish(new Error('context disposed')), 'mcp-skill-panel: waitRegistered')
     // 调用方中止（exec.signal）→ 立即终局。
@@ -604,7 +606,8 @@ async function callViaPresetViews(
     const views = collectToolViews(ctx, agent)
     const view = await waitRegistered(ctx, name, views, timeoutMs, signal)
     const execTools = view!.tools!
-    const result = (await execTools.execute({
+    // 0.2.3 内层派发桥：单次调用 + 原样带 parent（见 src/inner-exec.ts 头注释）。
+    const result = (await dispatchInner(ctx, execTools, {
       callId: `mcp-call-${randomUUID()}` as import('@deepseek-ai/dsh-llm').ToolCallId,
       name,
       arguments: args,
@@ -709,7 +712,8 @@ export async function gatewayCall(
     const view = await waitRegistered(ctx, name, views, timeoutMs, opts.signal)
     if (opts.signal.aborted) throw opts.signal.reason ?? new Error('aborted')
     const execTools = view!.tools!
-    const result = (await execTools.execute({
+    // 0.2.3 内层派发桥：单次调用 + 原样带 parent（见 src/inner-exec.ts 头注释）。
+    const result = (await dispatchInner(ctx, execTools, {
       callId: `mcp-call-${randomUUID()}` as import('@deepseek-ai/dsh-llm').ToolCallId,
       name,
       arguments: normArgs,
@@ -782,7 +786,8 @@ async function callViaLoaderEntry(
     const view = await waitRegistered(ctx, name, views, timeoutMs, opts.signal)
     if (opts.signal.aborted) throw opts.signal.reason ?? new Error('aborted')
     const execTools = view!.tools!
-    const result = (await execTools.execute({
+    // 0.2.3 内层派发桥：单次调用 + 原样带 parent（见 src/inner-exec.ts 头注释）。
+    const result = (await dispatchInner(ctx, execTools, {
       callId: `mcp-call-${randomUUID()}` as import('@deepseek-ai/dsh-llm').ToolCallId,
       name,
       arguments: normArgs,
@@ -1165,7 +1170,8 @@ export function createMcpCallController(ctx: Context, caches: McpControlCtx): Mc
         const view = await waitRegistered(ctx, name, views, timeoutMs, signal)
         // view 在 waitRegistered resolve 时必定存在（ToolView 已被解析）
         const execTools = view!.tools!
-        const result = (await execTools.execute({
+        // 0.2.3 内层派发桥：单次调用 + 原样带 parent（见 src/inner-exec.ts 头注释）。
+        const result = (await dispatchInner(ctx, execTools, {
           callId: `mcp-call-${randomUUID()}` as import('@deepseek-ai/dsh-llm').ToolCallId,
           name,
           arguments: args,

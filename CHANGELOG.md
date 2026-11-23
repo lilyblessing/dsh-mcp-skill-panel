@@ -4,6 +4,9 @@
 
 ## 0.7.0（未发布）
 
+- 🕳 **PTC 真隐藏（DSH `0.2.3-alpha.2`）**：`tools:sdk` 段改由 `system-prompt/assemble` 用官方 `renderToolsSdk` 重渲染（**A**，canary 逐字节校验、不符即 fail-open）；同时遮蔽 `ctx.tools.definitions`（**B′**，只对真 Agent 视图生效 —— 面板采集走 opaque scope key，误过滤会断 catalog），让 SDK 段 / native header / run_code bindings 同源隐藏，而 `executable()` 不受影响；`tools/pre-execute` 守卫改为按 callId 判别（**T2′**：`:ptc:` 程序内直调与 native 顶层直调拦截，`mcp-call-*` 内层派发放行）；`mcp-resource-servers` 段按同一 gate/可见性重渲染（**A-2**，借用窗口不再泄漏 server 名）。实测：`mcp__` 声明 20→0、system message 89,180→42,416 字符，借用窗口 `tools:sdk` 零 delta。
+- 🧪 **新增 `scripts/selftest-ptc-mask.mjs`**：19 条断言覆盖 A / A-2 / B′ / T2′（含 scope key 放行、canary fail-open、native 顶层直调）。
+- 🔧 **`/debug` 新增 `ptcMasking`**：`sdkSection` / `resourceServers` / `definitions` 三段状态位，canary 不符或渲染器解析失败可观测。
 - 🔗 **PTC 中间层适配**：DSH `0.2.1-rc.2` `mode: ptc` 下，中间层内层派发（`dsh_mcp_call` 执行 MCP 工具）带 `parent` / `rootCallId`，符合 registry 的 nested 调用约定；模型直调的拦截行为不变。
 - 🙈 **PTC 下 `tools:sdk` 段遮蔽**：PTC 模式 MCP 工具位于 `tools:sdk` 提示词段（不走 `assembly.tools`），本插件的遮蔽对该段同样生效；`middleLayerHides` 默认值改为 `'all'`。
 - 🧩 **适配 `dsh-agent-preset-registry@0.2.1`**：模块级 `livePresetMounts` / `standingMountFor` 已被上游移除，挂载句柄改走实例级 registry generations（旧宿主仍回退模块级通路，三段式降级）。

@@ -41,7 +41,8 @@
     "selftest:rowconfig": "node scripts/selftest-rowconfig.mjs",
     "selftest:mcp": "node scripts/selftest-mcp.mjs",
     "selftest:pending": "node scripts/selftest-pending.mjs",
-    "prepublishOnly": "npm run build && npm run verify && npm run selftest:rowconfig && npm run selftest:mcp && npm run selftest:pending"
+    "selftest:inner": "node scripts/selftest-inner-exec.mjs",
+    "prepublishOnly": "npm run build && npm run verify && npm run selftest:rowconfig && npm run selftest:mcp && npm run selftest:pending && npm run selftest:inner"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

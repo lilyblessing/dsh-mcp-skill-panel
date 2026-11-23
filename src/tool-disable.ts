@@ -19,6 +19,7 @@ import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import { readState, writeState } from './state'
 import { serverOfMcp } from './catalog'
 import { projectServerOwner } from './project-mcp'
+import { rootContext } from './util'
 
 /** 全局禁用：serverName → 禁用的工具全名集合（mcp__<server>__<tool>）。 */
 const disabledTools = new Map<string, Set<string>>()
@@ -252,7 +253,7 @@ function strEquals(a: string, b: string): boolean {
  */
 export function installToolDisableFilter(ctx: Context): () => void {
   return ctx.effect(() => {
-    const off = ctx.root.on(
+    const off = rootContext(ctx).on(
       'system-prompt/assemble',
       (
         assembly: PromptAssembly,

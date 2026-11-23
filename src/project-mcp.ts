@@ -30,7 +30,7 @@ import { parseMcpServersJson, resolveServersEnv, serversToRows } from './mcp-con
 import { serverOfMcp } from './catalog'
 import { isMcpEntry, serverNameOf } from './mcp-entry'
 import { readState } from './state'
-import { messageOf } from './util'
+import { messageOf, rootContext } from './util'
 
 /** 工作空间根下项目 MCP 的固定目录。 */
 const MCPS_DIR = '.dsh/mcps'
@@ -301,7 +301,7 @@ async function refresh(ctx: Context, root: string, state: WorkspaceState): Promi
  */
 function installProjectMcpVisibility(ctx: Context): () => void {
   return ctx.effect(() => {
-    const off = ctx.root.on(
+    const off = rootContext(ctx).on(
       'system-prompt/assemble',
       (
         assembly: PromptAssembly,
@@ -339,7 +339,7 @@ export function installProjectMcp(ctx: Context): () => void {
   const disposers: Array<() => void> = []
   disposers.push(
     ctx.effect(() => {
-      const off = ctx.root.on('agent/session-start', (payload: { agent?: { session?: { header?: { cwd?: unknown } } } }) => {
+      const off = rootContext(ctx).on('agent/session-start', (payload: { agent?: { session?: { header?: { cwd?: unknown } } } }) => {
         const cwd = payload?.agent?.session?.header?.cwd
         if (typeof cwd !== 'string' || cwd.length === 0) return
         void ensureWorkspace(ctx, cwd).catch((error) => {

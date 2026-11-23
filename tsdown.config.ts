@@ -109,6 +109,22 @@ export default defineConfig([
     },
   },
   {
+    // 内层派发桥（纯逻辑，无 @deepseek-ai import）单独产物：
+    // 供 scripts/selftest-inner-exec.mjs 在仓库内直接加载核验三段式编排与回退分支。
+    entry: ['src/inner-exec.ts'],
+    format: ['esm'],
+    outDir: 'lib',
+    target: 'node22',
+    platform: 'node',
+    external: [/^@deepseek-ai\//, /^node:/],
+    dts: false,
+    clean: false,
+    sourcemap: false,
+    outputOptions: {
+      entryFileNames: 'inner-exec.js',
+    },
+  },
+  {
     entry: ['src/client/index.ts'],
     // cjs：ModuleLoader factory 提供 require/module/exports，import 必须转成 require 调用
     format: ['cjs'],

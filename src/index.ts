@@ -65,7 +65,7 @@ import { syncPresetFiles } from './preset'
 import { applyPendingMcp } from './pending'
 import { installProjectMcp, rebuildOwnersFromState } from './project-mcp'
 import { loadDisabledTools, installToolDisableFilter } from './tool-disable'
-import { messageOf } from './util'
+import { agentRoots, messageOf, rootContext } from './util'
 
 export type { McpView, SkillsView, McpRow, SkillRow } from './shared-types'
 export type { DomainCaches } from './collect'
@@ -142,7 +142,14 @@ export { modelsCatalog, __resetModelsCache } from './routes'
 // 装配可见性过滤（selftest 回归护栏：G1 控制工具只投放给 gate 打开的模型 + G3 hideAll 语义）。
 // 导出理由：filter.ts 被 tsdown 打进带哈希的 chunk（lib/mcpcall-*.mjs），selftest 无法按路径 import，
 // 只能经构建产物 index 取用 —— 与 model-route 的导出同法。
-export { installMcpVisibilityFilter, type AssemblyGate } from './filter'
+export {
+  definitionsShadowStatusForDebug,
+  installMcpVisibilityFilter,
+  mcpServersMaskStatusForDebug,
+  sdkMaskingStatusForDebug,
+  sdkSectionMaskStatusForDebug,
+  type AssemblyGate,
+} from './filter'
 
 export const name = 'runtime-inventory'
 
@@ -357,7 +364,7 @@ async function snapshotEnabled(ctx: Context, runtime: CatalogRuntime, caches: Do
     let rootsCount = 0
     let listCount = 0
     try {
-      rootsCount = ctx.agents.roots().length
+      rootsCount = agentRoots(ctx).length
       listCount = ctx.agents.list().length
     } catch {
       rootsCount = -1
@@ -449,7 +456,7 @@ function buildMcpControl(ctx: Context, runtime: CatalogRuntime, config: Config, 
     serverName: string,
   ): Promise<PresetMcpRow | undefined> => {
     try {
-      const live = agent ?? ctx.agents.roots()[0] ?? ctx.agents.list()[0]
+      const live = agent ?? agentRoots(ctx)[0] ?? ctx.agents.list()[0]
       const presetId = live ? (ctx.agentPresets.composedPreset(live.ctx) ?? null) : null
       if (!presetId) return undefined
       const key = `${presetId}\0${serverName}`
@@ -706,9 +713,9 @@ export function apply(ctx: Context, config: Config = {}): void {
   const caches = createDomainCaches()
   ctx.effect(
     () => {
-      const offTools = ctx.root.on('tools/change', caches.invalidateMcp)
-      const offLoader = ctx.root.on('loader/partial-dispose', caches.invalidateMcp)
-      const offSkills = ctx.root.on('skills/change', caches.invalidateSkills)
+      const offTools = rootContext(ctx).on('tools/change', caches.invalidateMcp)
+      const offLoader = rootContext(ctx).on('loader/partial-dispose', caches.invalidateMcp)
+      const offSkills = rootContext(ctx).on('skills/change', caches.invalidateSkills)
       return () => {
         offTools()
         offLoader()
@@ -721,7 +728,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // tools/change 增量采集：对 enabled server 重新快照（含 mcp_call 临时启用后）。
   ctx.effect(() => {
     let scheduled = false
-    const off = ctx.root.on(
+    const off = rootContext(ctx).on(
       'tools/change',
       () => {
         catalogRuntime.diag.toolsChangeEvents += 1
@@ -889,7 +896,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // （无缓存可破坏）。immediate 模式不产生待办，此监听零副作用。
   ctx.effect(() => {
     let guard = false
-    const off = ctx.root.on(
+    const off = rootContext(ctx).on(
       'agent/session-start',
       () => {
         if (guard) return

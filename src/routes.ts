@@ -39,7 +39,12 @@ import { findStandingEntryById, standingDiag, standingMcpEntries, findStandingEn
 import { parseMcpServersJson, serversToPatchYaml, serversToRows, type McpServers, type McpRowConfig } from './mcp-convert'
 import { remountWorkspace, projectServerOwner, getActiveWorkspace } from './project-mcp'
 import { disabledToolsOf, setToolDisabled, setToolsDisabledBulk, resolveToolBulkTargets } from './tool-disable'
-import { sdkMaskingStatusForDebug } from './filter'
+import {
+  definitionsShadowStatusForDebug,
+  mcpServersMaskStatusForDebug,
+  sdkMaskingStatusForDebug,
+  sdkSectionMaskStatusForDebug,
+} from './filter'
 import type { McpCallController } from './mcpcall'
 import type { CatalogRuntime, Config } from './index'
 import { activeRouteView, fetchProviderCatalog, modelsCacheFresh, type ProviderCatalogEntry, type RouteServices } from './model-route'
@@ -1251,6 +1256,13 @@ export function makeRoutes(
         }
         // C2（0.2.3 预适配）：T1 sdkSchemas 遮蔽的降级状态（inactive + 原因可观测）。
         const sdkMasking = sdkMaskingStatusForDebug()
+        // 0.2.3-alpha.2 真隐藏：A（tools:sdk 段重渲染）与 B′（definitions 遮蔽）的
+        // 当下状态（canary 不符 / 渲染器解析失败 / 宿主无 definitions 都会在此显形）。
+        const ptcMasking = {
+          sdkSection: sdkSectionMaskStatusForDebug(),
+          resourceServers: mcpServersMaskStatusForDebug(),
+          definitions: definitionsShadowStatusForDebug(),
+        }
         // L1（0.2.3 预适配）：宿主官方按需加载 loader 工具探测 —— 从当前能力表
         // 扫 `mcp__<server>__load_tools`；非空即宿主已启用官方 L1（面板的装配
         // 过滤与 T2 守卫对其全量放行，见 filter.ts isL1LoaderTool）。
@@ -1266,6 +1278,7 @@ export function makeRoutes(
           catalog,
           scopeDiag,
           sdkMasking,
+          ptcMasking,
           l1: { loaderTools: l1LoaderTools, loaderToolCount: l1LoaderTools.length },
           // 0.5.7：preset 行句柄来源的自证读数。`mountsSeen: 0` + `apiAvailable: true`
           // = 宿主 livePresetMounts() 看不到挂载（模块身份错位或宿主未挂 preset）；

@@ -65,9 +65,11 @@
  * 1. `exec.parent !== void 0` —— 中间层内层派发（dsh-tools prepareExecution
  *    的 waterfall 在折叠后不到这里，带 parent 的 nested 会到，必须放行）；
  * 2. 非 `mcp__` 前缀 —— run_code / 原生工具一概不拦；
- * 3. 控制工具（CONTROL_TOOL_NAMES，来自 ./mcpcall，防前缀策略改动后误伤）；
- * 4. gate 未开 —— native 模型直连是正常用法，不因中间层策略打死别的模型；
- * 5. gate.on && !hideAll 且 server 可见 —— 用户显式启用，放行。
+ * 3. 官方 L1 loader（`mcp__<server>__load_tools`，0.2.3-alpha.1 起的按需加载
+ *    入口，见 {@link isL1LoaderTool}）—— 拦它 = 官方 L1 被面板掐死，全量放行；
+ * 4. 控制工具（CONTROL_TOOL_NAMES，来自 ./mcpcall，防前缀策略改动后误伤）；
+ * 5. gate 未开 —— native 模型直连是正常用法，不因中间层策略打死别的模型；
+ * 6. gate.on && !hideAll 且 server 可见 —— 用户显式启用，放行。
  *
  * 拦截 = gate.on 且（hideAll 或 server 不可见）；解析不出 server 的畸形名
  * 保守放行（与装配过滤同口径，不误伤）。判定与装配过滤**同源**：共用
@@ -86,4 +88,25 @@ export interface AssemblyGate {
     on: boolean;
     hideAll: boolean;
 }
+/**
+ * C2（0.2.3 预适配）：T1 sdkSchemas 遮蔽的降级状态（/debug 只读曝光）。
+ * dsh ≥ 0.2.2 移除了 `ToolRuntime.sdkSchemas`，T1 遮蔽随之**未生效（inactive）**
+ * —— 不抛错、不崩，装配过滤（assembly.tools）与 T2 守卫照常工作，只是 PTC
+ * SDK 段失去按可见性遮蔽能力。该状态必须可观测（/debug `sdkMasking` 字段），
+ * 否则「hideAll 开了但 SDK 段没遮」无法定位。
+ */
+export interface SdkMaskingStatus {
+    /** true = T1 遮蔽已安装且生效；false = 降级/未安装。 */
+    active: boolean;
+    /** 人读原因（inactive 时说明为何，active 时说明安装形态）。 */
+    reason: string;
+}
+/** /debug 读取 T1 遮蔽的当下状态（C2 降级可观测）。 */
+export declare function sdkMaskingStatusForDebug(): SdkMaskingStatus;
+/** /debug：A（tools:sdk 段重渲染）的当下状态。 */
+export declare function sdkSectionMaskStatusForDebug(): SdkMaskingStatus;
+/** /debug：A-2（mcp-resource-servers 名清单重渲染）的当下状态。 */
+export declare function mcpServersMaskStatusForDebug(): SdkMaskingStatus;
+/** /debug：B′（definitions 遮蔽）的当下状态。 */
+export declare function definitionsShadowStatusForDebug(): SdkMaskingStatus;
 export declare function installMcpVisibilityFilter(ctx: Context, buildVisibility: () => ReadonlyMap<string, boolean>, gateFor: (agent: Agent | undefined) => AssemblyGate, hidesFor?: () => 'disabled' | 'all'): () => void;

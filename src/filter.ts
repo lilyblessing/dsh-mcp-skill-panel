@@ -88,6 +88,7 @@ import type { PreToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
 // G1（评审 §4 BLOCK-2）：控制工具名只认 mcpcall.ts 的常量（批 A 已改名为 dsh_mcp_*）。
 // 若这里写旧名字面量，gate 恒不命中 → 控制工具对**所有**模型无条件投放，且无任何报错。
 import { CONTROL_TOOL_NAMES } from './mcpcall'
+import { rootContext } from './util'
 
 const MCP_TOOL_PREFIX = 'mcp__'
 
@@ -122,18 +123,21 @@ function hiddenByServerVisibility(name: string, visibility: ReadonlyMap<string, 
 }
 
 /**
- * T2 守卫判定：模型**直调**（exec.parent 为空）该工具是否应被拦。
- * 放行顺序见文件头 T2 说明；与装配过滤共用 serverOfMcp / hiddenByServerVisibility。
+ * 「该工具对这次装配是否隐藏」的**唯一判定核心**：装配过滤、SDK 段遮蔽（A）、
+ * definitions 遮蔽（B′）、直调守卫（T2′）四处共用，保证「提示词里看不到的，
+ * 也调不到」不随实现分叉。
+ *
+ * 放行顺序：非 mcp__ → L1 loader → 控制工具 → gate 未开 → 可见（或 hideAll）。
  */
-function shouldBlockDirectCall(
+function hiddenForAssembly(
   name: string,
   gate: AssemblyGate,
   visibility: ReadonlyMap<string, boolean>,
 ): boolean {
-  // 非 mcp__ 前缀：run_code / 原生工具 / 控制工具（dsh_mcp_*）一概不拦
+  // 非 mcp__ 前缀：run_code / 原生工具 / 控制工具（dsh_mcp_*）一概不隐藏
   if (!name.startsWith(MCP_TOOL_PREFIX)) return false
   // 0.2.3 L1 loader 放行（mcp__<server>__load_tools）：官方按需加载机制的入口，
-  // 拦截它 = 官方 L1 在中间层开启时不可用。它不执行 MCP 工具本体，放行无直调风险。
+  // 藏它 = 官方 L1 在中间层开启时不可用。它不执行 MCP 工具本体，放行无直调风险。
   if (isL1LoaderTool(name)) return false
   // 控制工具显式放行（前缀策略若变，这里兜底；G1 铁律：控制工具不得以 mcp_ 开头）
   if (CONTROL_TOOL_NAMES.has(name)) return false
@@ -142,6 +146,15 @@ function shouldBlockDirectCall(
   // 命中中间层 + hideAll：一律引导走控制工具
   if (gate.hideAll) return true
   return hiddenByServerVisibility(name, visibility)
+}
+
+/** T2′ 守卫判定（薄封装，语义见 {@link hiddenForAssembly}）。 */
+function shouldBlockDirectCall(
+  name: string,
+  gate: AssemblyGate,
+  visibility: ReadonlyMap<string, boolean>,
+): boolean {
+  return hiddenForAssembly(name, gate, visibility)
 }
 
 /** 一次装配的中间层判定：是否生效 + 是否隐藏全部 MCP server。 */
@@ -188,6 +201,376 @@ function resolveSdkSchemas(tools: object): SdkSchemasFn | undefined {
   return typeof fn === 'function' ? (fn as SdkSchemasFn) : undefined
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// 0.2.3-alpha.2 修复：A（tools:sdk 段重渲染）+ B′（definitions 遮蔽）+ T2′
+//
+// 背景：dsh ≥0.2.2 删掉 ToolRuntime.sdkSchemas（T1 因此 inactive）；PTC 的 SDK
+// 声明段改由 PtcExecutor.renderSdk 从 ToolsService.definitions(scope,toolSet) 渲染
+// （dsh-tools/lib/index.js:610），而 waterfall 载荷（:680-684）根本没有 tools 字段
+// → 旧的 assembly.tools 过滤同样空转。两个真实泄漏点：
+//   L1 常驻：用户开着 / hideAll='all' 的 server 工具照样进 SDK 段；
+//   L2 借用：dsh_mcp_call 临时拉起的 server 在 keepAlive 窗口内注册 → 进段。
+//
+// A：在 system-prompt/assemble 里找到 name='tools:sdk' 的 section，用官方
+//    renderToolsSdk（dsh-tool-executor-ptc 导出）按过滤后的 definitions 重建
+//    text。canary：先对**全量** definitions 重渲染一次，必须与宿主原文逐字节
+//    一致，否则说明宿主渲染形态变了 → fail-open（不改文本）+ 告警。
+// B′：遮蔽 ctx.tools.definitions（实例自有属性，链式调用原方法后过滤）。它是
+//    SDK 段、native tools header（:419）与 run_code bindings（schemas()，:590）
+//    三处投影的**同一数据源**；executable()（:530-534）不经它 → 执行面不变，
+//    面板的 dsh_mcp_call 内层派发不受影响。
+// T2′：守卫不再看 exec.parent（内层派发也带 parent），改看 callId —— 模型在
+//    run_code 里的直调 callId 形如 '<run_code callId>:ptc:<n>'，面板内层派发
+//    恒为 'mcp-call-<uuid>'。只治理前者，避免误伤宿主/其它插件的内部派发。
+// ───────────────────────────────────────────────────────────────────────────
+
+/** B′ 遮蔽标记（模块级 Symbol，作 ctx.tools 的自有属性，幂等 + dispose 归属）。 */
+const DEFINITIONS_SHADOW = Symbol('mcp-skill-panel: definitions shadow')
+
+/** definitions 的最小签名（真实返回 ToolDefinition[]，这里只关心 name）。 */
+type DefinitionsFn = (scope?: unknown, toolSet?: unknown) => Array<{ name?: string }>
+
+/** 渲染器看到的最小定义形状（与 PtcExecutor.renderSdk 的投影入参一致）。 */
+interface ToolDefinitionLike {
+  name?: string
+  output?: { schema?: unknown }
+}
+
+/** 官方 SDK 段渲染器的惰性句柄（拿到即可逐字节复现宿主渲染结果）。 */
+interface SdkRenderer {
+  render: (definitions: readonly ToolDefinitionLike[]) => string
+}
+
+let sdkRendererPromise: Promise<SdkRenderer | null> | undefined
+let sdkSectionMaskStatus: SdkMaskingStatus = { active: false, reason: '中间层未挂载（A 未安装）' }
+let mcpServersMaskStatus: SdkMaskingStatus = { active: false, reason: '中间层未挂载（A-2 未安装）' }
+let definitionsShadowStatus: SdkMaskingStatus = { active: false, reason: '中间层未挂载（B′ 未安装）' }
+let warnedSdkCanary = false
+let warnedSectionMask = false
+
+/** /debug：A（tools:sdk 段重渲染）的当下状态。 */
+export function sdkSectionMaskStatusForDebug(): SdkMaskingStatus {
+  return { ...sdkSectionMaskStatus }
+}
+
+/** /debug：A-2（mcp-resource-servers 名清单重渲染）的当下状态。 */
+export function mcpServersMaskStatusForDebug(): SdkMaskingStatus {
+  return { ...mcpServersMaskStatus }
+}
+
+/** /debug：B′（definitions 遮蔽）的当下状态。 */
+export function definitionsShadowStatusForDebug(): SdkMaskingStatus {
+  return { ...definitionsShadowStatus }
+}
+
+function resolveDefinitions(tools: object): DefinitionsFn | undefined {
+  const fn = (tools as { definitions?: unknown }).definitions
+  return typeof fn === 'function' ? (fn as DefinitionsFn) : undefined
+}
+
+/**
+ * 惰性装载官方渲染器。包不在本仓 deps 里：用**变量 specifier + 动态 import**
+ * 让类型检查与打包器都不静态解析它；宿主上解析失败（无 PTC executor / 换包名）
+ * 时返回 null，A 自动跳过（B′ 仍然生效）。宿主与插件共用同一份物理拷贝时
+ * （profile junction → workspace store），拿到的是同一个 renderToolsSdk。
+ */
+/**
+ * 先按裸 specifier import；失败则用 createRequire 解析出绝对路径再 import。
+ *
+ * 为什么需要两条路：ESM 的裸 specifier 只看插件自身的 node_modules 链 —— 部署目录
+ * 的 @deepseek-ai 是 web profile 的 junction，而 dsh-tool-executor-ptc 只存在于
+ * profiles\\node_modules（hoisted 层），ESM 走不到；CJS 的 createRequire 能命中
+ * 同一物理文件，解析后用 file URL import 即可拿到**宿主正在用的那一份**模块
+ * （同一 realpath → 同一个模块实例）。
+ */
+async function importBySpecifier(specifier: string): Promise<Record<string, unknown>> {
+  try {
+    return (await import(specifier)) as Record<string, unknown>
+  } catch {
+    const { createRequire } = await import('node:module')
+    const { pathToFileURL } = await import('node:url')
+    const requireFromBundle = createRequire(import.meta.url)
+    const resolved = requireFromBundle.resolve(specifier)
+    return (await import(pathToFileURL(resolved).href)) as Record<string, unknown>
+  }
+}
+function loadSdkRenderer(ctx: Context): Promise<SdkRenderer | null> {
+  if (sdkRendererPromise !== undefined) return sdkRendererPromise
+  sdkRendererPromise = (async (): Promise<SdkRenderer | null> => {
+    try {
+      const ptcSpecifier = '@deepseek-ai/dsh-tool-executor-ptc'
+      const toolsSpecifier = '@deepseek-ai/dsh-tools'
+      const [ptcModule, toolsModule] = await Promise.all([
+        importBySpecifier(ptcSpecifier),
+        importBySpecifier(toolsSpecifier),
+      ])
+      const renderToolsSdk = ptcModule.renderToolsSdk
+      const projectToolSchema = toolsModule.projectToolSchema
+      if (typeof renderToolsSdk !== 'function' || typeof projectToolSchema !== 'function') return null
+      const project = projectToolSchema as (definition: unknown, withOutput?: boolean) => Record<string, unknown>
+      const render = renderToolsSdk as (schemas: unknown[], format: string) => string
+      return {
+        render: (definitions) => {
+          // programFormat 只在渲染时需要；服务缺失 / 未 inject 时回退宿主默认值。
+          let format: string | undefined
+          try {
+            format = (ctx as { ptcRuntime?: { programFormat?: string } }).ptcRuntime?.programFormat
+          } catch {
+            format = undefined
+          }
+          return render(
+            definitions.map((definition) => ({
+              ...project(definition, false),
+              output: definition.output?.schema,
+            })),
+            format ?? 'function-body',
+          )
+        },
+      }
+    } catch {
+      return null
+    }
+  })()
+  return sdkRendererPromise
+}
+
+/**
+ * B′：遮蔽 ctx.tools.definitions（实例自有属性）。
+ *
+ * - 只在**给了 scope**（某个 agent 的视图）时过滤；全局视图原样返回 —— 面板 /
+ *   宿主自身的清单读取要完整，隐藏只针对「装配与绑定」两个消费点。
+ * - 无隐藏项时返回同一个数组引用（零扰动：宿主 committed.text 判定不误判）。
+ * - dispose 原样还原安装前的属性描述符（若无人挂过自有属性则删除，原型方法恢复）。
+ */
+function installDefinitionsShadow(
+  tools: object,
+  gateFor: (agent: Agent | undefined) => AssemblyGate,
+  buildVisibility: () => ReadonlyMap<string, boolean>,
+): () => void {
+  if (Object.prototype.hasOwnProperty.call(tools, DEFINITIONS_SHADOW)) {
+    definitionsShadowStatus = { active: true, reason: 'B′ 遮蔽由首次 install 持有（幂等跳过重复安装）' }
+    return () => {}
+  }
+  const original = resolveDefinitions(tools)
+  if (original === undefined) {
+    definitionsShadowStatus = { active: false, reason: 'ctx.tools.definitions 不存在（宿主版本不支持），B′ 跳过' }
+    return () => {}
+  }
+  const previous = Object.getOwnPropertyDescriptor(tools, 'definitions')
+  const shadowed = function (this: unknown, scope?: unknown, toolSet?: unknown): Array<{ name?: string }> {
+    const all = original.call(this ?? tools, scope, toolSet)
+    if (scope === undefined) return all
+    // 只对**真正的 Agent 视图**过滤。面板采集（collect.ts:124 ctx.tools.schemas(scopeKey)）、
+    // mcpcall 注册等待、cordis host-runner 沙箱 façade 传的都是 opaque scope key：
+    // 那类 key 交给 gateFor 会被当成「无路由」回退到总开关，从而把面板自己的采集链
+    // 一起过滤掉（采不到工具 → catalog 断流）。真 Agent 必带 session.requestHeader
+    // （assembleContextFor 在 dsh-agent/lib/index.js:406-412 直接 scope: agent）。
+    const agentLike = scope as { session?: { requestHeader?: unknown } }
+    if (typeof agentLike?.session?.requestHeader !== 'function') return all
+    // 判定源（路由解析 / loader 遍历）任何异常都 fail-open：definitions 是宿主的
+    // 热路径，抛错会连带打死装配与 run_code bindings。
+    let gate: AssemblyGate
+    let visibility: ReadonlyMap<string, boolean>
+    try {
+      gate = gateFor(scope as Agent)
+      if (!gate.on) return all
+      visibility = buildVisibility()
+    } catch {
+      return all
+    }
+    const kept = all.filter((definition) => !hiddenForAssembly(String(definition?.name ?? ''), gate, visibility))
+    return kept.length === all.length ? all : kept
+  }
+  Object.defineProperty(tools, DEFINITIONS_SHADOW, { value: true, enumerable: false, configurable: true })
+  Object.defineProperty(tools, 'definitions', {
+    configurable: true,
+    enumerable: previous?.enumerable ?? false,
+    writable: true,
+    value: shadowed,
+  })
+  definitionsShadowStatus = {
+    active: true,
+    reason: 'B′ definitions 遮蔽已安装（SDK 段 / native header / bindings 同步隐藏；executable 不受影响）',
+  }
+  return () => {
+    definitionsShadowStatus = { active: false, reason: '中间层已卸下（B′ 未安装）' }
+    if (previous === undefined) {
+      Reflect.deleteProperty(tools, 'definitions')
+      Reflect.deleteProperty(tools, DEFINITIONS_SHADOW)
+      return
+    }
+    Object.defineProperty(tools, 'definitions', previous)
+  }
+}
+
+/**
+ * A：在装配 waterfall 里重建 tools:sdk 段文本。
+ *
+ * 只在本步 gate 打开、段存在、且 canary（全量重渲染 == 宿主原文）通过时改写；
+ * 任何异常/不匹配都原样放行（fail-open），绝不让半截 TypeScript 进提示词。
+ */
+/** `mcp-resource-servers` 段的宿主模板（@deepseek-ai/dsh-mcp-resources/lib/index.js:128-132）。 */
+const MCP_SERVERS_PREFIX =
+  '## MCP resource servers\n\nUse list_mcp_resources, list_mcp_resource_templates, or read_mcp_resource with one of these names as the server argument: '
+
+/** 与宿主逐字同构地重渲染该段（names 已排序；空集 → 空串，宿主同样返回 ""）。 */
+function renderMcpServers(names: string[]): string {
+  return names.length === 0 ? '' : MCP_SERVERS_PREFIX + JSON.stringify(names) + '.'
+}
+
+/** 从宿主段文本里解析 server 名单（模板不符 → null，调用方 fail-open）。 */
+function parseMcpServers(text: string): string[] | null {
+  if (!text.startsWith(MCP_SERVERS_PREFIX)) return null
+  const tail = text.slice(MCP_SERVERS_PREFIX.length).trim()
+  if (!tail.endsWith('.')) return null
+  try {
+    const parsed: unknown = JSON.parse(tail.slice(0, -1))
+    return Array.isArray(parsed) ? parsed.map((name) => String(name)) : null
+  } catch {
+    return null
+  }
+}
+
+/** server 级隐藏判定（与 hiddenForAssembly 同源口径：hideAll 或该 server 不可见）。 */
+function hiddenServerForAssembly(
+  name: string,
+  gate: AssemblyGate,
+  visibility: ReadonlyMap<string, boolean>,
+): boolean {
+  return gate.on && (gate.hideAll || visibility.get(name) === false)
+}
+
+/**
+ * A-1：重渲染 `tools:sdk`（工具声明面）。
+ * canary = 用官方 renderToolsSdk 对**全量** definitions 重渲染，必须与宿主原文逐字节
+ * 相同；不符说明宿主渲染形态变了 → 不改文本（fail-open）+ 告警。
+ */
+async function maskToolsSdkSection(
+  ctx: Context,
+  sections: Array<{ name?: string; text?: unknown }> | undefined,
+  scope: Agent | undefined,
+  toolSet: unknown,
+  gate: AssemblyGate,
+  visibility: ReadonlyMap<string, boolean>,
+): Promise<void> {
+  const section = sections?.find((candidate) => candidate.name === 'tools:sdk')
+  if (section === undefined || typeof section.text !== 'string' || section.text.length === 0) return
+  const renderer = await loadSdkRenderer(ctx)
+  if (renderer === null) {
+    sdkSectionMaskStatus = {
+      active: false,
+      reason: '渲染器不可用（@deepseek-ai/dsh-tool-executor-ptc 解析失败或未导出 renderToolsSdk），A 跳过',
+    }
+    return
+  }
+  const definitionsFn = resolveDefinitions(ctx.tools as unknown as object)
+  if (definitionsFn === undefined) return
+  const definitions = definitionsFn.call(ctx.tools, scope, toolSet) as ToolDefinitionLike[]
+  if (definitions.length === 0) return
+  if (renderer.render(definitions) !== section.text) {
+    sdkSectionMaskStatus = { active: false, reason: 'canary 不符（宿主渲染形态可能已变），A fail-open' }
+    if (!warnedSdkCanary) {
+      warnedSdkCanary = true
+      ctx.logger.warn('mcp-skill-panel: tools:sdk canary mismatch — 本轮不改写段文本（fail-open）')
+    }
+    return
+  }
+  const kept = definitions.filter((definition) => !hiddenForAssembly(String(definition?.name ?? ''), gate, visibility))
+  if (kept.length !== definitions.length) {
+    section.text = renderer.render(kept)
+    sdkSectionMaskStatus = {
+      active: true,
+      reason: 'A 段重渲染已生效（本步隐藏 ' + (definitions.length - kept.length) + ' 个工具）',
+    }
+  } else {
+    sdkSectionMaskStatus = { active: true, reason: 'A 已安装（本步无可隐藏项）' }
+  }
+}
+
+/**
+ * A-2：重渲染 `mcp-resource-servers`（server 名清单）。
+ * 宿主按 scope 合并注册的 server 名（`dsh-mcp-resources/lib/index.js:126-131`），
+ * 借用窗口会让清单抖动并泄漏 server 名。这里按同一 gate/可见性过滤：隐藏的 server
+ * 不进清单；全部隐藏 → 空串（宿主对空集同样返回 ""，不产生 delta）。
+ */
+function maskMcpServersSection(
+  sections: Array<{ name?: string; text?: unknown }> | undefined,
+  gate: AssemblyGate,
+  visibility: ReadonlyMap<string, boolean>,
+): void {
+  const section = sections?.find((candidate) => candidate.name === 'mcp-resource-servers')
+  if (section === undefined || typeof section.text !== 'string' || section.text.length === 0) return
+  const names = parseMcpServers(section.text)
+  if (names === null) {
+    mcpServersMaskStatus = { active: false, reason: '模板不符（宿主段落格式可能已变），A-2 fail-open' }
+    return
+  }
+  if (renderMcpServers(names) !== section.text) {
+    mcpServersMaskStatus = { active: false, reason: 'canary 不符（宿主渲染形态可能已变），A-2 fail-open' }
+    return
+  }
+  const kept = names.filter((name) => !hiddenServerForAssembly(name, gate, visibility))
+  if (kept.length !== names.length) {
+    section.text = renderMcpServers(kept)
+    mcpServersMaskStatus = {
+      active: true,
+      reason: 'A-2 已生效（本步隐藏 ' + (names.length - kept.length) + ' 个 server 名）',
+    }
+  } else {
+    mcpServersMaskStatus = { active: true, reason: 'A-2 已安装（本步无可隐藏 server）' }
+  }
+}
+
+/**
+ * A：在装配 waterfall 里重渲染两处提示词段（工具声明 + MCP server 名清单）。
+ *
+ * 只在本步 gate 打开、且 scope 是**真 Agent 视图**时介入；任何异常/模板不符都
+ * 原样放行（fail-open），绝不让半截 TypeScript 或错乱清单进提示词。
+ */
+function installSdkSectionMask(
+  ctx: Context,
+  gateFor: (agent: Agent | undefined) => AssemblyGate,
+  buildVisibility: () => ReadonlyMap<string, boolean>,
+): () => void {
+  // 无 tools 服务（自测 harness / 非 PTC 宿主）就没有可遮蔽的数据源：不注册监听，
+  // 免得与既有装配过滤抢同一个事件的单测桩（真实 cordis waterfall 是链式组合）。
+  if ((ctx as { tools?: unknown }).tools === undefined) {
+    sdkSectionMaskStatus = { active: false, reason: 'ctx.tools 不可用（自测 harness / 非 PTC 宿主），A 跳过' }
+    return () => {}
+  }
+  return rootContext(ctx).on(
+    'system-prompt/assemble',
+    async (
+      assembly: PromptAssembly,
+      context: unknown,
+      next: () => Promise<PromptAssembly>,
+    ): Promise<PromptAssembly> => {
+      try {
+        const sections = (assembly as { sections?: Array<{ name?: string; text?: unknown }> }).sections
+        const scope = (context as { scope?: Agent } | undefined)?.scope
+        const agentLike = scope as { session?: { requestHeader?: unknown } } | undefined
+        if (typeof agentLike?.session?.requestHeader !== 'function') return next()
+        const gate = gateFor(scope)
+        if (!gate.on) return next()
+        const visibility = buildVisibility()
+        const toolSet = (context as { toolSet?: unknown } | undefined)?.toolSet
+        await maskToolsSdkSection(ctx, sections, scope, toolSet, gate, visibility)
+        maskMcpServersSection(sections, gate, visibility)
+        return next()
+      } catch (error) {
+        if (!warnedSectionMask) {
+          warnedSectionMask = true
+          ctx.logger.warn(
+            'mcp-skill-panel: prompt section mask failed: ' +
+              (error instanceof Error ? error.message : String(error)),
+          )
+        }
+        return next()
+      }
+    },
+  )
+}
+
 export function installMcpVisibilityFilter(
   ctx: Context,
   buildVisibility: () => ReadonlyMap<string, boolean>,
@@ -197,7 +580,7 @@ export function installMcpVisibilityFilter(
   hidesFor?: () => 'disabled' | 'all',
 ): () => void {
   return ctx.effect(() => {
-    const off = ctx.root.on(
+    const off = rootContext(ctx).on(
       'system-prompt/assemble',
       (
         assembly: PromptAssembly,
@@ -303,13 +686,31 @@ export function installMcpVisibilityFilter(
       sdkMaskingStatus = { active: false, reason: 'ctx.tools 不可用（自测 harness），T1 跳过' }
     }
 
+    // ── A + B′：0.2.3-alpha.2 的真隐藏（段文本重渲染 + definitions 遮蔽）──────
+    // 两者同源、互为校验：B′ 在数据源头过滤（SDK 段 / native header / run_code bindings
+    // 三处投影同一 definitions），A 在提示面用官方渲染器重渲染并做 canary 逐字节校验。
+    // 注意二者都依赖 definitions：宿主要是连 definitions 都没了，两者一起跳过（fail-open）
+    // —— 不存在「B′ 失效而 A 兜底」的情形，/debug 的 ptcMasking 字段按此如实读数。
+    const restoreDefinitions =
+      tools !== undefined ? installDefinitionsShadow(tools as unknown as object, gateFor, buildVisibility) : () => {}
+    const offSdkMask = installSdkSectionMask(ctx, gateFor, buildVisibility)
+
     // ── T2：tools/pre-execute 直调守卫 ┊────────────────────────────────────
-    const offGuard = ctx.root.on(
+    const offGuard = rootContext(ctx).on(
       'tools/pre-execute',
       (exec: ToolExecution, next: () => Promise<PreToolDecision>): Promise<PreToolDecision> => {
-        // 1) 中间层内层派发（dsh_mcp_call → ctx.tools.execute 的 nested 调用）必须放行：
-        //    prepareExecution 的 waterfall 只对未折叠（ready）执行触发，nested 全到这里
-        if (exec.parent !== void 0) return next()
+        // 1) 「模型直调」的两种形态（其余一律放行，避免误伤宿主 / 其它插件的内部派发）：
+        //    a. native 顶层直调：exec.parent 为空、callId 由模型签发（无 ':ptc:'）。
+        //       B′ 让它从工具清单消失，但模型仍可能凭记忆直调 → 必须在这里拦。
+        //    b. PTC 程序内 binding：callId 形如 '<run_code callId>:ptc:<n>'
+        //       （dsh-tool-executor-ptc lib/_chunks/ptc-calls:468）。
+        //    面板内层派发恒为 'mcp-call-<uuid>'（mcpcall.ts:611/717/791/1175），豁免；
+        //    带 parent 的非面板内部派发（含 'mcp-call-x:ptc:n' 形态）同样豁免。
+        const callId = String(exec.callId ?? '')
+        const isPanelInner = callId.startsWith('mcp-call-')
+        const isPtcBinding = callId.includes(':ptc:')
+        const isModelDirect = !isPanelInner && (isPtcBinding || exec.parent === void 0)
+        if (!isModelDirect) return next()
         const gate = gateFor(exec.agent)
         const visibility = buildVisibility()
         if (!shouldBlockDirectCall(exec.name, gate, visibility)) return next()
@@ -324,6 +725,8 @@ export function installMcpVisibilityFilter(
     return () => {
       off()
       offGuard()
+      offSdkMask()
+      restoreDefinitions()
       restoreSdkSchemas?.()
     }
   }, 'mcp-skill-panel: mcp visibility filter')
